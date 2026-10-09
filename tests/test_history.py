@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.history import PoseHistory, PoseSample, interpolate_angle
 from app.state import StateStore
@@ -131,8 +132,9 @@ class HistoryStateCase(unittest.IsolatedAsyncioTestCase):
             store.pose_history.reset("test fixture")
             store.pose_history.append(sample(now - 0.2, 0, profile=profile, calibration=calibration))
             store.pose_history.append(sample(now, 20, profile=profile, calibration=calibration))
-            await store.update_sync_config({"graphics_delay_ms": 100})
-            snapshot = store.snapshot()
+            with patch("app.state.time.monotonic", return_value=now):
+                await store.update_sync_config({"graphics_delay_ms": 100})
+                snapshot = store.snapshot()
             self.assertLess(snapshot["render_camera"]["pan"], 15)
             mark = await store.mark_world_target("top_left")
             self.assertEqual(mark["mapped_pan"], 20)

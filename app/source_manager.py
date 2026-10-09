@@ -55,12 +55,12 @@ class TrackingSourceManager:
             workers = list(self._workers.items())
         return {axis: worker.snapshot() for axis, worker in workers}
 
-    def set_reference(self, axis: str, angle: float) -> None:
+    def set_reference(self, axis: str, angle: float) -> str:
         with self._lock:
             worker = self._workers.get(axis)
         if worker is None:
             raise ValueError(f"{axis.title()} is not using quadrature GPIO")
-        worker.set_reference(angle)
+        return worker.set_reference(angle)
 
     def clear_reference(self, axis: str) -> None:
         with self._lock:

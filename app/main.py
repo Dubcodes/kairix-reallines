@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from .debug import DebugRecorder
 from .state import StateStore
 from .source_manager import TrackingSourceManager
+from .runtime import pose_publication_loop, tracking_loop
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
 
@@ -31,6 +32,7 @@ store = StateStore(DATA_DIR, debug)
 app = FastAPI(title="Kairix RealLines", version=VERSION)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 acquisition_task: asyncio.Task | None = None
+publication_task: asyncio.Task | None = None
 source_manager = TrackingSourceManager()
 
 
@@ -122,38 +124,24 @@ async def request_logging(request: Request, call_next):
     return response
 
 
-async def _acquisition_loop() -> None:
-    interval = 1.0 / 200.0
-    next_tick = time.monotonic()
-    tick = 0
-    while True:
-        now = time.monotonic()
-        async with store.lock:
-            store.sample_tick(source_manager.snapshots(), now)
-        tick += 1
-        if tick % 4 == 0:
-            await store.broadcast_pose()
-        next_tick += interval
-        if next_tick < time.monotonic() - interval:
-            next_tick = time.monotonic()
-        await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
-
-
 @app.on_event("startup")
 async def start_acquisition():
-    global acquisition_task
+    global acquisition_task, publication_task
     source_manager.configure(store.profile_index["active_id"], store.profile)
-    acquisition_task = asyncio.create_task(_acquisition_loop())
+    acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
+    publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
 
 
 @app.on_event("shutdown")
 async def stop_acquisition():
-    global acquisition_task
-    if acquisition_task:
-        acquisition_task.cancel()
+    global acquisition_task, publication_task
+    tasks = [task for task in (acquisition_task, publication_task) if task]
+    for task in tasks:
+        task.cancel()
+    if tasks:
         with contextlib.suppress(asyncio.CancelledError):
-            await acquisition_task
-        acquisition_task = None
+            await asyncio.gather(*tasks)
+    acquisition_task = publication_task = None
     source_manager.stop()
 
 

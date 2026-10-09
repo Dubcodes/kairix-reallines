@@ -15,7 +15,7 @@ from fastapi import WebSocket
 
 from .debug import DebugRecorder
 from .history import PoseHistory, PoseSample
-from .tracking import AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
+from .tracking import AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
@@ -126,7 +126,7 @@ class StateStore:
     def _current_pose_reference(self) -> tuple[Any, ...]:
         solution = self.world_calibration.get("solution") or {}
         runtime_references = tuple(
-            (axis, self.tracking["axes"].get(axis, {}).get("referenced"), self.tracking["axes"].get(axis, {}).get("reference_count"), self.tracking["axes"].get(axis, {}).get("reference_angle"))
+            (axis, self.tracking["axes"].get(axis, {}).get("reference_id"))
             for axis in REQUIRED_AXES
             if self.profile["axes"][axis]["source"] == "quadrature_gpio"
         )
@@ -355,6 +355,20 @@ class StateStore:
     def _world_calibration_matches_tracking(self) -> bool:
         return self.world_calibration.get("tracking_fingerprint") == tracking_fingerprint(self.profile)
 
+    def _current_tracking_reference_identity(self) -> dict[str, str | None]:
+        return {
+            axis: self.tracking["axes"].get(axis, {}).get("reference_id")
+            for axis in REQUIRED_AXES
+            if self.profile["axes"][axis]["source"] == "quadrature_gpio"
+        }
+
+    def _world_calibration_matches_reference(self) -> bool:
+        current = self._current_tracking_reference_identity()
+        stored = self.world_calibration.get("tracking_reference_identity")
+        if not current:
+            return stored in (None, {})
+        return stored == current and all(current.values())
+
     def _apply_axis_runtime(self, axis: str, raw: float | None = None, initial: bool = False) -> None:
         config = self.profile["axes"][axis]
         source = config["source"]
@@ -392,10 +406,11 @@ class StateStore:
             configured = bool(source_config.get("chip")) and source_config.get("line_a") is not None and source_config.get("line_b") is not None
             runtime.update({
                 "raw_count": int(previous.get("raw_count", 0)),
-                "relative_angle": float(previous.get("relative_angle", 0.0)),
+                "relative_angle": previous.get("relative_angle"),
                 "referenced": bool(previous.get("referenced", False)),
                 "reference_count": previous.get("reference_count"),
                 "reference_angle": float(previous.get("reference_angle", 0.0)),
+                "reference_id": previous.get("reference_id"),
                 "driver_alive": bool(previous.get("driver_alive", False)),
                 "configured": configured,
                 "diagnostics": deepcopy(previous.get("diagnostics", {})),
@@ -424,9 +439,10 @@ class StateStore:
         self.tracking["valid"] = all(self.tracking["axes"][axis]["valid"] for axis in REQUIRED_AXES)
         profile_match = self._world_calibration_matches_profile()
         fingerprint_match = self._world_calibration_matches_tracking()
+        reference_match = self._world_calibration_matches_reference()
         solution = self.world_calibration.get("solution")
         required_referenced = all(self.tracking["axes"][axis].get("source") != "quadrature_gpio" or self.tracking["axes"][axis].get("referenced") for axis in REQUIRED_AXES)
-        calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match and fingerprint_match and required_referenced)
+        calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match and fingerprint_match and required_referenced and reference_match)
         if calibration_valid:
             solved_camera = solution["camera"]
             self.camera.update({"x": solved_camera["x"], "y": solved_camera["y"], "z": solved_camera["z"], "height": solved_camera["z"], "roll": solution.get("fixed_roll", 0.0), "fov": solution.get("horizontal_fov", self.camera["fov"])})
@@ -444,6 +460,8 @@ class StateStore:
         self.camera["world_calibration_id"] = self.world_calibration_index["active_id"]
         self.camera["calibration_profile_match"] = profile_match
         self.camera["calibration_fingerprint_match"] = fingerprint_match
+        self.camera["calibration_reference_match"] = reference_match
+        self.camera["world_status"] = "VALID" if calibration_valid else "REFERENCE MISMATCH — RECALIBRATE" if not reference_match else "NOT VALID"
         self.camera["updated_mono"] = max((self.tracking["axes"][axis]["updated_mono"] for axis in REQUIRED_AXES), default=0.0)
         if sample:
             self._refresh_pose_reference_and_sample()
@@ -466,6 +484,7 @@ class StateStore:
             referenced = bool(sample.get("referenced", False))
             reference_count = sample.get("reference_count")
             reference_angle = float(sample.get("reference_angle", 0.0))
+            reference_id = sample.get("reference_id")
             configured = bool(sample.get("configured", False))
             driver_alive = bool(sample.get("driver_alive", False))
             runtime.update({
@@ -474,20 +493,21 @@ class StateStore:
                 "referenced": referenced,
                 "reference_count": reference_count,
                 "reference_angle": reference_angle,
+                "reference_id": reference_id,
                 "configured": configured,
                 "driver_alive": driver_alive,
                 "updated_mono": now,
-                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "configured", "driver_alive", "health", "status"}},
+                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "health", "status"}},
             })
-            runtime["relative_angle"] = raw_count * (360.0 / (float(self.profile["axes"][axis]["mapping"]["ppr"]) * int(self.profile["axes"][axis]["mapping"]["quadrature_multiplier"]) * float(self.profile["axes"][axis]["mapping"]["encoder_revs_per_camera_rev"])))
+            runtime["relative_angle"] = (raw_count - int(reference_count)) * degrees_per_count(self.profile["axes"][axis]) if referenced and reference_count is not None else None
             if sample.get("health") == "ERROR":
                 runtime.update({"valid": False, "value": None, "health": "ERROR", "status": sample.get("status", "GPIO driver error")})
             elif not configured:
                 runtime.update({"valid": False, "value": None, "health": "UNCONFIGURED", "status": sample.get("status", "GPIO is not configured")})
             elif not driver_alive:
                 runtime.update({"valid": False, "value": None, "health": "ERROR", "status": sample.get("status", "GPIO driver is not running")})
-            elif not referenced or reference_count is None:
-                runtime.update({"valid": False, "value": None, "health": "REFERENCE_REQUIRED", "status": "Set an encoder reference"})
+            elif not referenced or reference_count is None or not reference_id:
+                runtime.update({"valid": False, "value": None, "health": "REFERENCE_REQUIRED", "status": sample.get("status", "Set an encoder reference")})
             else:
                 runtime.update({
                     "valid": True,
@@ -593,7 +613,12 @@ class StateStore:
             self.debug.tracking("render_pose_interpolated", mode=sync["interpolation_mode"], delay_ms=sync["graphics_delay_ms"], effective_ms=sync["effective_difference_ms"], pan=render_camera.get("pan"), tilt=render_camera.get("tilt"))
         world = deepcopy(self.world_calibration)
         world["target_points"] = target_points(world["target"])
-        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "tracking_fingerprint": tracking_fingerprint(self.profile)}
+        reference_match = self._world_calibration_matches_reference()
+        if not reference_match and world.get("solution"):
+            world["effective_status"] = "REFERENCE MISMATCH — RECALIBRATE"
+        else:
+            world["effective_status"] = world.get("status")
+        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "tracking_reference_identity": self._current_tracking_reference_identity()}
         return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
@@ -602,7 +627,7 @@ class StateStore:
         self._refresh_camera_from_tracking(sample=False)
         render_camera, sync = self._render_pose_state(now)
         compact_axes = {
-            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "relative_angle", "driver_alive", "diagnostics") if key in runtime}
+            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "driver_alive", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
         return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "axes": compact_axes}, "sync": sync, "server_mono": now}
@@ -898,6 +923,16 @@ class StateStore:
         target = TARGET_POINTS[(TARGET_POINTS.index(current) + step) % len(TARGET_POINTS)]
         return await self.select_world_target(target)
 
+    def _validate_observation_reference_identities(self, calibration: dict[str, Any]) -> dict[str, str | None]:
+        current = self._current_tracking_reference_identity()
+        if current and not all(current.values()):
+            raise CalibrationError("All required quadrature axes must be referenced before solving")
+        for target, observation in (calibration.get("observations") or {}).items():
+            captured = observation.get("tracking_reference_identity") or {}
+            if captured != current:
+                raise CalibrationError(f"{target} was captured against a different encoder reference; re-mark all points")
+        return current
+
     async def mark_world_target(self, target: str | None = None) -> dict[str, Any]:
         selected = target or self.world_calibration.get("current_target", TARGET_POINTS[0])
         if selected not in TARGET_POINTS:
@@ -915,6 +950,7 @@ class StateStore:
             "mapped_pan": float(pan["value"]),
             "mapped_tilt": float(tilt["value"]),
             "setup_profile_id": self.profile_index["active_id"],
+            "tracking_reference_identity": deepcopy(self._current_tracking_reference_identity()),
             "synthetic": False,
         }
         async with self.lock:
@@ -946,6 +982,7 @@ class StateStore:
         calibration_id = candidate["id"]
         self.debug.app("calibration_solve_started", calibration_id=calibration_id, observation_count=len(candidate.get("observations") or {}))
         try:
+            reference_identity = self._validate_observation_reference_identities(candidate)
             solution = solve_world_calibration(candidate)
         except CalibrationError as exc:
             async with self.lock:
@@ -956,7 +993,7 @@ class StateStore:
             await self.broadcast_state()
             raise
         async with self.lock:
-            self.world_calibration.update({"solution": solution, "valid": True, "status": "CALIBRATION VALID", "last_solve_error": None, "tracking_fingerprint": tracking_fingerprint(self.profile)})
+            self.world_calibration.update({"solution": solution, "valid": True, "status": "CALIBRATION VALID", "last_solve_error": None, "tracking_fingerprint": tracking_fingerprint(self.profile), "tracking_reference_identity": deepcopy(reference_identity)})
             self._write_active_world_calibration_locked()
             self._refresh_camera_from_tracking()
         self.debug.app("calibration_solve_success", calibration_id=calibration_id, camera=solution["camera"], pan_offset=solution["pan_offset"], tilt_offset=solution["tilt_offset"], rms=solution["rms_angular_error"], maximum=solution["max_angular_error"], residuals=solution["residuals"])
@@ -966,7 +1003,7 @@ class StateStore:
 
     async def reset_world_calibration(self) -> None:
         async with self.lock:
-            self.world_calibration.update({"current_target": TARGET_POINTS[0], "observations": {}, "solution": None, "valid": False, "status": "NOT CALIBRATED", "last_solve_error": None})
+            self.world_calibration.update({"current_target": TARGET_POINTS[0], "observations": {}, "solution": None, "valid": False, "status": "NOT CALIBRATED", "last_solve_error": None, "tracking_reference_identity": None})
             self._write_active_world_calibration_locked()
             self._refresh_camera_from_tracking()
         self.debug.app("world_calibration_reset", calibration_id=self.world_calibration["id"])
@@ -981,6 +1018,9 @@ class StateStore:
             update["target"] = values["target"]
         await self.update_world_calibration(update)
         observations = synthetic_observations(self.world_calibration, camera, pan_offset, tilt_offset)
+        reference_identity = self._current_tracking_reference_identity()
+        for observation in observations.values():
+            observation["tracking_reference_identity"] = deepcopy(reference_identity)
         async with self.lock:
             self.world_calibration["observations"] = observations
             self.world_calibration["synthetic_ground_truth"] = {"camera": camera, "pan_offset": pan_offset, "tilt_offset": tilt_offset}
