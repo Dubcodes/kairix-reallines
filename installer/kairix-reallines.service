@@ -1,0 +1,16 @@
+[Unit]
+Description=Kairix RealLines camera tracking GFX
+After=network.target
+
+[Service]
+Type=simple
+User=kairix
+Group=kairix
+WorkingDirectory=/opt/kairix-reallines/current
+Environment=KAIRIX_DATA_DIR=/var/lib/kairix-reallines
+ExecStart=/opt/kairix-reallines/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080 --workers 1
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

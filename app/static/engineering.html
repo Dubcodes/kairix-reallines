@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kairix RealLines — Engineering</title><link rel="stylesheet" href="/static/css/common.css"></head>
+<body data-page="engineering"><header><div><h1>Kairix RealLines — Engineering</h1><div class="small">v0.0.4-dev · engineering/navigation hub</div></div><span id="trackingStatus"></span></header>
+<div class="grid">
+<section class="panel"><h2>Interfaces</h2><div class="row"><a class="button" href="/control">Control</a><a class="button" href="/calibration">Calibration</a><a class="button" href="/gfx" target="_blank">GFX</a></div><div class="small">Engineering is intentionally the only navigation hub.</div></section>
+<section class="panel"><h2>System</h2><div id="system" class="kv"></div><div class="row"><a class="button" href="/api/diagnostics/bundle">Download diagnostic bundle</a></div></section>
+<section class="panel"><h2>Setup profile</h2><div class="profile-controls"><label>Active<select id="profileSelect"></select></label><label>Name<input id="profileName" type="text"></label></div><div class="row compact-actions"><button id="newProfile">New</button><button id="duplicateProfile">Duplicate</button><button id="renameProfile">Rename</button><button id="deleteProfile" class="danger subtle">Delete</button></div><div id="profileError" class="form-error"></div></section>
+<section class="panel span-all"><h2>Tracking axes</h2><p class="small">Pan and Tilt are required for valid tracking. Zoom and Focus may be disabled. Hardware source types are configuration placeholders until their drivers are implemented.</p><div id="trackingAxes" class="axis-grid"></div></section>
+<section class="panel"><h2>Camera simulator</h2>
+<div class="row"><label>Pan raw</label><input id="pan" type="range" min="-180" max="180" step="0.1" value="0"><output id="panOut"></output></div>
+<div class="row"><label>Tilt raw</label><input id="tilt" type="range" min="-90" max="90" step="0.1" value="-8"><output id="tiltOut"></output></div>
+<div class="row"><label>Horizontal FOV</label><input id="fov" type="range" min="15" max="100" step="0.1" value="60"><output id="fovOut"></output></div>
+<div class="row"><label>Camera height</label><input id="height" type="range" min="0.2" max="5" step="0.05" value="1.7"><output id="heightOut"></output></div>
+</section>
+<section class="panel"><h2>Live tracking state</h2><div id="live" class="kv"></div></section>
+<section class="panel"><h2>Graphics sync / history</h2><div id="syncDiagnostics" class="kv"></div></section>
+<section class="panel"><h2>Debug recording</h2><p>Full development logging is enabled by default. Frontend errors, camera inputs, tracking states, WebSocket events and state mutations are recorded.</p><div class="row"><button id="debugOn">Enable</button><button id="debugOff">Disable</button></div><div id="debugState" class="small"></div></section>
+</div>
+<dialog id="engineeringDialog"><form method="dialog"><h2 id="dialogTitle"></h2><p id="dialogMessage" class="small"></p><input id="dialogInput" type="text"><div class="row dialog-actions"><button id="dialogCancel" type="button">Cancel</button><button id="dialogAccept" value="accept" class="primary">OK</button></div></form></dialog>
+<script type="module" src="/static/js/engineering.js?v=tracking1"></script></body></html>
