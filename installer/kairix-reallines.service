@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=kairix
 Group=kairix
+SupplementaryGroups=gpio
 WorkingDirectory=/opt/kairix-reallines/current
 Environment=KAIRIX_DATA_DIR=/var/lib/kairix-reallines
 ExecStart=/opt/kairix-reallines/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080 --workers 1

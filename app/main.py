@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .debug import DebugRecorder
 from .state import StateStore
+from .source_manager import TrackingSourceManager
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
 
@@ -29,7 +30,8 @@ store = StateStore(DATA_DIR, debug)
 
 app = FastAPI(title="Kairix RealLines", version=VERSION)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
-history_task: asyncio.Task | None = None
+acquisition_task: asyncio.Task | None = None
+source_manager = TrackingSourceManager()
 
 
 class CameraUpdate(BaseModel):
@@ -95,6 +97,10 @@ class CalibrationMark(BaseModel):
     mark: str
 
 
+class EncoderReference(BaseModel):
+    angle: float = 0.0
+
+
 class FrontendLog(BaseModel):
     level: str = "info"
     page: str = "unknown"
@@ -116,20 +122,39 @@ async def request_logging(request: Request, call_next):
     return response
 
 
+async def _acquisition_loop() -> None:
+    interval = 1.0 / 200.0
+    next_tick = time.monotonic()
+    tick = 0
+    while True:
+        now = time.monotonic()
+        async with store.lock:
+            store.sample_tick(source_manager.snapshots(), now)
+        tick += 1
+        if tick % 4 == 0:
+            await store.broadcast_pose()
+        next_tick += interval
+        if next_tick < time.monotonic() - interval:
+            next_tick = time.monotonic()
+        await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+
+
 @app.on_event("startup")
-async def start_history_heartbeat():
-    global history_task
-    history_task = asyncio.create_task(store.history_heartbeat())
+async def start_acquisition():
+    global acquisition_task
+    source_manager.configure(store.profile_index["active_id"], store.profile)
+    acquisition_task = asyncio.create_task(_acquisition_loop())
 
 
 @app.on_event("shutdown")
-async def stop_history_heartbeat():
-    global history_task
-    if history_task:
-        history_task.cancel()
+async def stop_acquisition():
+    global acquisition_task
+    if acquisition_task:
+        acquisition_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await history_task
-        history_task = None
+            await acquisition_task
+        acquisition_task = None
+    source_manager.stop()
 
 
 @app.get("/")
@@ -160,6 +185,11 @@ async def gfx():
 @app.get("/api/state")
 async def get_state():
     return store.snapshot()
+
+
+@app.get("/api/pose")
+async def get_pose():
+    return store.pose_snapshot()
 
 
 @app.get("/api/system")
@@ -212,7 +242,9 @@ async def reset_sync_delay():
 
 @app.post("/api/profiles")
 async def create_profile(body: NamedCreate):
-    return await store.create_profile(body.name)
+    result = await store.create_profile(body.name)
+    source_manager.configure(store.profile_index["active_id"], store.profile)
+    return result
 
 
 @app.post("/api/profiles/{profile_id}/select")
@@ -220,6 +252,7 @@ async def select_profile(profile_id: str):
     profile = await store.select_profile(profile_id)
     if profile is None:
         raise HTTPException(404, "Setup profile not found")
+    source_manager.configure(store.profile_index["active_id"], store.profile)
     return profile
 
 
@@ -236,6 +269,7 @@ async def duplicate_profile(profile_id: str, body: NamedCreate | None = None):
     profile = await store.duplicate_profile(profile_id, body.name if body else None)
     if profile is None:
         raise HTTPException(404, "Setup profile not found")
+    source_manager.configure(store.profile_index["active_id"], store.profile)
     return profile
 
 
@@ -243,6 +277,7 @@ async def duplicate_profile(profile_id: str, body: NamedCreate | None = None):
 async def delete_profile(profile_id: str):
     if not await store.delete_profile(profile_id):
         raise HTTPException(400, "Setup profile not found or at least one profile must remain")
+    source_manager.configure(store.profile_index["active_id"], store.profile)
     return {"ok": True}
 
 
@@ -255,7 +290,34 @@ async def update_axis_config(profile_id: str, axis: str, body: AxisConfigUpdate)
         raise HTTPException(400, str(exc)) from exc
     if config is None:
         raise HTTPException(404, "Active setup profile or axis not found")
+    source_manager.configure(store.profile_index["active_id"], store.profile)
     return config
+
+
+@app.post("/api/tracking/{axis}/reference")
+async def set_encoder_reference(axis: str, body: EncoderReference):
+    if axis not in {"pan", "tilt", "zoom", "focus"}:
+        raise HTTPException(404, "Unknown tracking axis")
+    try:
+        source_manager.set_reference(axis, body.angle)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    async with store.lock:
+        store.sample_tick(source_manager.snapshots())
+    await store.broadcast_state()
+    return store.tracking["axes"][axis]
+
+
+@app.delete("/api/tracking/{axis}/reference")
+async def clear_encoder_reference(axis: str):
+    try:
+        source_manager.clear_reference(axis)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    async with store.lock:
+        store.sample_tick(source_manager.snapshots())
+    await store.broadcast_state()
+    return {"ok": True}
 
 
 @app.get("/api/world-calibration")

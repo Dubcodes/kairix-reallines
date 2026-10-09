@@ -10,40 +10,64 @@ export async function api(path, options={}) {
 export function connectState(onState, page='unknown') {
   let ws;
   let reconnectTimer;
-  let pollTimer;
+  let statePollTimer;
+  let posePollTimer;
   let stopped = false;
   let polling = false;
-  const deliver = (data) => {
+  let currentState = null;
+  const deliver = (data, type='state') => {
+    currentState = data;
     try {
-      onState(data);
+      onState(data, {type});
     } catch (e) {
       console.error(e);
       logFrontend(page, page === 'control' ? 'control_initialization_failed' : 'state_handler_error', {error:String(e)});
     }
   };
+  const deliverPose = (pose) => {
+    if (!currentState) return;
+    currentState = {...currentState, ...pose, tracking:{...currentState.tracking, ...pose.tracking, axes:{...currentState.tracking.axes, ...(pose.tracking?.axes||{})}}};
+    deliver(currentState, 'pose');
+  };
   const fetchState = async () => {
     try {
       const response = await fetch('/api/state', {cache:'no-store'});
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-      deliver(await response.json());
+      deliver(await response.json(), 'state');
     } catch (e) {
       console.error(e);
       logFrontend(page, 'state_fetch_error', {error:String(e)});
     }
   };
+  const fetchPose = async () => {
+    try {
+      const response = await fetch('/api/pose', {cache:'no-store'});
+      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+      deliverPose(await response.json());
+    } catch (e) {
+      console.error(e);
+    }
+  };
   const startPolling = () => {
     if (polling || stopped) return;
     polling = true;
-    const poll = async () => {
+    const pollState = async () => {
       if (!polling || stopped) return;
       await fetchState();
-      pollTimer = setTimeout(poll, 500);
+      statePollTimer = setTimeout(pollState, 2000);
     };
-    poll();
+    const pollPose = async () => {
+      if (!polling || stopped) return;
+      await fetchPose();
+      posePollTimer = setTimeout(pollPose, 50);
+    };
+    pollState();
+    pollPose();
   };
   const stopPolling = () => {
     polling = false;
-    clearTimeout(pollTimer);
+    clearTimeout(statePollTimer);
+    clearTimeout(posePollTimer);
   };
   const connect = () => {
     if (stopped) return;
@@ -56,7 +80,8 @@ export function connectState(onState, page='unknown') {
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === 'state') deliver(msg.data);
+        if (msg.type === 'state') deliver(msg.data, 'state');
+        if (msg.type === 'pose') deliverPose(msg.data);
       } catch (e) {
         console.error(e);
         logFrontend(page, page === 'control' ? 'control_initialization_failed' : 'ws_message_error', {error:String(e)});

@@ -21,7 +21,14 @@ echo "User: $DEV_USER"
 echo "Repo: $REPO"
 
 apt-get update
-apt-get install -y python3-venv python3-pip samba
+apt-get install -y python3-venv python3-pip samba gpiod
+getent group gpio >/dev/null || groupadd --system gpio
+usermod -a -G gpio "$DEV_USER"
+cat > /etc/udev/rules.d/60-kairix-reallines-gpio.rules <<'UDEV_EOF'
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+UDEV_EOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=gpio || true
 
 sudo -u "$DEV_USER" python3 -m venv "$VENV"
 sudo -u "$DEV_USER" "$VENV/bin/pip" install --upgrade pip
@@ -36,6 +43,7 @@ After=network.target
 Type=simple
 User=$DEV_USER
 Group=$DEV_USER
+SupplementaryGroups=gpio
 WorkingDirectory=$REPO
 Environment=KAIRIX_DATA_DIR=$REPO/data
 ExecStart=$VENV/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload

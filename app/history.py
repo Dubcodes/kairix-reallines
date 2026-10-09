@@ -102,11 +102,13 @@ class PoseHistory:
     def stats(self, now: float) -> dict[str, Any]:
         oldest = self.samples[0].timestamp if self.samples else None
         newest = self.samples[-1].timestamp if self.samples else None
+        span = newest - oldest if oldest is not None and newest is not None else 0.0
         return {
             "duration_seconds": self.duration_seconds,
             "sample_count": len(self.samples),
             "oldest_age_ms": round((now - oldest) * 1000.0, 3) if oldest is not None else None,
             "newest_age_ms": round((now - newest) * 1000.0, 3) if newest is not None else None,
+            "sample_rate_hz": round((len(self.samples) - 1) / span, 2) if len(self.samples) > 1 and span > 0 else None,
             "generation": self.generation,
             "last_reset_reason": self.last_reset_reason,
         }

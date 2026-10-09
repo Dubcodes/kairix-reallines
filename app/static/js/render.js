@@ -58,7 +58,7 @@ export function renderScene(canvas, state, options={}) {
   ctx.fillRect(0,0,w,h);
 
   const camera = options.camera || state.render_camera || state.camera;
-  if (camera?.valid) for (const item of state.scene.items || []) {
+  if (camera?.valid && camera?.world_valid) for (const item of state.scene.items || []) {
     if (!isItemEffectivelyVisible(item, state.scene)) continue;
     if (item.type === 'line') {
       const a = projectPoint({x:+item.x1,y:+item.y1,z:+item.z1},camera,w,h);

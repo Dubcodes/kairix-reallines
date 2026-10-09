@@ -15,7 +15,7 @@ from fastapi import WebSocket
 
 from .debug import DebugRecorder
 from .history import PoseHistory, PoseSample
-from .tracking import AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, map_raw_value, merge_axis_update, normalise_axis_config
+from .tracking import AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
@@ -125,19 +125,24 @@ class StateStore:
 
     def _current_pose_reference(self) -> tuple[Any, ...]:
         solution = self.world_calibration.get("solution") or {}
-        mappings = tuple((axis, self.profile["axes"][axis]["source"], self.profile["axes"][axis]["mapping"]["direction"], self.profile["axes"][axis]["mapping"]["offset"]) for axis in ("pan", "tilt"))
+        runtime_references = tuple(
+            (axis, self.tracking["axes"].get(axis, {}).get("referenced"), self.tracking["axes"].get(axis, {}).get("reference_count"), self.tracking["axes"].get(axis, {}).get("reference_angle"))
+            for axis in REQUIRED_AXES
+            if self.profile["axes"][axis]["source"] == "quadrature_gpio"
+        )
         return (
             self.profile_index["active_id"],
+            tracking_fingerprint(self.profile),
             self.world_calibration_index["active_id"],
             bool(self.world_calibration.get("valid")),
             solution.get("solved_at"),
-            mappings,
+            runtime_references,
             self.camera.get("fov"),
             self.camera.get("height"),
         )
 
     def _record_pose_sample(self, timestamp: float | None = None) -> None:
-        now = time.perf_counter() if timestamp is None else float(timestamp)
+        now = time.monotonic() if timestamp is None else float(timestamp)
         if self.pose_history.samples and now <= self.pose_history.samples[-1].timestamp:
             now = self.pose_history.samples[-1].timestamp + 1e-9
         pan = self.tracking["axes"].get("pan", {})
@@ -174,6 +179,8 @@ class StateStore:
 
     def _render_pose_state(self, now: float) -> tuple[dict[str, Any], dict[str, Any]]:
         requested = now - self.sync_config["graphics_delay_ms"] / 1000.0
+        if self.sync_config["graphics_delay_ms"] == 0 and self.pose_history.samples:
+            requested = self.pose_history.samples[-1].timestamp
         result = self.pose_history.query(requested)
         pose = result.get("pose")
         if pose is None:
@@ -300,6 +307,8 @@ class StateStore:
         result["camera_hint"] = {**{"x": 0.0, "y": 0.0, "z": 1.8}, **deepcopy(calibration.get("camera_hint") or {})}
         result["orientation_hint"] = {**{"pan_offset": 0.0, "tilt_offset": 0.0}, **deepcopy(calibration.get("orientation_hint") or {})}
         result["observations"] = deepcopy(calibration.get("observations") or {})
+        if not calibration.get("tracking_fingerprint"):
+            result.update({"valid": False, "status": "TRACKING FINGERPRINT MISSING — SOLVE REQUIRED"})
         if result.get("current_target") not in TARGET_POINTS:
             result["current_target"] = TARGET_POINTS[0]
         return result
@@ -318,6 +327,7 @@ class StateStore:
                 self.debug.error("state_load_failed", file="world_calibrations/index.json", error=repr(exc))
         calibration_id = _new_id()
         calibration = default_world_calibration("Default World Calibration", self.profile_index["active_id"])
+        calibration["tracking_fingerprint"] = tracking_fingerprint(self.profile)
         calibration["id"] = calibration_id
         meta = {key: calibration[key] for key in ("id", "name", "setup_profile_id", "created", "modified")}
         self._atomic_write_path(self._world_calibration_path(calibration_id), calibration)
@@ -342,6 +352,9 @@ class StateStore:
     def _world_calibration_matches_profile(self) -> bool:
         return self.world_calibration.get("setup_profile_id") == self.profile_index["active_id"]
 
+    def _world_calibration_matches_tracking(self) -> bool:
+        return self.world_calibration.get("tracking_fingerprint") == tracking_fingerprint(self.profile)
+
     def _apply_axis_runtime(self, axis: str, raw: float | None = None, initial: bool = False) -> None:
         config = self.profile["axes"][axis]
         source = config["source"]
@@ -362,7 +375,7 @@ class StateStore:
             "status": "Disabled" if source == "disabled" else f"{source.replace('_', ' ').title()} is not implemented",
             "updated_mono": previous.get("updated_mono", 0.0),
             "update_hz": previous.get("update_hz"),
-            "expects_periodic_samples": source not in {"simulator", "disabled"},
+            "expects_periodic_samples": source not in {"simulator", "disabled", "quadrature_gpio"},
         }
         if source == "simulator":
             try:
@@ -374,9 +387,34 @@ class StateStore:
             except (TypeError, ValueError, TrackingConfigError) as exc:
                 runtime.update({"health": "ERROR", "status": str(exc)})
                 self.debug.error("tracking_mapping_error", axis=axis, error=str(exc))
+        elif source == "quadrature_gpio":
+            source_config = config.get("source_config") or {}
+            configured = bool(source_config.get("chip")) and source_config.get("line_a") is not None and source_config.get("line_b") is not None
+            runtime.update({
+                "raw_count": int(previous.get("raw_count", 0)),
+                "relative_angle": float(previous.get("relative_angle", 0.0)),
+                "referenced": bool(previous.get("referenced", False)),
+                "reference_count": previous.get("reference_count"),
+                "reference_angle": float(previous.get("reference_angle", 0.0)),
+                "driver_alive": bool(previous.get("driver_alive", False)),
+                "configured": configured,
+                "diagnostics": deepcopy(previous.get("diagnostics", {})),
+                "health": "UNCONFIGURED" if not configured else "REFERENCE_REQUIRED",
+                "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for GPIO driver",
+            })
         self.tracking["axes"][axis] = runtime
 
-    def _refresh_camera_from_tracking(self) -> None:
+    def _refresh_tracking_health(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        for axis, runtime in self.tracking["axes"].items():
+            updated = float(runtime.get("updated_mono") or 0.0)
+            runtime["age_seconds"] = round(max(0.0, now - updated), 3) if updated else None
+            timeout = float(self.profile["axes"][axis].get("source_config", {}).get("stale_timeout_seconds", 0.0))
+            if runtime.get("valid") and runtime.get("expects_periodic_samples") and timeout > 0 and runtime["age_seconds"] is not None and runtime["age_seconds"] > timeout:
+                runtime.update({"valid": False, "health": "STALE", "status": f"No sample for {runtime['age_seconds']:.3f} seconds"})
+        self.tracking["valid"] = all(self.tracking["axes"][axis]["valid"] for axis in REQUIRED_AXES)
+
+    def _refresh_camera_from_tracking(self, sample: bool = True) -> None:
         tracked: dict[str, float | None] = {}
         for axis in ("pan", "tilt"):
             runtime = self.tracking["axes"][axis]
@@ -385,8 +423,10 @@ class StateStore:
         sources = {self.tracking["axes"][axis]["source"] for axis in REQUIRED_AXES}
         self.tracking["valid"] = all(self.tracking["axes"][axis]["valid"] for axis in REQUIRED_AXES)
         profile_match = self._world_calibration_matches_profile()
+        fingerprint_match = self._world_calibration_matches_tracking()
         solution = self.world_calibration.get("solution")
-        calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match)
+        required_referenced = all(self.tracking["axes"][axis].get("source") != "quadrature_gpio" or self.tracking["axes"][axis].get("referenced") for axis in REQUIRED_AXES)
+        calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match and fingerprint_match and required_referenced)
         if calibration_valid:
             solved_camera = solution["camera"]
             self.camera.update({"x": solved_camera["x"], "y": solved_camera["y"], "z": solved_camera["z"], "height": solved_camera["z"], "roll": solution.get("fixed_roll", 0.0), "fov": solution.get("horizontal_fov", self.camera["fov"])})
@@ -403,8 +443,10 @@ class StateStore:
         self.camera["world_valid"] = self.tracking["valid"] and calibration_valid
         self.camera["world_calibration_id"] = self.world_calibration_index["active_id"]
         self.camera["calibration_profile_match"] = profile_match
+        self.camera["calibration_fingerprint_match"] = fingerprint_match
         self.camera["updated_mono"] = max((self.tracking["axes"][axis]["updated_mono"] for axis in REQUIRED_AXES), default=0.0)
-        self._refresh_pose_reference_and_sample()
+        if sample:
+            self._refresh_pose_reference_and_sample()
 
     def _refresh_tracking_from_profile(self, initial: bool = False) -> None:
         self.camera["fov"] = float(self.profile.get("camera", {}).get("fov", self.camera["fov"]))
@@ -412,6 +454,58 @@ class StateStore:
         for axis in AXES:
             self._apply_axis_runtime(axis, initial=initial)
         self._refresh_camera_from_tracking()
+
+    def apply_tracking_samples(self, samples: dict[str, dict[str, Any]], timestamp: float | None = None) -> None:
+        """Canonical StateStore boundary for a combined source-manager sample."""
+        now = time.monotonic() if timestamp is None else float(timestamp)
+        for axis, sample in samples.items():
+            if axis not in AXES or self.profile["axes"][axis]["source"] != "quadrature_gpio":
+                continue
+            runtime = self.tracking["axes"][axis]
+            raw_count = int(sample.get("raw_count", runtime.get("raw_count", 0)))
+            referenced = bool(sample.get("referenced", False))
+            reference_count = sample.get("reference_count")
+            reference_angle = float(sample.get("reference_angle", 0.0))
+            configured = bool(sample.get("configured", False))
+            driver_alive = bool(sample.get("driver_alive", False))
+            runtime.update({
+                "raw": raw_count,
+                "raw_count": raw_count,
+                "referenced": referenced,
+                "reference_count": reference_count,
+                "reference_angle": reference_angle,
+                "configured": configured,
+                "driver_alive": driver_alive,
+                "updated_mono": now,
+                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "configured", "driver_alive", "health", "status"}},
+            })
+            runtime["relative_angle"] = raw_count * (360.0 / (float(self.profile["axes"][axis]["mapping"]["ppr"]) * int(self.profile["axes"][axis]["mapping"]["quadrature_multiplier"]) * float(self.profile["axes"][axis]["mapping"]["encoder_revs_per_camera_rev"])))
+            if sample.get("health") == "ERROR":
+                runtime.update({"valid": False, "value": None, "health": "ERROR", "status": sample.get("status", "GPIO driver error")})
+            elif not configured:
+                runtime.update({"valid": False, "value": None, "health": "UNCONFIGURED", "status": sample.get("status", "GPIO is not configured")})
+            elif not driver_alive:
+                runtime.update({"valid": False, "value": None, "health": "ERROR", "status": sample.get("status", "GPIO driver is not running")})
+            elif not referenced or reference_count is None:
+                runtime.update({"valid": False, "value": None, "health": "REFERENCE_REQUIRED", "status": "Set an encoder reference"})
+            else:
+                runtime.update({
+                    "valid": True,
+                    "value": map_referenced_count(self.profile["axes"][axis], raw_count, int(reference_count), reference_angle),
+                    "health": "VALID",
+                    "status": "Referenced",
+                })
+        self._refresh_tracking_health(now)
+        self._refresh_camera_from_tracking(sample=True)
+
+    def sample_tick(self, samples: dict[str, dict[str, Any]] | None = None, timestamp: float | None = None) -> None:
+        now = time.monotonic() if timestamp is None else float(timestamp)
+        if samples:
+            self.apply_tracking_samples(samples, now)
+            return
+        self._refresh_tracking_health(now)
+        self._refresh_camera_from_tracking(sample=False)
+        self._refresh_pose_reference_and_sample()
 
     def _layout_path(self, layout_id: str) -> Path:
         return self.layouts_dir / f"{layout_id}.json"
@@ -484,17 +578,11 @@ class StateStore:
 
     def snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
-        history_now = time.perf_counter()
+        history_now = now
+        self._refresh_tracking_health(now)
+        self._refresh_camera_from_tracking(sample=False)
         tracking = deepcopy(self.tracking)
-        for axis, runtime in tracking["axes"].items():
-            runtime["age_seconds"] = round(max(0.0, now - runtime["updated_mono"]), 3) if runtime["updated_mono"] else None
-            timeout = float(self.profile["axes"][axis].get("source_config", {}).get("stale_timeout_seconds", 0.0))
-            if runtime["valid"] and runtime["expects_periodic_samples"] and timeout > 0 and runtime["age_seconds"] is not None and runtime["age_seconds"] > timeout:
-                runtime.update({"valid": False, "health": "STALE", "status": f"No sample for {runtime['age_seconds']:.3f} seconds"})
-        tracking["valid"] = all(tracking["axes"][axis]["valid"] for axis in REQUIRED_AXES)
         camera = deepcopy(self.camera)
-        camera["valid"] = tracking["valid"]
-        camera["world_valid"] = bool(camera.get("world_valid") and tracking["valid"])
         render_camera, sync = self._render_pose_state(history_now)
         if sync["interpolation"] != self._last_sync_status:
             event = "history_underrun" if sync["interpolation"] in {"HISTORY_UNDERRUN", "BUFFERING"} else "render_pose_invalid" if sync["interpolation"] == "INVALID" else "render_pose_interpolated"
@@ -505,8 +593,19 @@ class StateStore:
             self.debug.tracking("render_pose_interpolated", mode=sync["interpolation_mode"], delay_ms=sync["graphics_delay_ms"], effective_ms=sync["effective_difference_ms"], pan=render_camera.get("pan"), tilt=render_camera.get("tilt"))
         world = deepcopy(self.world_calibration)
         world["target_points"] = target_points(world["target"])
-        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile()}
+        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "tracking_fingerprint": tracking_fingerprint(self.profile)}
         return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
+
+    def pose_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        self._refresh_tracking_health(now)
+        self._refresh_camera_from_tracking(sample=False)
+        render_camera, sync = self._render_pose_state(now)
+        compact_axes = {
+            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "relative_angle", "driver_alive", "diagnostics") if key in runtime}
+            for axis, runtime in self.tracking["axes"].items()
+        }
+        return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "axes": compact_axes}, "sync": sync, "server_mono": now}
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         dead: list[WebSocket] = []
@@ -521,16 +620,8 @@ class StateStore:
     async def broadcast_state(self) -> None:
         await self.broadcast({"type": "state", "data": self.snapshot()})
 
-    async def history_heartbeat(self) -> None:
-        """Keep static poses timestamped and wake clients when buffering completes."""
-        while True:
-            await asyncio.sleep(0.05)
-            previous_status = self._last_sync_status
-            async with self.lock:
-                self._record_pose_sample()
-                current_status = self._render_pose_state(time.perf_counter())[1]["interpolation"]
-            if previous_status is not None and current_status != previous_status:
-                await self.broadcast_state()
+    async def broadcast_pose(self) -> None:
+        await self.broadcast({"type": "pose", "data": self.pose_snapshot()})
 
     async def update_sync_config(self, values: dict[str, Any]) -> dict[str, Any]:
         candidate = {**self.sync_config, **values}
@@ -588,7 +679,11 @@ class StateStore:
             self.debug.input("camera_settings", **camera_updates)
             self.debug.app("profile_updated", profile_id=self.profile_index["active_id"], camera=camera_updates)
         self.debug.tracking("camera_state", **self.camera)
-        await self.broadcast_state(); return result
+        if camera_updates:
+            await self.broadcast_state()
+        else:
+            await self.broadcast_pose()
+        return result
 
     async def create_profile(self, name: str) -> dict[str, Any]:
         profile_id, now = _new_id(), _utc_now()
@@ -694,6 +789,20 @@ class StateStore:
                 return None
             previous = self.profile["axes"][axis]
             candidate = merge_axis_update(axis, previous, updates)
+            used_lines: dict[tuple[str, int], str] = {}
+            prospective = {name: (candidate if name == axis else self.profile["axes"][name]) for name in AXES}
+            for other_axis, other in prospective.items():
+                if other["source"] != "quadrature_gpio":
+                    continue
+                source_config = other.get("source_config") or {}
+                chip = str(source_config.get("chip") or "")
+                for key in ("line_a", "line_b"):
+                    line = source_config.get(key)
+                    if chip and line is not None:
+                        identity = (chip, int(line))
+                        if identity in used_lines:
+                            raise TrackingConfigError(f"GPIO {chip} line {line} conflicts with {used_lines[identity]}")
+                        used_lines[identity] = f"{other_axis}.{key}"
             source_changed = previous["source"] != candidate["source"]
             self.profile["axes"][axis] = candidate
             self._write_active_profile_locked()
@@ -711,6 +820,7 @@ class StateStore:
     async def create_world_calibration(self, name: str) -> dict[str, Any]:
         calibration_id = _new_id()
         calibration = default_world_calibration(name.strip() or "New World Calibration", self.profile_index["active_id"])
+        calibration["tracking_fingerprint"] = tracking_fingerprint(self.profile)
         calibration["id"] = calibration_id
         meta = {key: calibration[key] for key in ("id", "name", "setup_profile_id", "created", "modified")}
         async with self.lock:
@@ -846,7 +956,7 @@ class StateStore:
             await self.broadcast_state()
             raise
         async with self.lock:
-            self.world_calibration.update({"solution": solution, "valid": True, "status": "CALIBRATION VALID", "last_solve_error": None})
+            self.world_calibration.update({"solution": solution, "valid": True, "status": "CALIBRATION VALID", "last_solve_error": None, "tracking_fingerprint": tracking_fingerprint(self.profile)})
             self._write_active_world_calibration_locked()
             self._refresh_camera_from_tracking()
         self.debug.app("calibration_solve_success", calibration_id=calibration_id, camera=solution["camera"], pan_offset=solution["pan_offset"], tilt_offset=solution["tilt_offset"], rms=solution["rms_angular_error"], maximum=solution["max_angular_error"], residuals=solution["residuals"])

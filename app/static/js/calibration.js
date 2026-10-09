@@ -14,8 +14,9 @@ function setInput(selector,value){const input=document.querySelector(selector);i
 function renderCalibration(){
   const collection=state.world_calibrations,calibration=collection.active,solution=calibration.solution;
   byId('activeProfile').textContent=state.profiles.active.name;
-  byId('profileMatch').textContent=collection.profile_match?'Setup profile matches this calibration.':'WARNING: this calibration belongs to a different setup profile.';
-  byId('profileMatch').className=collection.profile_match?'small':'form-error';
+  const identityMatch=collection.profile_match&&collection.fingerprint_match;
+  byId('profileMatch').textContent=!collection.profile_match?'WARNING: this calibration belongs to a different setup profile.':!collection.fingerprint_match?'WARNING: tracking configuration changed; solve this calibration again.':'Setup profile and tracking fingerprint match this calibration.';
+  byId('profileMatch').className=identityMatch?'small':'form-error';
   const select=byId('worldCalibrationSelect');
   if(select!==document.activeElement)select.replaceChildren(...collection.items.map(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.name;option.selected=item.id===collection.active_id;return option;}));
   if(byId('worldCalibrationName')!==document.activeElement)byId('worldCalibrationName').value=calibration.name;
@@ -24,8 +25,8 @@ function renderCalibration(){
   for(const key of ['pan_offset','tilt_offset'])setInput(`[data-orientation-hint="${key}"]`,calibration.orientation_hint[key]);
   setInput('#worldFov',calibration.horizontal_fov);
   setInput('#worldRoll',calibration.fixed_roll);
-  byId('status').textContent=collection.profile_match?calibration.status:'PROFILE MISMATCH';
-  byId('status').className=calibration.valid&&collection.profile_match?'status-ok':'status-bad';
+  byId('status').textContent=!collection.profile_match?'PROFILE MISMATCH':!collection.fingerprint_match?'TRACKING MISMATCH':calibration.status;
+  byId('status').className=calibration.valid&&identityMatch?'status-ok':'status-bad';
   byId('targetSteps').replaceChildren(...targets.map((target,index)=>{const button=document.createElement('button');button.className=`target-step${target===calibration.current_target?' active':''}${calibration.observations[target]?' marked':''}`;button.textContent=`${index+1}. ${targetLabel(target)} — ${calibration.observations[target]?'MARKED':'NOT MARKED'}`;button.onclick=()=>safe(()=>api('/api/world-calibration/target',{method:'POST',body:JSON.stringify({target})}));return button;}));
   const current=calibration.current_target,observation=calibration.observations[current];
   byId('overlayTarget').textContent=targetLabel(current);
@@ -34,7 +35,7 @@ function renderCalibration(){
   byId('clearTarget').disabled=!observation;
   byId('markTarget').disabled=!state.tracking.valid;
   const rows=solution?{
-    Status:calibration.valid&&collection.profile_match?'VALID':'NOT VALID',
+    Status:calibration.valid&&identityMatch?'VALID':'NOT VALID',
     'Camera X':`${format(solution.camera.x)} m`,'Camera Y':`${format(solution.camera.y)} m`,'Camera Z':`${format(solution.camera.z)} m`,
     'Pan offset':`${format(solution.pan_offset)}°`,'Tilt offset':`${format(solution.tilt_offset)}°`,
     'RMS error':`${format(solution.rms_angular_error,4)}°`,'Max error':`${format(solution.max_angular_error,4)}°`,Observations:solution.observation_count,
@@ -52,7 +53,7 @@ function collectUpdate(){
   return{name:byId('worldCalibrationName').value,target,camera_hint,orientation_hint,horizontal_fov:+byId('worldFov').value,fixed_roll:+byId('worldRoll').value};
 }
 
-connectState(incoming=>{state=incoming;applying=true;renderCalibration();byId('calibrationAxes').innerHTML=axisCard('pan')+axisCard('tilt');for(const axis of ['pan','tilt']){const runtime=state.tracking.axes[axis];if(runtime.raw!==null&&byId(axis)!==document.activeElement)byId(axis).value=runtime.raw;byId(axis).disabled=runtime.source!=='simulator';}applying=false;const panMap=state.profiles.active.axes.pan.mapping,tiltMap=state.profiles.active.axes.tilt.mapping;byId('panResult').textContent=`LEFT ${state.calibration.marks.pan_left??'—'} · RIGHT ${state.calibration.marks.pan_right??'—'} · ${panMap.direction_learned?(panMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;byId('tiltResult').textContent=`DOWN ${state.calibration.marks.tilt_down??'—'} · UP ${state.calibration.marks.tilt_up??'—'} · ${tiltMap.direction_learned?(tiltMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;},'calibration');
+connectState((incoming,event)=>{state=incoming;applying=true;if(event?.type!=='pose')renderCalibration();else byId('overlayAngles').textContent=`PAN ${format(state.tracking.axes.pan.value)}° · TILT ${format(state.tracking.axes.tilt.value)}°`;byId('calibrationAxes').innerHTML=axisCard('pan')+axisCard('tilt');for(const axis of ['pan','tilt']){const runtime=state.tracking.axes[axis];if(runtime.raw!==null&&byId(axis)!==document.activeElement)byId(axis).value=runtime.raw;byId(axis).disabled=runtime.source!=='simulator';}applying=false;if(event?.type!=='pose'){const panMap=state.profiles.active.axes.pan.mapping,tiltMap=state.profiles.active.axes.tilt.mapping;byId('panResult').textContent=`LEFT ${state.calibration.marks.pan_left??'—'} · RIGHT ${state.calibration.marks.pan_right??'—'} · ${panMap.direction_learned?(panMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;byId('tiltResult').textContent=`DOWN ${state.calibration.marks.tilt_down??'—'} · UP ${state.calibration.marks.tilt_up??'—'} · ${tiltMap.direction_learned?(tiltMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;}},'calibration');
 
 byId('worldCalibrationSelect').onchange=event=>safe(()=>api(`/api/world-calibrations/${event.target.value}/select`,{method:'POST'}));
 byId('newWorldCalibration').onclick=()=>safe(()=>api('/api/world-calibrations',{method:'POST',body:JSON.stringify({name:'New World Calibration'})}));

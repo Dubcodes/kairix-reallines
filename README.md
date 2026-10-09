@@ -2,7 +2,7 @@
 
 Early development skeleton for a headless Raspberry Pi camera-tracking graphics system.
 
-## v0.0.4-dev goals
+## v0.0.5-dev goals
 
 - `/engineering` is the only navigation/system hub.
 - `/calibration` provides separate axis-direction and world/camera calibration workflows.
@@ -10,7 +10,7 @@ Early development skeleton for a headless Raspberry Pi camera-tracking graphics 
 - `/gfx` is a clean graphics-only output.
 - Simulator drives pan and tilt through the canonical tracking pipeline; FOV and camera height remain persisted camera/profile settings.
 - A bounded monotonic pose history supplies an independently delayed render camera for video/graphics synchronization.
-- All pages share state over WebSockets.
+- Configuration uses infrequent full-state WebSocket messages; compact pose messages stream at about 50 Hz.
 - Scene, setup-profile, direction-calibration and world-calibration state persists under the data directory.
 - Heavy debugging is enabled by default and a diagnostic ZIP can be downloaded from Engineering.
 
@@ -99,25 +99,40 @@ Current group support is intentionally limited to a single grouping level and X/
 
 The renderer still consumes the stable `camera.pan`, `camera.tilt`, `camera.fov`, `camera.height` and `camera.valid` contract. Behind that contract, runtime `tracking.axes` records source, raw value, mapped value, health, validity, timestamp, age and sample-rate information independently for Pan, Tilt, Zoom and Focus.
 
-Source selection is per axis. `simulator` and `disabled` are functional; `quadrature_gpio`, `imu` and `external` are recognised configuration choices which deliberately report **NOT CONFIGURED** until their real drivers exist. Pan and Tilt are required for overall tracking validity. Zoom and Focus may be disabled.
+Source selection is per axis. `simulator`, `disabled`, and `quadrature_gpio` are functional; `imu` and `external` remain recognised but unconfigured. Pan and Tilt are required for overall tracking validity. Zoom and Focus may be disabled. Each GPIO axis has a dedicated libgpiod v2 event thread; one source manager owns lifecycle, diagnostics, and retry after driver errors. GPIO code is imported only by the Linux adapter, so development and tests remain import-safe on Windows.
 
 Hardware/tracking setup profiles are separate from graphics layouts and persist under `data/profiles/<stable-id>.json`, with `data/profiles/index.json` holding metadata and the active ID. Profiles support create, select, rename, duplicate, delete and per-axis updates. A clean install starts with **Development Simulator**. Existing `engineering.json` source selections and direction calibration are imported once without deleting either legacy file.
 
-For a quadrature axis, the authoritative gearing field is `encoder_revs_per_camera_rev`:
+For a quadrature axis, PPR means **A-channel cycles per encoder revolution**. The authoritative gearing field is `encoder_revs_per_camera_rev`:
 
 ```text
 counts_per_camera_revolution = PPR × quadrature_multiplier × encoder_revs_per_camera_rev
 degrees_per_count = 360 / counts_per_camera_revolution
-mapped_angle = offset + direction × raw_count_delta × degrees_per_count
+mapped_angle = reference_angle + offset + direction × (raw_count - reference_count) × degrees_per_count
 ```
 
-Direction is always `+1` or `-1`. The Calibration LEFT/RIGHT and DOWN/UP marks learn only orientation and store it in the active setup profile. They never establish mechanical travel limits. Simulator samples use the same source → raw → mapping → tracking → camera path that future drivers will use, without stale expiry while sitting at a valid static position.
+At 600 PPR the decoder yields 600, 1200, or 2400 counts per encoder revolution at ×1, ×2, or ×4. With 1 encoder revolution per camera revolution, 2400 ×4 counts maps to 360°. Counts are unbounded signed integers. Illegal Gray-code transitions are diagnosed and do not move the count. Software debounce is off by default because it can discard legitimate high-rate edges.
+
+Direction is always `+1` or `-1`. Direction marks learn only orientation; raw count motion is visible before referencing. A quadrature axis becomes valid only after the driver is alive and the operator uses **Set current angle** or **Zero** in Engineering. Count and reference are session-only and must be established after every service restart. A stationary referenced encoder remains valid because lack of edges is not stale. Driver loss or invalid configuration does invalidate the axis.
+
+### Encoder wiring and bench bring-up
+
+No GPIO pins are assumed. Engineering requires an explicit gpiochip device (for example `/dev/gpiochip0`) and distinct non-negative A/B **line offsets** for every quadrature axis. The same chip/line cannot be assigned to two axes. Inspect the Pi before configuring:
+
+```bash
+gpiodetect
+gpioinfo /dev/gpiochip0
+```
+
+Raspberry Pi GPIO is **3.3 V only**. Never connect a 5–24 V encoder output directly. Identify whether outputs are push-pull, open-collector/open-drain, or differential and use appropriate isolation or level conversion. Open-collector outputs need pull-ups to 3.3 V; differential outputs need a suitable receiver. The UI bias (`as_is`, `pull_up`, or `pull_down`) is not a substitute for electrical level conversion.
+
+A safe initial bench profile can use Pan=`quadrature_gpio`, Tilt=`simulator`, and Zoom/Focus=`disabled`. With power off, connect encoder ground through the chosen interface, connect A/B to the configured offsets, then power up. Confirm raw counts change, learn direction if needed, set a known current angle, and only then capture world-calibration marks. Diagnostics show event totals, illegal transitions, and sequence gaps.
 
 Important profile and layout JSON writes use atomic temporary-file replacement. Diagnostic bundles include profile configuration alongside existing state and debug logs.
 
 ## World/camera calibration
 
-World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references the setup-profile ID with which its observations were captured. Selecting a different hardware profile exposes a mismatch and prevents that calibration from being treated as valid world tracking.
+World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID and a deterministic SHA-256 fingerprint covering source, direction, offset, PPR, decode multiplier, gearing, GPIO identity/bias, and reference semantics. Either mismatch prevents world tracking. Legacy calibrations without a fingerprint remain stored but invalid until solved again. `/gfx` and the Control Camera editor require both `camera.valid` and `camera.world_valid`; Top Down editing remains available.
 
 V1 uses four known corners of a vertical rectangular target: top-left, top-right, bottom-right and bottom-left. The target stores its world centre, width, height and yaw. Each operator mark captures raw and mapped Pan/Tilt values, monotonic time, target identity and setup-profile ID. Direction-learning LEFT/RIGHT/DOWN/UP marks remain a separate process.
 
@@ -139,7 +154,7 @@ Engineering and Calibration expose a synthetic scenario generator that creates o
 
 The compatibility `camera` object remains the instantaneous **live** calibrated pose. State also exposes `live_camera` explicitly and a separate `render_camera` used by `/gfx` and the Control Camera preview. Calibration marking always reads live per-axis tracking values and is therefore unaffected by graphics delay.
 
-The backend records compact pose samples in a RAM-only deque using Python's monotonic high-resolution performance counter. Each sample contains tracking and world Pan/Tilt, camera X/Y/Z, fixed roll, FOV, validity, and the active setup-profile/world-calibration IDs. Tracking changes insert samples immediately; a lightweight 20 Hz backend heartbeat keeps a stationary valid pose represented without depending on browser requests. The default history depth is five seconds.
+The backend samples all sources through one canonical `time.monotonic()` path at approximately 200 Hz and records compact poses in a RAM-only deque. Each sample contains tracking and world Pan/Tilt, camera X/Y/Z, fixed roll, FOV, validity, and the active setup-profile/world-calibration IDs. Compact pose transport is broadcast at approximately 50 Hz; full scene/configuration state is sent only when it changes. If WebSocket transport is unavailable, clients use a slow full-state poll plus a faster `/api/pose` poll. The default history depth is five seconds.
 
 `data/sync.json` atomically persists only:
 

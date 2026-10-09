@@ -9,8 +9,15 @@ DATA=/var/lib/kairix-reallines
 
 echo "Installing Kairix RealLines $VERSION"
 apt-get update
-apt-get install -y python3-venv python3-pip
+apt-get install -y python3-venv python3-pip gpiod
+getent group gpio >/dev/null || groupadd --system gpio
 id -u kairix >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin kairix
+usermod -a -G gpio kairix
+cat > /etc/udev/rules.d/60-kairix-reallines-gpio.rules <<'UDEV_EOF'
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+UDEV_EOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=gpio || true
 mkdir -p "$BASE/releases" "$DATA"
 rm -rf "$RELEASE"
 mkdir -p "$RELEASE"
