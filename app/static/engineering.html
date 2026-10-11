@@ -16,5 +16,33 @@
 <section class="panel"><h2>Debug recording</h2><p>Full development logging is enabled by default. Frontend errors, camera inputs, tracking states, WebSocket events and state mutations are recorded.</p><div class="row"><button id="debugOn">Enable</button><button id="debugOff">Disable</button></div><div id="debugState" class="small"></div></section>
 </div>
 <dialog id="engineeringDialog"><form method="dialog"><h2 id="dialogTitle"></h2><p id="dialogMessage" class="small"></p><input id="dialogInput" type="text"><div class="row dialog-actions"><button id="dialogCancel" type="button">Cancel</button><button id="dialogAccept" value="accept" class="primary">OK</button></div></form></dialog>
-<script>window.__kairixEngineeringBoot=(label,detail='')=>{const el=document.getElementById('uiStatus');if(!el)return;el.textContent=label;el.title=detail;el.className=label.includes('ERROR')?'status-bad':label==='STATE CONNECTED'?'status-ok':'status-warn';};window.addEventListener('error',event=>{window.__kairixEngineeringBoot('UI ERROR',event.message||'Module failed to initialise');fetch('/api/debug/frontend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:'engineering',event:'window_error',data:{message:event.message||'Module failed to initialise'}})}).catch(()=>{});});window.addEventListener('unhandledrejection',event=>window.__kairixEngineeringBoot('UI ERROR',String(event.reason||'Unhandled rejection')));setTimeout(()=>{const el=document.getElementById('uiStatus');if(el&&el.textContent==='UI LOADING')window.__kairixEngineeringBoot('UI ERROR','Engineering module did not initialise');},10000);</script>
-<script type="module" src="/static/js/engineering.js?v=ui-repair1" onerror="window.__kairixEngineeringBoot('UI ERROR','Engineering module failed to load')"></script></body></html>
+<script>
+window.__kairixEngineeringBoot=(label,detail='')=>{
+  const el=document.getElementById('uiStatus');
+  if(!el)return;
+  el.textContent=label;
+  el.title=detail;
+  el.className=label.includes('ERROR')?'status-bad':label==='STATE CONNECTED'?'status-ok':'status-warn';
+};
+window.__kairixEngineeringError=(event,fallback='Engineering module failed to load')=>{
+  const message=event?.message||fallback;
+  const filename=event?.filename||'';
+  const line=Number(event?.lineno)||null;
+  const column=Number(event?.colno)||null;
+  const location=filename?`${filename}${line?`:${line}${column?`:${column}`:''}`:''}`:'';
+  const detail=location?`${message} — ${location}`:message;
+  window.__kairixEngineeringBoot('UI ERROR',detail);
+  fetch('/api/debug/frontend',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({page:'engineering',event:'window_error',data:{message,filename,lineno:line,colno:column}}),
+  }).catch(()=>{});
+};
+window.addEventListener('error',event=>window.__kairixEngineeringError(event,'Module failed to initialise'));
+window.addEventListener('unhandledrejection',event=>window.__kairixEngineeringBoot('UI ERROR',String(event.reason||'Unhandled rejection')));
+setTimeout(()=>{
+  const el=document.getElementById('uiStatus');
+  if(el&&el.textContent==='UI LOADING')window.__kairixEngineeringBoot('UI ERROR','Engineering module did not initialise');
+},10000);
+</script>
+<script type="module" src="/static/js/engineering.js?v=ui-repair1" onerror="window.__kairixEngineeringError(event,'Engineering module failed to load')"></script></body></html>

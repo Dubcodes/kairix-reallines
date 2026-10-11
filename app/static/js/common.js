@@ -61,10 +61,14 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
       console.error(e);
     }
   };
-  const startPolling = () => {
-    if (polling || stopped) return;
+  const startPolling = (detail='WebSocket unavailable; retrying in the background') => {
+    if (stopped) return;
+    if (polling) {
+      status('polling', detail);
+      return;
+    }
     polling = true;
-    status('polling');
+    status('polling', detail);
     const pollState = async () => {
       if (!polling || stopped) return;
       await fetchState();
@@ -102,9 +106,15 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
         logFrontend(page, page === 'control' ? 'control_initialization_failed' : 'ws_message_error', {error:String(e)});
       }
     };
-    ws.onclose = () => {
-      status('polling');
-      startPolling();
+    ws.onerror = () => {
+      status('websocket-error', 'WebSocket connection failed; HTTP polling will remain available.');
+      logFrontend(page, 'ws_error', {});
+    };
+    ws.onclose = (event) => {
+      const detail = `WebSocket closed (${event.code}${event.reason ? `: ${event.reason}` : ''}); retrying in 5 seconds.`;
+      status('websocket-error', detail);
+      startPolling(detail);
+      logFrontend(page, 'ws_close', {code:event.code, reason:event.reason, clean:event.wasClean});
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 5000);
     };

@@ -1,10 +1,15 @@
 import {api,connectState,logFrontend} from './common.js?v=ui-repair1';
-import {ENGINEERING_AXES,sourceChoicesFor,validateEngineeringState} from './engineering_contract.js?v=ui-repair1';
+import {
+  ENGINEERING_AXES,
+  buildEncoderSourceConfig,
+  sourceChoicesFor,
+  validateEngineeringState,
+} from './engineering_contract.js?v=ui-repair1';
 
 const byId=id=>document.getElementById(id);
 const axes=ENGINEERING_AXES;
 const dialog=byId('engineeringDialog');
-let state=null,applying=false,axesKey='',pollingMode=false;
+let state=null,applying=false,axesKey='',connectionMode='connecting';
 const setUiStatus=(label,detail='')=>window.__kairixEngineeringBoot?.(label,detail);
 
 if(dialog&&byId('dialogCancel'))byId('dialogCancel').onclick=()=>dialog.close('cancel');
@@ -15,9 +20,134 @@ function setError(message=''){byId('profileError').textContent=message;}
 async function safe(action){try{setError();return await action();}catch(error){setError(String(error));logFrontend('engineering','tracking_ui_error',{error:String(error)});return null;}}
 
 function renderProfiles(){const select=byId('profileSelect'),active=state.profiles.active_id;select.disabled=false;byId('profileName').disabled=false;for(const id of ['newProfile','duplicateProfile','renameProfile'])byId(id).disabled=false;if(select!==document.activeElement){select.replaceChildren(...state.profiles.items.map(meta=>{const option=document.createElement('option');option.value=meta.id;option.textContent=meta.name;option.selected=meta.id===active;return option;}));}if(byId('profileName')!==document.activeElement)byId('profileName').value=state.profiles.active.name;byId('deleteProfile').disabled=state.profiles.items.length<=1;}
-function axisMarkup(axis,config){const isAngle=axis==='pan'||axis==='tilt',encoder=config.source==='quadrature_gpio',sc=config.source_config||{},sourceOptions=sourceChoicesFor(axis).map(choice=>`<option value="${choice.value}"${config.source===choice.value?' selected':''}${choice.enabled?'':' disabled'}>${choice.label}</option>`).join('');return`<article class="axis-card" data-axis="${axis}"><div class="axis-heading"><h3>${axis.toUpperCase()}</h3><span class="axis-health" data-runtime="health"></span></div><label>Source<select data-config="source">${sourceOptions}</select></label><div class="axis-readout"><span>Raw <strong data-runtime="raw">—</strong></span><span>Mapped <strong data-runtime="value">—</strong></span><span>Age <strong data-runtime="age">—</strong></span></div>${isAngle?`<div class="axis-config"><label>Direction<select data-mapping="direction"><option value="1"${config.mapping.direction===1?' selected':''}>+1</option><option value="-1"${config.mapping.direction===-1?' selected':''}>-1</option></select></label><label>Offset °<input data-mapping="offset" type="number" step="0.01" value="${config.mapping.offset}"></label><div class="encoder-config"${encoder?'':' hidden'}><label>Encoder PPR<input data-mapping="ppr" type="number" min="1" step="1" value="${config.mapping.ppr}"></label><label>Quadrature decode<select data-mapping="quadrature_multiplier">${[1,2,4].map(v=>`<option value="${v}"${config.mapping.quadrature_multiplier===v?' selected':''}>×${v}</option>`).join('')}</select></label><label>Encoder revs / camera rev<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${config.mapping.encoder_revs_per_camera_rev}"></label><label>gpiochip device<input data-source-config="chip" placeholder="/dev/gpiochip0" value="${escapeHtml(sc.chip||'')}"></label><label>Line A offset<input data-source-config="line_a" type="number" min="0" step="1" value="${sc.line_a??''}"></label><label>Line B offset<input data-source-config="line_b" type="number" min="0" step="1" value="${sc.line_b??''}"></label><label>Bias<select data-source-config="bias">${[['as_is','As-is'],['pull_up','Pull-up'],['pull_down','Pull-down']].map(([v,l])=>`<option value="${v}"${(sc.bias||'as_is')===v?' selected':''}>${l}</option>`).join('')}</select></label><div class="row"><button data-reference="set" type="button">Set current angle</button><button data-reference="zero" type="button">Zero</button><button data-reference="clear" type="button">Clear reference</button></div><div class="small" data-runtime="encoder-diagnostics"></div></div></div>`:''}<div class="form-error" data-runtime="error"></div></article>`;}
-function bindAxisCards(){byId('trackingAxes').querySelectorAll('.axis-card').forEach(card=>{const axis=card.dataset.axis;card.querySelector('[data-config="source"]').addEventListener('change',event=>updateAxis(axis,{source:event.target.value}));card.querySelectorAll('[data-mapping]').forEach(input=>{const commit=()=>{const value=Number(input.value);if(!Number.isFinite(value))return;updateAxis(axis,{mapping:{[input.dataset.mapping]:value}});};input.addEventListener('change',commit);input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();input.blur();}});});card.querySelectorAll('[data-source-config]').forEach(input=>input.addEventListener('change',()=>{const key=input.dataset.sourceConfig;let value=input.value;if(key==='line_a'||key==='line_b')value=value===''?null:Number(value);updateAxis(axis,{source_config:{[key]:value}});}));card.querySelectorAll('[data-reference]').forEach(button=>button.onclick=async()=>{const action=button.dataset.reference;if(action==='clear')return safe(()=>api(`/api/tracking/${axis}/reference`,{method:'DELETE'}));let angle=0;if(action==='set'){const answer=await showDialog({title:`Reference ${axis}`,message:'Enter the known current camera angle in degrees.',value:'0',accept:'Set reference'});if(!answer.accepted)return;angle=Number(answer.value);if(!Number.isFinite(angle))return setError('Reference angle must be numeric');}return safe(()=>api(`/api/tracking/${axis}/reference`,{method:'POST',body:JSON.stringify({angle})}));};});}
-async function updateAxis(axis,values){const card=byId('trackingAxes').querySelector(`[data-axis="${axis}"]`);const result=await safe(()=>api(`/api/profiles/${state.profiles.active_id}/axes/${axis}`,{method:'PATCH',body:JSON.stringify({values})}));if(!result&&card)card.querySelector('[data-runtime="error"]').textContent=byId('profileError').textContent;}
+function axisMarkup(axis,config){
+  const isAngle=axis==='pan'||axis==='tilt';
+  const encoder=config.source==='quadrature_gpio';
+  const sc=config.source_config||{};
+  const mapping=config.mapping;
+  const degreesPerCount=360/(Number(mapping.ppr)*Number(mapping.quadrature_multiplier)*Number(mapping.encoder_revs_per_camera_rev));
+  const sourceOptions=sourceChoicesFor(axis).map(choice=>`<option value="${choice.value}"${config.source===choice.value?' selected':''}${choice.enabled?'':' disabled'}>${choice.label}</option>`).join('');
+  return `<article class="axis-card" data-axis="${axis}">
+    <div class="axis-heading"><h3>${axis.toUpperCase()}</h3><span class="axis-health" data-runtime="health"></span></div>
+    <label>Source<select data-config="source">${sourceOptions}</select></label>
+    <div class="axis-readout"><span>Raw <strong data-runtime="raw">—</strong></span><span>Mapped <strong data-runtime="value">—</strong></span><span>Age <strong data-runtime="age">—</strong></span></div>
+    ${isAngle?`<div class="axis-config">
+      <label>Direction<select data-mapping="direction"><option value="1"${mapping.direction===1?' selected':''}>+1</option><option value="-1"${mapping.direction===-1?' selected':''}>-1</option></select></label>
+      <label>Offset °<input data-mapping="offset" type="number" step="0.01" value="${mapping.offset}"></label>
+      <div class="encoder-config"${encoder?'':' hidden'}>
+        <label>Encoder PPR<input data-mapping="ppr" type="number" min="1" step="1" value="${mapping.ppr}"></label>
+        <label>Quadrature decode<select data-mapping="quadrature_multiplier">${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}</option>`).join('')}</select></label>
+        <label>Encoder revs / camera rev<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${mapping.encoder_revs_per_camera_rev}"></label>
+        <div class="small">Degrees per count: <strong>${format(degreesPerCount,6)}°</strong></div>
+        <div class="gpio-draft">
+          <label>gpiochip device<input data-source-config="chip" placeholder="/dev/gpiochip0" value="${escapeHtml(sc.chip||'')}"></label>
+          <label>Line A offset<input data-source-config="line_a" type="number" min="0" step="1" value="${sc.line_a??''}"></label>
+          <label>Line B offset<input data-source-config="line_b" type="number" min="0" step="1" value="${sc.line_b??''}"></label>
+          <label>Bias<select data-source-config="bias">${[['as_is','As-is'],['pull_up','Pull-up'],['pull_down','Pull-down']].map(([value,label])=>`<option value="${value}"${(sc.bias||'as_is')===value?' selected':''}>${label}</option>`).join('')}</select></label>
+          <div class="row"><button data-apply-gpio type="button">Apply GPIO settings</button><strong data-gpio-save-state class="status-ok">SAVED</strong></div>
+        </div>
+        <div class="reference-guidance" data-runtime="reference-guidance"></div>
+        <div class="row"><button data-reference="set" type="button">Set current angle</button><button data-reference="zero" type="button">Zero</button><button data-reference="clear" type="button">Clear reference</button></div>
+        <div class="small" data-runtime="encoder-diagnostics"></div>
+      </div>
+    </div>`:''}
+    <div class="form-error" data-runtime="error"></div>
+  </article>`;
+}
+
+function setAxisError(card,message=''){
+  card.querySelector('[data-runtime="error"]').textContent=message;
+}
+
+async function applyGpioDraft(axis,card){
+  const saveState=card.querySelector('[data-gpio-save-state]');
+  const draft=Object.fromEntries([...card.querySelectorAll('[data-source-config]')].map(input=>[input.dataset.sourceConfig,input.value]));
+  try {
+    const values=buildEncoderSourceConfig(draft);
+    setAxisError(card);
+    saveState.textContent='APPLYING';
+    saveState.className='status-warn';
+    const result=await api(`/api/profiles/${state.profiles.active_id}/axes/${axis}`,{
+      method:'PATCH',
+      body:JSON.stringify({values}),
+    });
+    state.profiles.active.axes[axis]=result;
+    axesKey='';
+    renderAxes();
+  } catch(error) {
+    const message=String(error);
+    setAxisError(card,message);
+    saveState.textContent='UNSAVED';
+    saveState.className='status-bad';
+    logFrontend('engineering','gpio_config_error',{axis,error:message});
+  }
+}
+
+function bindAxisCards(){
+  byId('trackingAxes').querySelectorAll('.axis-card').forEach(card=>{
+    const axis=card.dataset.axis;
+    card.querySelector('[data-config="source"]').addEventListener('change',event=>{
+      updateAxis(axis,{source:event.target.value});
+    });
+
+    card.querySelectorAll('[data-mapping]').forEach(input=>{
+      const commit=()=>{
+        const value=Number(input.value);
+        if(Number.isFinite(value))updateAxis(axis,{mapping:{[input.dataset.mapping]:value}});
+      };
+      input.addEventListener('change',commit);
+      input.addEventListener('keydown',event=>{
+        if(event.key==='Enter'){
+          event.preventDefault();
+          input.blur();
+        }
+      });
+    });
+
+    const saveState=card.querySelector('[data-gpio-save-state]');
+    card.querySelectorAll('[data-source-config]').forEach(input=>input.addEventListener('input',()=>{
+      saveState.textContent='UNSAVED';
+      saveState.className='status-warn';
+      setAxisError(card);
+    }));
+    card.querySelector('[data-apply-gpio]')?.addEventListener('click',()=>applyGpioDraft(axis,card));
+
+    card.querySelectorAll('[data-reference]').forEach(button=>{
+      button.onclick=async()=>{
+        const action=button.dataset.reference;
+        if(action==='clear'){
+          return safe(()=>api(`/api/tracking/${axis}/reference`,{method:'DELETE'}));
+        }
+        let angle=0;
+        if(action==='set'){
+          const answer=await showDialog({title:`Reference ${axis}`,message:'Enter the known current camera angle in degrees.',value:'0',accept:'Set reference'});
+          if(!answer.accepted)return;
+          angle=Number(answer.value);
+          if(!Number.isFinite(angle))return setError('Reference angle must be numeric');
+        }
+        return safe(()=>api(`/api/tracking/${axis}/reference`,{
+          method:'POST',
+          body:JSON.stringify({angle}),
+        }));
+      };
+    });
+  });
+}
+
+async function updateAxis(axis,values){
+  const card=byId('trackingAxes').querySelector(`[data-axis="${axis}"]`);
+  const result=await safe(()=>api(`/api/profiles/${state.profiles.active_id}/axes/${axis}`,{
+    method:'PATCH',
+    body:JSON.stringify({values}),
+  }));
+  if(result){
+    state.profiles.active.axes[axis]=result;
+    axesKey='';
+    renderAxes();
+  }else if(card){
+    setAxisError(card,byId('profileError').textContent);
+  }
+}
 function renderAxes(){
   const configKey=state.profiles.active_id+JSON.stringify(state.profiles.active.axes);
   if(configKey!==axesKey){axesKey=configKey;byId('trackingAxes').innerHTML=axes.map(axis=>axisMarkup(axis,state.profiles.active.axes[axis])).join('');bindAxisCards();}
@@ -28,8 +158,15 @@ function renderAxes(){
     card.querySelector('[data-runtime="value"]').textContent=runtime.value===null?'—':`${format(runtime.value,3)} ${runtime.unit==='deg'?'°':''}`;
     card.querySelector('[data-runtime="age"]').textContent=runtime.age_seconds===null?'—':`${format(runtime.age_seconds*1000,0)} ms`;
     for(const button of card.querySelectorAll('[data-reference]'))button.disabled=button.dataset.reference==='clear'?!runtime.referenced:!runtime.driver_alive;
+    const guidance=card.querySelector('[data-runtime="reference-guidance"]');
+    if(guidance){
+      guidance.className=`reference-guidance ${runtime.referenced?'reference-ready':'reference-required'}`;
+      guidance.innerHTML=runtime.referenced
+        ? '<strong>REFERENCED</strong><span>Camera tracking enabled.</span>'
+        : '<strong>REFERENCE REQUIRED</strong><span>Raw encoder data is live. Set Zero or a known angle before it can drive camera tracking.</span>';
+    }
     const diagnostics=card.querySelector('[data-runtime="encoder-diagnostics"]');
-    if(diagnostics){const d=runtime.diagnostics||{},relative=runtime.relative_angle===null||runtime.relative_angle===undefined?'—':`${format(runtime.relative_angle,3)}°`,lastEdge=d.last_edge_age_ms===null||d.last_edge_age_ms===undefined?'—':`${format(d.last_edge_age_ms,1)} ms`;diagnostics.className='kv encoder-diagnostics';diagnostics.innerHTML=`<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Relative angle</div><div>${relative}</div><div>Mapped angle</div><div>${runtime.value===null?'—':`${format(runtime.value,3)}°`}</div><div>Reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div><div>Reference angle</div><div>${runtime.referenced?`${format(runtime.reference_angle,3)}°`:'—'}</div><div>Edges/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div><div>Degrees/sec</div><div>${format(d.degrees_per_second??0,2)}°</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div><div>Global sequence gaps</div><div>${d.global_sequence_gaps??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Integrity</div><div>${d.integrity_status??'—'}</div><div>Last edge age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;}
+    if(diagnostics){const d=runtime.diagnostics||{},relative=runtime.relative_angle===null||runtime.relative_angle===undefined?'—':`${format(runtime.relative_angle,3)}°`,lastEdge=d.last_edge_age_ms===null||d.last_edge_age_ms===undefined?'—':`${format(d.last_edge_age_ms,1)} ms`,referenceId=runtime.reference_id?escapeHtml(String(runtime.reference_id).slice(0,12)):'—';diagnostics.className='kv encoder-diagnostics';diagnostics.innerHTML=`<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Reference count</div><div>${runtime.reference_count??'—'}</div><div>Relative angle</div><div>${relative}</div><div>Mapped angle</div><div>${runtime.value===null?'—':`${format(runtime.value,3)}°`}</div><div>Reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div><div>Reference angle</div><div>${runtime.referenced?`${format(runtime.reference_angle,3)}°`:'—'}</div><div>Reference ID</div><div title="${escapeHtml(runtime.reference_id||'')}">${referenceId}</div><div>Edges/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div><div>Degrees/sec</div><div>${format(d.degrees_per_second??0,2)}°</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div><div>Global sequence gaps</div><div>${d.global_sequence_gaps??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Integrity</div><div>${d.integrity_status??'—'}</div><div>Last edge age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;}
     card.title=runtime.status||'';
   }
 }
@@ -56,14 +193,16 @@ function renderState(incoming,event){
     byId('tilt').disabled=state.tracking.axes.tilt.source!=='simulator';
     byId('fov').disabled=false;byId('height').disabled=false;
     applying=false;
-    byId('trackingStatus').textContent=state.tracking.valid?'TRACKING VALID':'TRACKING INVALID';
-    byId('trackingStatus').className=state.tracking.valid?'status-ok':'status-bad';
+    byId('trackingStatus').textContent=state.tracking.valid?(state.camera.world_valid?'TRACKING + WORLD VALID':'TRACKING VALID · WORLD CALIBRATION REQUIRED'):'TRACKING INVALID';
+    byId('trackingStatus').className=state.tracking.valid?(state.camera.world_valid?'status-ok':'status-warn'):'status-bad';
     if(event?.type!=='pose')renderProfiles();
     renderAxes();renderSync();
     const world=state.world_calibrations.active,solution=world.solution;
     byId('live').innerHTML=`<div>Profile</div><div>${escapeHtml(state.profiles.active.name)}</div><div>World calibration</div><div>${escapeHtml(world.name)} · ${state.camera.world_valid?'VALID':'NOT VALID'}</div><div>RMS</div><div>${solution?`${format(solution.rms_angular_error,4)}°`:'—'}</div><div>Camera XYZ</div><div>${format(state.camera.x,2)}, ${format(state.camera.y,2)}, ${format(state.camera.z,2)} m</div><div>Pan</div><div>${format(state.camera.pan,3)}°</div><div>Tilt</div><div>${format(state.camera.tilt,3)}°</div><div>FOV</div><div>${format(state.camera.fov,2)}°</div><div>Clients</div><div>${state.clients}</div>`;
     byId('debugState').textContent=`Debug: ${state.engineering.debug_enabled?'enabled':'disabled'}`;
-    setUiStatus(pollingMode?'POLLING':'STATE CONNECTED');
+    if(connectionMode==='websocket')setUiStatus('STATE CONNECTED');
+    if(connectionMode==='polling')setUiStatus('POLLING FALLBACK','WebSocket unavailable; HTTP polling is active while retrying.');
+    if(connectionMode==='connecting')setUiStatus('STATE RECEIVED · WEBSOCKET CONNECTING');
   } catch(error) {
     applying=false;
     setUiStatus('UI ERROR',String(error));
@@ -74,10 +213,14 @@ function renderState(incoming,event){
 
 function connectionStatus(status,detail){
   if(status==='connecting'&&!state)setUiStatus('UI LOADING');
-  if(status==='websocket-open'){pollingMode=false;if(!state)setUiStatus('CONNECTED — WAITING FOR STATE');}
-  if(status==='polling'){pollingMode=true;setUiStatus('POLLING');}
+  if(status==='websocket-open'){connectionMode='websocket';setUiStatus(state?'STATE CONNECTED':'CONNECTED — WAITING FOR STATE');}
+  if(status==='websocket-error'){connectionMode='retrying';setUiStatus('WEBSOCKET ERROR / RETRYING',detail);}
+  if(status==='polling'){connectionMode='polling';setUiStatus('POLLING FALLBACK',detail||'WebSocket unavailable; HTTP polling is active while retrying.');}
   if(status==='state-error'&&!state)setUiStatus('STATE ERROR',detail);
-  if(status==='state-received'&&state)setUiStatus(pollingMode?'POLLING':'STATE CONNECTED');
+  if(status==='state-received'&&state){
+    if(connectionMode==='websocket')setUiStatus('STATE CONNECTED');
+    if(connectionMode==='polling')setUiStatus('POLLING FALLBACK','WebSocket unavailable; HTTP polling is active while retrying.');
+  }
 }
 
 connectState(renderState,'engineering',connectionStatus);

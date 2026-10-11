@@ -23,4 +23,13 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: node --test tests/editor_math.test.mjs
       - run: node --test tests/frontend_contract.test.mjs
+      - name: Syntax-check operator JavaScript
+        run: |
+          node --check app/static/js/common.js
+          node --check app/static/js/engineering.js
+          node --check app/static/js/engineering_contract.js
+          node --check app/static/js/calibration.js
+          node --check app/static/js/control.js
+          node --check app/static/js/editor.js
+          node --check app/static/js/render.js
       - run: python -m compileall -q app tests

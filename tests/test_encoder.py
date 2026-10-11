@@ -8,6 +8,7 @@ from pathlib import Path
 from app.quadrature import QuadratureDecoder
 from app.gpio_source import QuadratureGpioWorker
 from app.runtime import publish_pose_once, sample_tracking_once
+from app.source_manager import TrackingSourceManager
 from app.state import StateStore
 from app.tracking import TrackingConfigError, default_axis_config, default_profile, tracking_fingerprint
 from app.world_calibration import CalibrationError
@@ -227,6 +228,50 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(store.pose_history.generation, generation)
             store.sample_tick(self.sample("R1", raw_count=2400, reference_angle=12.0), time.monotonic() + 30)
             self.assertEqual(store.tracking["axes"]["pan"]["health"], "VALID")
+
+    async def test_referenced_gpio_pan_propagates_to_camera_pose_and_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_pan(store)
+            worker = QuadratureGpioWorker("pan", worker_config())
+            worker.begin_acquisition(0, 0)
+            sources = TrackingSourceManager()
+            sources._workers = {"pan": worker}
+
+            worker.decoder.count = 100
+            await sample_tracking_once(store, sources)
+            self.assertEqual(store.tracking["axes"]["pan"]["raw_count"], 100)
+            self.assertIsNone(store.tracking["axes"]["pan"]["value"])
+            self.assertFalse(store.tracking["valid"])
+            self.assertFalse(store.camera["valid"])
+            self.assertEqual(store.camera["pan"], 0.0)
+
+            reference_id = worker.set_reference(0)
+            await sample_tracking_once(store, sources)
+            self.assertEqual(store.tracking["axes"]["pan"]["reference_id"], reference_id)
+            self.assertEqual(store.tracking["axes"]["tilt"]["source"], "simulator")
+            self.assertTrue(store.tracking["valid"])
+            self.assertTrue(store.camera["valid"])
+
+            worker.decoder.count = 1300
+            await sample_tracking_once(store, sources)
+            self.assertAlmostEqual(store.tracking["axes"]["pan"]["relative_angle"], 180.0)
+            self.assertAlmostEqual(store.tracking["axes"]["pan"]["value"], 180.0)
+            self.assertAlmostEqual(store.camera["tracking_pan"], 180.0)
+            self.assertAlmostEqual(store.camera["pan"], 180.0)
+            pose = store.pose_snapshot()
+            self.assertAlmostEqual(pose["tracking"]["axes"]["pan"]["value"], 180.0)
+            self.assertAlmostEqual(pose["camera"]["pan"], 180.0)
+            self.assertAlmostEqual(store.pose_history.samples[-1].pan, 180.0)
+            self.assertTrue(store.pose_history.samples[-1].valid)
+
+            worker.decoder.count = 1400
+            worker.clear_reference()
+            await sample_tracking_once(store, sources)
+            self.assertFalse(store.tracking["valid"])
+            self.assertFalse(store.camera["valid"])
+            self.assertIsNone(store.tracking["axes"]["pan"]["value"])
+            self.assertFalse(store.pose_history.samples[-1].valid)
 
     async def test_driver_failure_invalidates_authoritative_camera_and_history(self):
         with tempfile.TemporaryDirectory() as directory:

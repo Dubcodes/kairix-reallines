@@ -130,6 +130,11 @@ canvas.editor-canvas:focus { border-color:#4c6578; }
 .axis-readout strong { color:#e7eef4; font-size:.85rem; }
 .axis-config { display:grid; gap:9px; }
 .encoder-config { display:grid; gap:9px; padding-top:9px; border-top:1px solid #2b3947; }
+.gpio-draft { display:grid; gap:9px; padding:9px; border:1px solid #344554; border-radius:6px; background:#0c1319; }
+.reference-guidance { display:grid; gap:3px; padding:9px; border-radius:6px; font-size:.8rem; }
+.reference-guidance span { color:#c2ced8; }
+.reference-required { border:1px solid #8f6d25; background:#241d0f; color:#ffd166; }
+.reference-ready { border:1px solid #34734b; background:#102218; color:var(--ok); }
 .form-error { min-height:1.1em; margin-top:7px; color:#ff8f99; font-size:.78rem; }
 .axis-card select, .axis-card input, .profile-controls select, .profile-controls input { width:100%; }
 .calibration-grid label { display:grid; gap:5px; margin:7px 0; }

@@ -64,6 +64,8 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("UI LOADING", html)
         self.assertIn("__kairixEngineeringBoot", html)
         self.assertIn("UI ERROR", html)
+        for field in ("filename", "lineno", "colno"):
+            self.assertIn(field, html)
 
     def test_page_module_graph_resolves_and_uses_one_repair_revision(self):
         references = []
@@ -135,6 +137,31 @@ class FrontendContractCase(unittest.TestCase):
         contract = (STATIC / "js" / "engineering_contract.js").read_text(encoding="utf-8")
         frontend = set(re.findall(r"value:'([^']+)'", contract))
         self.assertEqual(backend, frontend)
+
+    def test_gpio_editor_applies_one_complete_source_config_draft(self):
+        source = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        contract = (STATIC / "js" / "engineering_contract.js").read_text(encoding="utf-8")
+        self.assertIn("Apply GPIO settings", source)
+        self.assertIn("buildEncoderSourceConfig(draft)", source)
+        self.assertIn("JSON.stringify({values})", source)
+        self.assertNotRegex(source, r"updateAxis\(axis,\{source_config:\{\[key\]")
+        for field in ("chip", "line_a", "line_b", "bias"):
+            self.assertIn(field, contract)
+
+    def test_websocket_runtime_dependency_and_fallback_are_explicit(self):
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        self.assertTrue(any(re.fullmatch(r"websockets==\d+\.\d+(?:\.\d+)?", line) for line in requirements))
+        common = (STATIC / "js" / "common.js").read_text(encoding="utf-8")
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        self.assertIn("ws.onerror", common)
+        self.assertIn("startPolling", common)
+        self.assertIn("WEBSOCKET ERROR / RETRYING", engineering)
+        self.assertIn("POLLING FALLBACK", engineering)
+
+    def test_ci_syntax_checks_every_operator_javascript_file(self):
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        for name in ("common", "engineering", "engineering_contract", "calibration", "control", "editor", "render"):
+            self.assertIn(f"node --check app/static/js/{name}.js", workflow)
 
     def test_state_and_system_payloads_cover_engineering_fields(self):
         with tempfile.TemporaryDirectory() as directory:
