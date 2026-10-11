@@ -195,6 +195,8 @@ class FrontendContractCase(unittest.TestCase):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
         html = (STATIC / "calibration.html").read_text(encoding="utf-8")
         self.assertIn("calculateMovementCalibration", calibration)
+        self.assertIn("movementCard('pan')+movementCard('tilt')", calibration)
+        self.assertIn("movement[axis]", calibration)
         self.assertIn("/api/profiles/${state.profiles.active_id}/axes/${axis}", calibration)
         self.assertIn("direction_learned:true", calibration)
         self.assertIn("require a new encoder reference", html)

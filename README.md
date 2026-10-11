@@ -127,14 +127,14 @@ The integrity policy is intentionally conservative for first-hardware bring-up: 
 
 ### Encoder wiring and bench bring-up
 
-No GPIO pins are assumed. Engineering requires an explicit gpiochip device (for example `/dev/gpiochip0`) and distinct non-negative A/B **line offsets** for every quadrature axis. The same chip/line cannot be assigned to two axes. Inspect the Pi before configuring:
+New profiles keep Pan and Tilt on Simulator, but their Quadrature GPIO fields are pre-populated with the standard RealLines hardware mapping: Pan A=`GPIO17` (physical pin 11), Pan B=`GPIO27` (pin 13), Tilt A=`GPIO22` (pin 15), and Tilt B=`GPIO23` (pin 16), all on `/dev/gpiochip0` with bias=`as_is`. Existing saved custom GPIO mappings are preserved. Engineering requires distinct non-negative A/B **line offsets** for every quadrature axis, and the same chip/line cannot be assigned to two axes. Inspect the Pi before configuring:
 
 ```bash
 gpiodetect
 gpioinfo /dev/gpiochip0
 ```
 
-Raspberry Pi GPIO is **3.3 V only**. Never connect a 5–24 V encoder output directly. Identify whether outputs are push-pull, open-collector/open-drain, or differential and use appropriate isolation or level conversion. Open-collector outputs need pull-ups to 3.3 V; differential outputs need a suitable receiver. The UI bias (`as_is`, `pull_up`, or `pull_down`) is not a substitute for electrical level conversion.
+The standard E38S6G5-600B-G24N encoders are 600 PPR and use quadrature ×4. They are powered from Pi 5 V with a common ground, while each NPN/open-collector A/B signal has its own 4.7 kΩ pull-up to Pi 3.3 V. Raspberry Pi GPIO is **3.3 V only**: never pull a signal line to 5 V or connect an incompatible 5–24 V output directly. The UI bias (`as_is`, `pull_up`, or `pull_down`) is not a substitute for correct electrical pull-ups, isolation, or level conversion.
 
 A safe initial bench profile can use Pan=`quadrature_gpio`, Tilt=`simulator`, and Zoom/Focus=`disabled`. With power off, connect encoder ground through the chosen interface, connect A/B to the configured offsets, then power up. Confirm raw counts change, learn direction if needed, set a known current angle, and only then capture world-calibration marks. Diagnostics show event totals, illegal transitions, and sequence gaps.
 

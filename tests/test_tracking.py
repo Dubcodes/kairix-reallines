@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from app.state import StateStore
-from app.tracking import TrackingConfigError, counts_per_camera_revolution, default_axis_config, degrees_per_count, map_raw_value, merge_axis_update
+from app.tracking import TrackingConfigError, counts_per_camera_revolution, default_axis_config, degrees_per_count, map_raw_value, merge_axis_update, normalise_axis_config
 
 
 class SilentDebug:
@@ -14,6 +14,44 @@ class SilentDebug:
 
 
 class MappingCase(unittest.TestCase):
+    def test_standard_pan_and_tilt_gpio_defaults_are_distinct(self):
+        pan = default_axis_config("pan")
+        tilt = default_axis_config("tilt")
+
+        self.assertEqual(pan["source"], "simulator")
+        self.assertEqual(tilt["source"], "simulator")
+        self.assertEqual(
+            pan["source_config"],
+            {"stale_timeout_seconds": 2.0, "chip": "/dev/gpiochip0", "line_a": 17, "line_b": 27, "bias": "as_is"},
+        )
+        self.assertEqual(
+            tilt["source_config"],
+            {"stale_timeout_seconds": 2.0, "chip": "/dev/gpiochip0", "line_a": 22, "line_b": 23, "bias": "as_is"},
+        )
+        self.assertEqual({pan["source_config"]["line_a"], pan["source_config"]["line_b"]} & {tilt["source_config"]["line_a"], tilt["source_config"]["line_b"]}, set())
+        for config in (pan, tilt):
+            self.assertEqual(config["mapping"]["ppr"], 600)
+            self.assertEqual(config["mapping"]["quadrature_multiplier"], 4)
+            self.assertEqual(config["mapping"]["encoder_revs_per_camera_rev"], 1.0)
+            self.assertEqual(config["mapping"]["direction"], 1)
+            self.assertEqual(config["mapping"]["offset"], 0.0)
+
+    def test_normalisation_preserves_saved_custom_gpio_mapping(self):
+        custom = {
+            "source": "quadrature_gpio",
+            "source_config": {"chip": "/dev/gpiochip4", "line_a": 9, "line_b": 10, "bias": "pull_up"},
+        }
+        normalised = normalise_axis_config("pan", custom)
+        self.assertEqual(normalised["source_config"]["chip"], "/dev/gpiochip4")
+        self.assertEqual(normalised["source_config"]["line_a"], 9)
+        self.assertEqual(normalised["source_config"]["line_b"], 10)
+        self.assertEqual(normalised["source_config"]["bias"], "pull_up")
+
+    def test_normalisation_upgrades_only_legacy_empty_gpio_placeholders(self):
+        legacy = {"source": "simulator", "source_config": {"chip": "", "line_a": None, "line_b": None, "bias": "as_is"}}
+        self.assertEqual(normalise_axis_config("pan", legacy)["source_config"]["line_a"], 17)
+        self.assertEqual(normalise_axis_config("tilt", legacy)["source_config"]["line_a"], 22)
+
     def test_encoder_mapping_known_values_direction_and_offset(self):
         config = default_axis_config("pan", "quadrature_gpio")
         config["mapping"].update({"ppr": 600, "quadrature_multiplier": 4, "encoder_revs_per_camera_rev": 5, "direction": 1, "offset": 0})
@@ -47,6 +85,19 @@ class TrackingStoreCase(unittest.IsolatedAsyncioTestCase):
             reloaded = self.make_store(directory)
             self.assertEqual(reloaded.profile_index["active_id"], profile_id)
             self.assertEqual(reloaded.profile["name"], "Development Simulator")
+
+    async def test_saved_custom_gpio_mapping_survives_store_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            await store.update_axis_config(profile_id, "pan", {
+                "source": "quadrature_gpio",
+                "source_config": {"chip": "/dev/gpiochip4", "line_a": 9, "line_b": 10, "bias": "pull_up"},
+            })
+
+            reloaded = self.make_store(directory)
+            source = reloaded.profile["axes"]["pan"]["source_config"]
+            self.assertEqual((source["chip"], source["line_a"], source["line_b"], source["bias"]), ("/dev/gpiochip4", 9, 10, "pull_up"))
 
     async def test_profile_crud_switching_and_cannot_delete_last(self):
         with tempfile.TemporaryDirectory() as directory:

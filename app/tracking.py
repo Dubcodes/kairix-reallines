@@ -10,6 +10,10 @@ AXES = ("pan", "tilt", "zoom", "focus")
 SOURCE_TYPES = ("simulator", "disabled", "quadrature_gpio", "imu", "external")
 REQUIRED_AXES = ("pan", "tilt")
 ALLOWED_DECODE_MULTIPLIERS = (1, 2, 4)
+DEFAULT_GPIO_BY_AXIS = {
+    "pan": {"chip": "/dev/gpiochip0", "line_a": 17, "line_b": 27},
+    "tilt": {"chip": "/dev/gpiochip0", "line_a": 22, "line_b": 23},
+}
 
 
 class TrackingConfigError(ValueError):
@@ -20,6 +24,14 @@ def default_axis_config(axis: str, source: str | None = None) -> dict[str, Any]:
     if axis not in AXES:
         raise TrackingConfigError(f"Unknown tracking axis: {axis}")
     selected = source or ("simulator" if axis in {"pan", "tilt", "zoom"} else "disabled")
+    source_config = {
+        "stale_timeout_seconds": 2.0,
+        "chip": "",
+        "line_a": None,
+        "line_b": None,
+        "bias": "as_is",
+    }
+    source_config.update(DEFAULT_GPIO_BY_AXIS.get(axis, {}))
     return {
         "source": selected,
         "mapping": {
@@ -30,13 +42,7 @@ def default_axis_config(axis: str, source: str | None = None) -> dict[str, Any]:
             "quadrature_multiplier": 4,
             "encoder_revs_per_camera_rev": 1.0,
         },
-        "source_config": {
-            "stale_timeout_seconds": 2.0,
-            "chip": "",
-            "line_a": None,
-            "line_b": None,
-            "bias": "as_is",
-        },
+        "source_config": source_config,
     }
 
 
@@ -54,7 +60,19 @@ def normalise_axis_config(axis: str, value: dict[str, Any] | None) -> dict[str, 
     value = value or {}
     result["source"] = value.get("source", result["source"])
     result["mapping"].update(value.get("mapping") or {})
-    result["source_config"].update(value.get("source_config") or {})
+    source_config = deepcopy(value.get("source_config") or {})
+    # Profiles written before the standard hardware mapping existed contain
+    # explicit empty placeholders. Treat that exact legacy shape as
+    # unconfigured, while preserving every real persisted GPIO assignment.
+    if (
+        axis in DEFAULT_GPIO_BY_AXIS
+        and not source_config.get("chip")
+        and source_config.get("line_a") is None
+        and source_config.get("line_b") is None
+    ):
+        for key in ("chip", "line_a", "line_b"):
+            source_config.pop(key, None)
+    result["source_config"].update(source_config)
     validate_axis_config(axis, result)
     return result
 

@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.quadrature import QuadratureDecoder
 from app.gpio_source import QuadratureGpioWorker
@@ -189,6 +190,79 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(stationary["health"], "VALID")
 
 
+class DualGpioManagerCase(unittest.TestCase):
+    def test_manager_configures_and_retains_two_independent_workers(self):
+        instances = []
+
+        class FakeWorker:
+            def __init__(self, axis, config):
+                self.axis = axis
+                self.config = config
+                self.started = False
+                self.stopped = False
+                instances.append(self)
+
+            def start(self):
+                self.started = True
+
+            def stop(self):
+                self.stopped = True
+
+            def snapshot(self):
+                return {"axis": self.axis}
+
+        profile = default_profile()
+        profile["axes"]["pan"]["source"] = "quadrature_gpio"
+        profile["axes"]["tilt"]["source"] = "quadrature_gpio"
+        manager = TrackingSourceManager()
+
+        with patch("app.source_manager.QuadratureGpioWorker", FakeWorker):
+            manager.configure("dual-rig", profile)
+            self.assertEqual(set(manager._workers), {"pan", "tilt"})
+            self.assertEqual(manager.snapshots(), {"pan": {"axis": "pan"}, "tilt": {"axis": "tilt"}})
+            self.assertEqual(len(instances), 2)
+            self.assertTrue(all(worker.started for worker in instances))
+            self.assertEqual(instances[0].config["source_config"]["line_a"], 17)
+            self.assertEqual(instances[1].config["source_config"]["line_a"], 22)
+            manager.configure("dual-rig", profile)
+            self.assertEqual(len(instances), 2, "unchanged dual workers should be reused")
+            manager.stop()
+
+        self.assertTrue(all(worker.stopped for worker in instances))
+
+    def test_counts_references_motion_and_integrity_are_axis_local(self):
+        pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
+        tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
+        pan.begin_acquisition(0, 0)
+        tilt.begin_acquisition(0, 0)
+        manager = TrackingSourceManager()
+        manager._workers = {"pan": pan, "tilt": tilt}
+
+        pan_reference = manager.set_reference("pan", 10.0)
+        tilt_reference = manager.set_reference("tilt", -5.0)
+        self.assertNotEqual(pan_reference, tilt_reference)
+
+        pan.decoder.count = 240
+        snapshots = manager.snapshots()
+        self.assertEqual(snapshots["pan"]["raw_count"], 240)
+        self.assertEqual(snapshots["tilt"]["raw_count"], 0)
+        self.assertEqual(snapshots["pan"]["reference_id"], pan_reference)
+        self.assertEqual(snapshots["tilt"]["reference_id"], tilt_reference)
+
+        tilt.decoder.count = -120
+        snapshots = manager.snapshots()
+        self.assertEqual(snapshots["pan"]["raw_count"], 240)
+        self.assertEqual(snapshots["tilt"]["raw_count"], -120)
+
+        pan.process_levels(1, 1, 1_000_000_000)
+        snapshots = manager.snapshots()
+        self.assertTrue(snapshots["pan"]["integrity_lost"])
+        self.assertFalse(snapshots["pan"]["referenced"])
+        self.assertFalse(snapshots["tilt"]["integrity_lost"])
+        self.assertTrue(snapshots["tilt"]["referenced"])
+        self.assertEqual(snapshots["tilt"]["reference_id"], tilt_reference)
+
+
 class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
     def make_store(self, directory):
         return StateStore(Path(directory), SilentDebug())
@@ -304,6 +378,81 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
                     "source": "quadrature_gpio",
                     "source_config": {"chip": "/dev/gpiochip0", "line_a": 6, "line_b": 7},
                 })
+
+    async def test_standard_dual_gpio_defaults_do_not_conflict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            await store.update_axis_config(profile_id, "pan", {"source": "quadrature_gpio"})
+            await store.update_axis_config(profile_id, "tilt", {"source": "quadrature_gpio"})
+            self.assertEqual(store.profile["axes"]["pan"]["source_config"]["line_a"], 17)
+            self.assertEqual(store.profile["axes"]["tilt"]["source_config"]["line_a"], 22)
+
+    async def test_dual_workers_drive_validity_identity_and_restart_safety(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_axis(store, "pan", line_a=17, line_b=27)
+            await self.configure_axis(store, "tilt", line_a=22, line_b=23)
+            pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
+            tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
+            pan.begin_acquisition(0, 0)
+            tilt.begin_acquisition(0, 0)
+            sources = TrackingSourceManager()
+            sources._workers = {"pan": pan, "tilt": tilt}
+
+            pan_reference = pan.set_reference(0)
+            await sample_tracking_once(store, sources)
+            self.assertFalse(store.tracking["valid"], "Tilt must also be referenced")
+            tilt_reference = tilt.set_reference(0)
+            await sample_tracking_once(store, sources)
+            self.assertTrue(store.tracking["valid"])
+            self.assertNotEqual(pan_reference, tilt_reference)
+
+            pan.decoder.count = 600
+            await sample_tracking_once(store, sources)
+            self.assertAlmostEqual(store.tracking["axes"]["pan"]["value"], 90.0)
+            self.assertAlmostEqual(store.tracking["axes"]["tilt"]["value"], 0.0)
+            tilt.decoder.count = -300
+            await sample_tracking_once(store, sources)
+            self.assertAlmostEqual(store.tracking["axes"]["pan"]["value"], 90.0)
+            self.assertAlmostEqual(store.tracking["axes"]["tilt"]["value"], -45.0)
+
+            await store.generate_synthetic_world_calibration({"camera": {"x": 0, "y": 0, "z": 1.8}})
+            self.assertEqual(
+                store.world_calibration["tracking_reference_identity"],
+                {"pan": pan_reference, "tilt": tilt_reference},
+            )
+            self.assertTrue(store.camera["world_valid"])
+
+            pan.clear_reference()
+            await sample_tracking_once(store, sources)
+            self.assertFalse(store.tracking["valid"])
+            self.assertTrue(store.tracking["axes"]["tilt"]["valid"])
+            pan.set_reference(0)
+            tilt.clear_reference()
+            await sample_tracking_once(store, sources)
+            self.assertTrue(store.tracking["axes"]["pan"]["valid"])
+            self.assertFalse(store.tracking["axes"]["tilt"]["valid"])
+            self.assertFalse(store.tracking["valid"])
+
+            tilt.set_reference(0)
+            pan.process_levels(1, 1, 1_000_000_000)
+            await sample_tracking_once(store, sources)
+            self.assertFalse(store.tracking["axes"]["pan"]["referenced"])
+            self.assertFalse(store.tracking["axes"]["pan"]["valid"])
+            self.assertTrue(store.tracking["axes"]["tilt"]["referenced"])
+            self.assertTrue(store.tracking["axes"]["tilt"]["valid"])
+            self.assertFalse(store.tracking["valid"])
+
+            restarted_pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
+            restarted_tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
+            restarted_pan.begin_acquisition(0, 0)
+            restarted_tilt.begin_acquisition(0, 0)
+            sources._workers = {"pan": restarted_pan, "tilt": restarted_tilt}
+            await sample_tracking_once(store, sources)
+            self.assertFalse(store.tracking["axes"]["pan"]["referenced"])
+            self.assertFalse(store.tracking["axes"]["tilt"]["referenced"])
+            self.assertFalse(store.tracking["valid"])
 
     async def test_reference_is_session_only_after_reload(self):
         with tempfile.TemporaryDirectory() as directory:
