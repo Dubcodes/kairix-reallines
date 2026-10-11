@@ -30,7 +30,9 @@ ln -sfn "$RELEASE" "$BASE/current"
 chown -R kairix:kairix "$DATA"
 install -m 0644 "$SRC/installer/kairix-reallines.service" /etc/systemd/system/kairix-reallines.service
 systemctl daemon-reload
-systemctl enable --now kairix-reallines.service
+systemctl enable kairix-reallines.service
+systemctl restart kairix-reallines.service
+systemctl is-active --quiet kairix-reallines.service
 sleep 1
 systemctl --no-pager --full status kairix-reallines.service || true
 IP=$(hostname -I | awk '{print $1}')

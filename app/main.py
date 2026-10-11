@@ -121,6 +121,10 @@ async def request_logging(request: Request, call_next):
     elapsed = (time.monotonic() - start) * 1000.0
     if not request.url.path.startswith("/static/"):
         debug.app("http_request", method=request.method, path=request.url.path, status=response.status_code, ms=round(elapsed, 3))
+    if request.url.path.startswith("/static/") or request.url.path in {"/", "/engineering", "/calibration", "/control", "/gfx"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 

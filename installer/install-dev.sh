@@ -71,7 +71,9 @@ SMB_EOF
 fi
 
 systemctl daemon-reload
-systemctl enable --now kairix-reallines-dev.service
+systemctl enable kairix-reallines-dev.service
+systemctl restart kairix-reallines-dev.service
+systemctl is-active --quiet kairix-reallines-dev.service
 systemctl restart smbd
 
 IP=$(hostname -I | awk '{print $1}')

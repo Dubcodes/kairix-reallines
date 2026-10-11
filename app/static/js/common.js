@@ -7,7 +7,14 @@ export async function api(path, options={}) {
   return type.includes('application/json') ? r.json() : r;
 }
 
-export function connectState(onState, page='unknown') {
+export function gateControlsUntilState(root=document) {
+  const controls = [...root.querySelectorAll('button, input, select')];
+  const previous = controls.map(control => control.disabled);
+  controls.forEach(control => { control.disabled = true; });
+  return () => controls.forEach((control, index) => { control.disabled = previous[index]; });
+}
+
+export function connectState(onState, page='unknown', onStatus=()=>{}) {
   let ws;
   let reconnectTimer;
   let statePollTimer;
@@ -15,13 +22,18 @@ export function connectState(onState, page='unknown') {
   let stopped = false;
   let polling = false;
   let currentState = null;
+  const status = (name, detail='') => {
+    try { onStatus(name, detail); } catch (e) { console.error(e); }
+  };
   const deliver = (data, type='state') => {
     currentState = data;
     try {
       onState(data, {type});
+      return true;
     } catch (e) {
       console.error(e);
       logFrontend(page, page === 'control' ? 'control_initialization_failed' : 'state_handler_error', {error:String(e)});
+      return false;
     }
   };
   const deliverPose = (pose) => {
@@ -33,10 +45,11 @@ export function connectState(onState, page='unknown') {
     try {
       const response = await fetch('/api/state', {cache:'no-store'});
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-      deliver(await response.json(), 'state');
+      if (deliver(await response.json(), 'state')) status('state-received');
     } catch (e) {
       console.error(e);
       logFrontend(page, 'state_fetch_error', {error:String(e)});
+      status('state-error', String(e));
     }
   };
   const fetchPose = async () => {
@@ -51,6 +64,7 @@ export function connectState(onState, page='unknown') {
   const startPolling = () => {
     if (polling || stopped) return;
     polling = true;
+    status('polling');
     const pollState = async () => {
       if (!polling || stopped) return;
       await fetchState();
@@ -75,6 +89,7 @@ export function connectState(onState, page='unknown') {
     ws = new WebSocket(`${proto}//${location.host}/ws`);
     ws.onopen = () => {
       stopPolling();
+      status('websocket-open');
       logFrontend(page, 'ws_open', {});
     };
     ws.onmessage = (ev) => {
@@ -88,11 +103,13 @@ export function connectState(onState, page='unknown') {
       }
     };
     ws.onclose = () => {
+      status('polling');
       startPolling();
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 5000);
     };
   };
+  status('connecting');
   fetchState();
   connect();
   return () => {

@@ -1,9 +1,11 @@
-import {api,connectState,logFrontend} from './common.js?v=world1';
+import {api,connectState,gateControlsUntilState,logFrontend} from './common.js?v=ui-repair1';
 
 const byId=id=>document.getElementById(id);
 const targets=['top_left','top_right','bottom_right','bottom_left'];
 const targetLabel=value=>value.replaceAll('_',' ').toUpperCase();
 let state=null,applying=false;
+const releaseInitialControls=gateControlsUntilState();
+let controlsReady=false;
 
 function format(value,digits=3){return Number.isFinite(+value)?(+value).toFixed(digits):'—';}
 function error(message=''){byId('worldError').textContent=message;}
@@ -34,6 +36,8 @@ function renderCalibration(){
   byId('overlayStatus').textContent=observation?'MARKED':'NOT MARKED';
   byId('clearTarget').disabled=!observation;
   byId('markTarget').disabled=!state.tracking.valid;
+  byId('solveWorld').disabled=!state.tracking.valid||targets.some(target=>!calibration.observations[target]);
+  byId('generateSynthetic').disabled=!state.tracking.valid;
   const rows=solution?{
     Status:calibration.valid&&identityMatch&&collection.reference_match?'VALID':calibration.effective_status||'NOT VALID',
     'Camera X':`${format(solution.camera.x)} m`,'Camera Y':`${format(solution.camera.y)} m`,'Camera Z':`${format(solution.camera.z)} m`,
@@ -53,7 +57,7 @@ function collectUpdate(){
   return{name:byId('worldCalibrationName').value,target,camera_hint,orientation_hint,horizontal_fov:+byId('worldFov').value,fixed_roll:+byId('worldRoll').value};
 }
 
-connectState((incoming,event)=>{state=incoming;applying=true;if(event?.type!=='pose')renderCalibration();else byId('overlayAngles').textContent=`PAN ${format(state.tracking.axes.pan.value)}° · TILT ${format(state.tracking.axes.tilt.value)}°`;byId('calibrationAxes').innerHTML=axisCard('pan')+axisCard('tilt');for(const axis of ['pan','tilt']){const runtime=state.tracking.axes[axis];if(runtime.raw!==null&&byId(axis)!==document.activeElement)byId(axis).value=runtime.raw;byId(axis).disabled=runtime.source!=='simulator';}applying=false;if(event?.type!=='pose'){const panMap=state.profiles.active.axes.pan.mapping,tiltMap=state.profiles.active.axes.tilt.mapping;byId('panResult').textContent=`LEFT ${state.calibration.marks.pan_left??'—'} · RIGHT ${state.calibration.marks.pan_right??'—'} · ${panMap.direction_learned?(panMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;byId('tiltResult').textContent=`DOWN ${state.calibration.marks.tilt_down??'—'} · UP ${state.calibration.marks.tilt_up??'—'} · ${tiltMap.direction_learned?(tiltMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;}},'calibration');
+connectState((incoming,event)=>{state=incoming;if(!controlsReady){releaseInitialControls();controlsReady=true;}applying=true;if(event?.type!=='pose')renderCalibration();else byId('overlayAngles').textContent=`PAN ${format(state.tracking.axes.pan.value)}° · TILT ${format(state.tracking.axes.tilt.value)}°`;byId('calibrationAxes').innerHTML=axisCard('pan')+axisCard('tilt');for(const axis of ['pan','tilt']){const runtime=state.tracking.axes[axis];if(runtime.raw!==null&&byId(axis)!==document.activeElement)byId(axis).value=runtime.raw;byId(axis).disabled=runtime.source!=='simulator';document.querySelectorAll(`[data-mark^="${axis}_"]`).forEach(button=>button.disabled=!runtime.valid);}const observations=state.world_calibrations.active.observations;byId('markTarget').disabled=!state.tracking.valid;byId('solveWorld').disabled=!state.tracking.valid||targets.some(target=>!observations[target]);byId('generateSynthetic').disabled=!state.tracking.valid;applying=false;if(event?.type!=='pose'){const panMap=state.profiles.active.axes.pan.mapping,tiltMap=state.profiles.active.axes.tilt.mapping;byId('panResult').textContent=`LEFT ${state.calibration.marks.pan_left??'—'} · RIGHT ${state.calibration.marks.pan_right??'—'} · ${panMap.direction_learned?(panMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;byId('tiltResult').textContent=`DOWN ${state.calibration.marks.tilt_down??'—'} · UP ${state.calibration.marks.tilt_up??'—'} · ${tiltMap.direction_learned?(tiltMap.direction>0?'+1 learned':'-1 learned'):'not learned'}`;}},'calibration');
 
 byId('worldCalibrationSelect').onchange=event=>safe(()=>api(`/api/world-calibrations/${event.target.value}/select`,{method:'POST'}));
 byId('newWorldCalibration').onclick=()=>safe(()=>api('/api/world-calibrations',{method:'POST',body:JSON.stringify({name:'New World Calibration'})}));

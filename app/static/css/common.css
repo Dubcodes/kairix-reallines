@@ -35,6 +35,8 @@ button.danger { background:#60242a; border-color:#99414a; }
 a.button { display:inline-block; color:var(--text); text-decoration:none; background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:9px 12px; }
 .status-ok { color:var(--ok); }
 .status-bad { color:var(--danger); }
+.status-warn { color:#ffd166; }
+.header-status { display:flex; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }
 .kv { display:grid; grid-template-columns:150px 1fr; gap:5px 10px; font-size:13px; }
 .kv div:nth-child(odd) { color:var(--muted); }
 code { color:#cbe6ff; }
