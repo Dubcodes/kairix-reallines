@@ -23,6 +23,16 @@ class StoreCase(unittest.IsolatedAsyncioTestCase):
     def make_store(self, path):
         return StateStore(Path(path), SilentDebug())
 
+    async def test_provisional_gfx_override_defaults_off_and_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            self.assertFalse(store.engineering["allow_provisional_gfx"])
+            updated = await store.update_engineering_settings({"allow_provisional_gfx": True})
+            self.assertTrue(updated["allow_provisional_gfx"])
+            self.assertTrue(self.make_store(directory).engineering["allow_provisional_gfx"])
+            with self.assertRaisesRegex(ValueError, "must be boolean"):
+                await store.update_engineering_settings({"allow_provisional_gfx": 1})
+
     async def test_transient_item_update_broadcasts_without_layout_save(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)

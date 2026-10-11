@@ -20,7 +20,7 @@ from .world_calibration import CalibrationError, TARGET_POINTS, default_world_ca
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
-DEFAULT_ENGINEERING = {"profile_name": "Development Simulator", "debug_enabled": True, "input_sources": {"pan": "simulator", "tilt": "simulator", "zoom": "simulator", "focus": "disabled"}}
+DEFAULT_ENGINEERING = {"profile_name": "Development Simulator", "debug_enabled": True, "allow_provisional_gfx": False, "input_sources": {"pan": "simulator", "tilt": "simulator", "zoom": "simulator", "focus": "disabled"}}
 DEFAULT_SYNC = {"graphics_delay_ms": 0, "history_duration_seconds": 5.0}
 
 
@@ -61,6 +61,7 @@ class StateStore:
         self.camera = deepcopy(DEFAULT_CAMERA)
         self.calibration = self._load("calibration.json", DEFAULT_CALIBRATION)
         self.engineering = self._load("engineering.json", DEFAULT_ENGINEERING)
+        self.engineering["allow_provisional_gfx"] = self.engineering.get("allow_provisional_gfx") is True
         self.profile_index = self._load_or_migrate_profiles(legacy_engineering_exists)
         self.profile = self._read_profile(self.profile_index["active_id"])
         self._sync_calibration_from_profile()
@@ -647,6 +648,20 @@ class StateStore:
 
     async def broadcast_pose(self) -> None:
         await self.broadcast({"type": "pose", "data": self.pose_snapshot()})
+
+    async def update_engineering_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        unknown = set(values) - {"allow_provisional_gfx"}
+        if unknown:
+            raise ValueError(f"Unknown Engineering setting: {sorted(unknown)[0]}")
+        if "allow_provisional_gfx" in values and not isinstance(values["allow_provisional_gfx"], bool):
+            raise ValueError("allow_provisional_gfx must be boolean")
+        async with self.lock:
+            self.engineering.update(values)
+            self._save("engineering.json", self.engineering)
+            result = deepcopy(self.engineering)
+        self.debug.app("engineering_settings_updated", allow_provisional_gfx=result["allow_provisional_gfx"])
+        await self.broadcast_state()
+        return result
 
     async def update_sync_config(self, values: dict[str, Any]) -> dict[str, Any]:
         candidate = {**self.sync_config, **values}

@@ -37,8 +37,9 @@ function axisMarkup(axis,config){
       <div class="encoder-config"${encoder?'':' hidden'}>
         <label>Encoder PPR<input data-mapping="ppr" type="number" min="1" step="1" value="${mapping.ppr}"></label>
         <label>Quadrature decode<select data-mapping="quadrature_multiplier">${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}</option>`).join('')}</select></label>
-        <label>Encoder revs / camera rev<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${mapping.encoder_revs_per_camera_rev}"></label>
-        <div class="small">Degrees per count: <strong>${format(degreesPerCount,6)}°</strong></div>
+        <label>Encoder shaft revs per 1 camera revolution<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${mapping.encoder_revs_per_camera_rev}"></label>
+        <div class="small">Example: 10 means the encoder shaft turns 10 times while the camera pans 360°.</div>
+        <div class="small">Degrees per count: <strong>${format(degreesPerCount,6)}° / count</strong></div>
         <div class="gpio-draft">
           <label>gpiochip device<input data-source-config="chip" placeholder="/dev/gpiochip0" value="${escapeHtml(sc.chip||'')}"></label>
           <label>Line A offset<input data-source-config="line_a" type="number" min="0" step="1" value="${sc.line_a??''}"></label>
@@ -174,6 +175,7 @@ function renderSync(){const sync=state.sync,live=state.camera,render=state.rende
 
 const simulatorIds=['pan','tilt','fov','height'];
 function showSlider(id,value){byId(id+'Out').textContent=format(value,id==='height'?2:1)+(id==='height'?' m':id==='fov'?'°':' raw');}
+function sourceLabel(source){return({quadrature_gpio:'GPIO',simulator:'Simulator',disabled:'Disabled',imu:'IMU',external:'External'})[source]||source;}
 for(const id of simulatorIds){const input=byId(id),eventName=id==='pan'||id==='tilt'?'input':'change';input.addEventListener('input',()=>showSlider(id,input.value));input.addEventListener(eventName,()=>{showSlider(id,input.value);if(!applying)safe(()=>api('/api/camera',{method:'POST',body:JSON.stringify({[id]:+input.value})}));});showSlider(id,input.value);}
 
 byId('profileSelect').onchange=event=>safe(()=>api(`/api/profiles/${event.target.value}/select`,{method:'POST'}));
@@ -182,16 +184,26 @@ byId('renameProfile').onclick=async()=>{const answer=await showDialog({title:'Re
 byId('duplicateProfile').onclick=async()=>{const answer=await showDialog({title:'Duplicate setup profile',value:`${state.profiles.active.name} Copy`,accept:'Duplicate'});if(answer.accepted&&answer.value)await safe(()=>api(`/api/profiles/${state.profiles.active_id}/duplicate`,{method:'POST',body:JSON.stringify({name:answer.value})}));};
 byId('deleteProfile').onclick=async()=>{const answer=await showDialog({title:`Delete “${state.profiles.active.name}”?`,message:'At least one setup profile is always retained.',accept:'Delete'});if(answer.accepted)await safe(()=>api(`/api/profiles/${state.profiles.active_id}`,{method:'DELETE'}));};
 byId('debugOn').onclick=()=>safe(()=>api('/api/debug/true',{method:'POST'}));byId('debugOff').onclick=()=>safe(()=>api('/api/debug/false',{method:'POST'}));
+byId('allowProvisionalGfx').onchange=async event=>{const enabled=event.target.checked,result=await safe(()=>api('/api/engineering',{method:'PATCH',body:JSON.stringify({values:{allow_provisional_gfx:enabled}})}));if(!result)event.target.checked=state.engineering.allow_provisional_gfx;};
 
 function renderState(incoming,event){
   try {
     state=validateEngineeringState(incoming);
     applying=true;
-    const panRaw=state.tracking.axes.pan.raw,tiltRaw=state.tracking.axes.tilt.raw;
-    for(const [id,value] of [['pan',panRaw],['tilt',tiltRaw],['fov',state.camera.fov],['height',state.camera.height]])if(value!==null&&byId(id)!==document.activeElement){byId(id).value=value;showSlider(id,value);}
-    byId('pan').disabled=state.tracking.axes.pan.source!=='simulator';
-    byId('tilt').disabled=state.tracking.axes.tilt.source!=='simulator';
+    for(const [id,runtime] of [['pan',state.tracking.axes.pan],['tilt',state.tracking.axes.tilt]]){
+      const simulator=runtime.source==='simulator';
+      byId(id).disabled=!simulator;
+      if(simulator&&runtime.raw!==null&&byId(id)!==document.activeElement){byId(id).value=runtime.raw;showSlider(id,runtime.raw);}
+      if(!simulator)byId(id+'Out').textContent=`Simulator inactive — ${sourceLabel(runtime.source)} source active`;
+    }
+    for(const [id,value] of [['fov',state.camera.fov],['height',state.camera.height]])if(value!==null&&byId(id)!==document.activeElement){byId(id).value=value;showSlider(id,value);}
     byId('fov').disabled=false;byId('height').disabled=false;
+    const gfxToggle=byId('allowProvisionalGfx');
+    gfxToggle.disabled=false;
+    if(gfxToggle!==document.activeElement)gfxToggle.checked=state.engineering.allow_provisional_gfx===true;
+    const gfxStatus=byId('gfxProjectionStatus');
+    gfxStatus.textContent=state.camera.world_valid?'CALIBRATED GFX':state.tracking.valid&&state.engineering.allow_provisional_gfx?'PROVISIONAL GFX ENABLED':state.tracking.valid?'STRICT GFX — WORLD CALIBRATION REQUIRED':'GFX BLOCKED — TRACKING INVALID';
+    gfxStatus.className=state.camera.world_valid?'status-ok':state.tracking.valid&&state.engineering.allow_provisional_gfx?'status-warn':'status-bad';
     applying=false;
     byId('trackingStatus').textContent=state.tracking.valid?(state.camera.world_valid?'TRACKING + WORLD VALID':'TRACKING VALID · WORLD CALIBRATION REQUIRED'):'TRACKING INVALID';
     byId('trackingStatus').className=state.tracking.valid?(state.camera.world_valid?'status-ok':'status-warn'):'status-bad';

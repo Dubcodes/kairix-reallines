@@ -17,8 +17,10 @@ function renderCalibration(){
   const collection=state.world_calibrations,calibration=collection.active,solution=calibration.solution;
   byId('activeProfile').textContent=state.profiles.active.name;
   const identityMatch=collection.profile_match&&collection.fingerprint_match;
-  byId('profileMatch').textContent=!collection.profile_match?'WARNING: this calibration belongs to a different setup profile.':!collection.fingerprint_match?'WARNING: tracking configuration changed; solve this calibration again.':'Setup profile and tracking fingerprint match this calibration.';
-  byId('profileMatch').className=identityMatch?'small':'form-error';
+  const worldReady=calibration.valid&&identityMatch&&collection.reference_match;
+  const mismatchReason=!collection.profile_match?'This calibration belongs to a different setup profile.':!collection.fingerprint_match?'Tracking configuration changed; update this calibration.':!collection.reference_match?'Encoder reference changed; update this calibration.':!calibration.valid?'World calibration has not been solved.':'';
+  byId('profileMatch').textContent=worldReady?'Tracking and world calibration are valid.':state.tracking.valid?`TRACKING VALID. ${mismatchReason} Camera Preview is available using a provisional pose; calibration improves world accuracy and enables strict GFX output.`:`TRACKING INVALID. ${mismatchReason||'A required tracking axis needs attention.'}`;
+  byId('profileMatch').className=worldReady?'small status-ok':state.tracking.valid?'small status-warn':'form-error';
   const select=byId('worldCalibrationSelect');
   if(select!==document.activeElement)select.replaceChildren(...collection.items.map(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.name;option.selected=item.id===collection.active_id;return option;}));
   if(byId('worldCalibrationName')!==document.activeElement)byId('worldCalibrationName').value=calibration.name;
@@ -27,8 +29,8 @@ function renderCalibration(){
   for(const key of ['pan_offset','tilt_offset'])setInput(`[data-orientation-hint="${key}"]`,calibration.orientation_hint[key]);
   setInput('#worldFov',calibration.horizontal_fov);
   setInput('#worldRoll',calibration.fixed_roll);
-  byId('status').textContent=!collection.profile_match?'PROFILE MISMATCH':!collection.fingerprint_match?'TRACKING MISMATCH':!collection.reference_match?'REFERENCE MISMATCH — RECALIBRATE':calibration.status;
-  byId('status').className=calibration.valid&&identityMatch&&collection.reference_match?'status-ok':'status-bad';
+  byId('status').textContent=worldReady?'CALIBRATED':state.tracking.valid?'TRACKING VALID · WORLD CALIBRATION NEEDS UPDATING':'TRACKING INVALID';
+  byId('status').className=worldReady?'status-ok':state.tracking.valid?'status-warn':'status-bad';
   byId('targetSteps').replaceChildren(...targets.map((target,index)=>{const button=document.createElement('button');button.className=`target-step${target===calibration.current_target?' active':''}${calibration.observations[target]?' marked':''}`;button.textContent=`${index+1}. ${targetLabel(target)} — ${calibration.observations[target]?'MARKED':'NOT MARKED'}`;button.onclick=()=>safe(()=>api('/api/world-calibration/target',{method:'POST',body:JSON.stringify({target})}));return button;}));
   const current=calibration.current_target,observation=calibration.observations[current];
   byId('overlayTarget').textContent=targetLabel(current);
@@ -39,7 +41,7 @@ function renderCalibration(){
   byId('solveWorld').disabled=!state.tracking.valid||targets.some(target=>!calibration.observations[target]);
   byId('generateSynthetic').disabled=!state.tracking.valid;
   const rows=solution?{
-    Status:calibration.valid&&identityMatch&&collection.reference_match?'VALID':calibration.effective_status||'NOT VALID',
+    Status:worldReady?'VALID':mismatchReason||calibration.effective_status||'NOT VALID',
     'Camera X':`${format(solution.camera.x)} m`,'Camera Y':`${format(solution.camera.y)} m`,'Camera Z':`${format(solution.camera.z)} m`,
     'Pan offset':`${format(solution.pan_offset)}°`,'Tilt offset':`${format(solution.tilt_offset)}°`,
     'RMS error':`${format(solution.rms_angular_error,4)}°`,'Max error':`${format(solution.max_angular_error,4)}°`,Observations:solution.observation_count,

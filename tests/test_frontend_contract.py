@@ -55,7 +55,7 @@ class FrontendContractCase(unittest.TestCase):
             "newProfile", "duplicateProfile", "renameProfile", "deleteProfile",
             "profileError", "trackingAxes", "pan", "panOut", "tilt", "tiltOut",
             "fov", "fovOut", "height", "heightOut", "live", "syncDiagnostics",
-            "debugOn", "debugOff", "debugState", "engineeringDialog", "dialogTitle",
+            "allowProvisionalGfx", "gfxProjectionStatus", "debugOn", "debugOff", "debugState", "engineeringDialog", "dialogTitle",
             "dialogMessage", "dialogInput", "dialogCancel", "dialogAccept",
         }
         self.assertTrue(required <= anchors)
@@ -125,6 +125,7 @@ class FrontendContractCase(unittest.TestCase):
             '@app.patch("/api/profiles/{profile_id}/axes/{axis}")',
             '@app.post("/api/tracking/{axis}/reference")',
             '@app.delete("/api/tracking/{axis}/reference")',
+            '@app.patch("/api/engineering")',
             '@app.post("/api/debug/{enabled}")',
         )
         for route in expected:
@@ -162,6 +163,30 @@ class FrontendContractCase(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         for name in ("common", "engineering", "engineering_contract", "calibration", "control", "editor", "render"):
             self.assertIn(f"node --check app/static/js/{name}.js", workflow)
+
+    def test_projection_policy_is_shared_and_gfx_override_is_explicit(self):
+        render = (STATIC / "js" / "render.js").read_text(encoding="utf-8")
+        control = (STATIC / "js" / "control.js").read_text(encoding="utf-8")
+        gfx = (STATIC / "gfx.html").read_text(encoding="utf-8")
+        state = (ROOT / "app" / "state.py").read_text(encoding="utf-8")
+        self.assertIn("export function projectionMode", render)
+        self.assertIn("projectItemGeometry", control)
+        self.assertIn("allowProvisional:true", control)
+        self.assertIn("state?.render_camera||state?.camera", control)
+        self.assertNotIn("!camera?.valid||!camera?.world_valid", control)
+        self.assertIn("allowProvisional:state.engineering?.allow_provisional_gfx===true", gfx)
+        self.assertIn('"allow_provisional_gfx": False', state)
+
+    def test_provisional_workflow_labels_are_clear(self):
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        self.assertIn("Encoder shaft revs per 1 camera revolution", engineering)
+        self.assertIn("format(degreesPerCount,6)", engineering)
+        self.assertIn("° / count", engineering)
+        self.assertIn("Simulator inputs", engineering_html)
+        self.assertIn("Simulator inactive", engineering)
+        self.assertIn("Camera Preview is available using a provisional pose", calibration)
 
     def test_state_and_system_payloads_cover_engineering_fields(self):
         with tempfile.TemporaryDirectory() as directory:

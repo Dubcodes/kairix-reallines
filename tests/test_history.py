@@ -12,7 +12,7 @@ class SilentDebug:
         return lambda *_args, **_kwargs: None
 
 
-def sample(timestamp, pan, valid=True, profile="profile", calibration="calibration"):
+def sample(timestamp, pan, valid=True, profile="profile", calibration="calibration", world_valid=None):
     return PoseSample(
         timestamp=timestamp,
         tracking_pan=pan,
@@ -25,7 +25,7 @@ def sample(timestamp, pan, valid=True, profile="profile", calibration="calibrati
         roll=0,
         fov=60,
         valid=valid,
-        world_valid=valid,
+        world_valid=valid if world_valid is None else world_valid,
         profile_id=profile,
         calibration_id=calibration,
     )
@@ -102,6 +102,22 @@ class HistoryStateCase(unittest.IsolatedAsyncioTestCase):
             reloaded = self.make_store(directory)
             self.assertEqual(reloaded.sync_config["graphics_delay_ms"], 120)
             self.assertEqual(len(reloaded.pose_history.samples), 1)
+
+    async def test_provisional_render_camera_uses_delayed_pose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            now = store.pose_history.samples[-1].timestamp
+            profile = store.profile_index["active_id"]
+            calibration = store.world_calibration_index["active_id"]
+            store.pose_history.reset("provisional delay fixture")
+            store.pose_history.append(sample(now - 0.2, 0, profile=profile, calibration=calibration, world_valid=False))
+            store.pose_history.append(sample(now, 20, profile=profile, calibration=calibration, world_valid=False))
+            store.sync_config["graphics_delay_ms"] = 100
+            with patch("app.state.time.monotonic", return_value=now):
+                render, _sync = store._render_pose_state(now)
+            self.assertTrue(render["valid"])
+            self.assertFalse(render["world_valid"])
+            self.assertAlmostEqual(render["pan"], 10)
 
     async def test_profile_switch_creates_history_discontinuity(self):
         with tempfile.TemporaryDirectory() as directory:

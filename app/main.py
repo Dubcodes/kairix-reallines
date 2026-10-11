@@ -84,6 +84,10 @@ class SyncUpdate(BaseModel):
     values: dict
 
 
+class EngineeringUpdate(BaseModel):
+    values: dict
+
+
 class GroupTranslate(BaseModel):
     dx: float
     dy: float
@@ -230,6 +234,14 @@ async def update_sync_state(body: SyncUpdate):
 @app.post("/api/sync/reset")
 async def reset_sync_delay():
     return await store.update_sync_config({"graphics_delay_ms": 0})
+
+
+@app.patch("/api/engineering")
+async def update_engineering_settings(body: EngineeringUpdate):
+    try:
+        return await store.update_engineering_settings(body.values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/profiles")

@@ -45,6 +45,24 @@ export function isItemEffectivelyVisible(item, scene) {
   return !group || group.visible !== false;
 }
 
+export function projectionMode(camera, allowProvisional=false) {
+  if (!camera?.valid) return {allowed:false, mode:'tracking-invalid'};
+  if (camera.world_valid) return {allowed:true, mode:'calibrated'};
+  if (allowProvisional) return {allowed:true, mode:'provisional'};
+  return {allowed:false, mode:'world-invalid'};
+}
+
+export function projectItemGeometry(item, camera, width, height, allowProvisional=false) {
+  if (!projectionMode(camera, allowProvisional).allowed) return null;
+  if (item.type === 'line') {
+    const a = projectPoint({x:+item.x1,y:+item.y1,z:+item.z1},camera,width,height);
+    const b = projectPoint({x:+item.x2,y:+item.y2,z:+item.z2},camera,width,height);
+    return a && b ? {type:'line',a,b} : null;
+  }
+  const p = projectPoint({x:+item.x,y:+item.y,z:+item.z},camera,width,height);
+  return p ? {type:item.type,p} : null;
+}
+
 export function renderScene(canvas, state, options={}) {
   const ctx = canvas.getContext('2d');
   const rect = canvas.getBoundingClientRect();
@@ -58,29 +76,30 @@ export function renderScene(canvas, state, options={}) {
   ctx.fillRect(0,0,w,h);
 
   const camera = options.camera || state.render_camera || state.camera;
-  if (camera?.valid && camera?.world_valid) for (const item of state.scene.items || []) {
+  const projection = projectionMode(camera, options.allowProvisional === true);
+  let projectedItems = 0;
+  if (projection.allowed) for (const item of state.scene.items || []) {
     if (!isItemEffectivelyVisible(item, state.scene)) continue;
+    const geometry = projectItemGeometry(item,camera,w,h,options.allowProvisional === true);
+    if (!geometry) continue;
     if (item.type === 'line') {
-      const a = projectPoint({x:+item.x1,y:+item.y1,z:+item.z1},camera,w,h);
-      const b = projectPoint({x:+item.x2,y:+item.y2,z:+item.z2},camera,w,h);
-      if (!a || !b) continue;
       ctx.strokeStyle = item.color || '#fff';
       ctx.lineWidth = (+item.width || 4) * dpr;
       ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(geometry.a.x,geometry.a.y); ctx.lineTo(geometry.b.x,geometry.b.y); ctx.stroke();
+      projectedItems += 1;
     }
     if (item.type === 'text') {
-      const p = projectPoint({x:+item.x,y:+item.y,z:+item.z},camera,w,h);
-      if (!p) continue;
+      const p = geometry.p;
       const size = Math.max(8, Math.min(200, (+item.size || 42) * p.scale * 0.08));
       ctx.fillStyle = item.color || '#fff';
       ctx.font = `700 ${size}px system-ui, sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(item.text || '', p.x, p.y);
+      projectedItems += 1;
     }
     if (item.type === 'marker') {
-      const p = projectPoint({x:+item.x,y:+item.y,z:+item.z},camera,w,h);
-      if (!p) continue;
+      const p = geometry.p;
       const radius = Math.max(5*dpr, Math.min(45*dpr, (+item.size || .5) * p.scale));
       ctx.strokeStyle = item.color || '#fff'; ctx.fillStyle = item.color || '#fff';
       ctx.lineWidth = Math.max(2*dpr, radius*.18);
@@ -91,6 +110,7 @@ export function renderScene(canvas, state, options={}) {
         ctx.font = `700 ${labelSize}px system-ui, sans-serif`; ctx.textAlign='center';ctx.textBaseline='bottom';
         ctx.fillText(item.label,p.x,p.y-radius*1.7);
       }
+      projectedItems += 1;
     }
   }
 
@@ -98,4 +118,5 @@ export function renderScene(canvas, state, options={}) {
     ctx.strokeStyle='rgba(255,255,255,.55)'; ctx.lineWidth=dpr;
     ctx.beginPath(); ctx.moveTo(w/2-15*dpr,h/2); ctx.lineTo(w/2+15*dpr,h/2); ctx.moveTo(w/2,h/2-15*dpr); ctx.lineTo(w/2,h/2+15*dpr); ctx.stroke();
   }
+  return {projection, projectedItems};
 }

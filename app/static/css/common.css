@@ -91,7 +91,10 @@ canvas.preview { width:100%; aspect-ratio:16/9; border:1px solid var(--line); ba
 .viewport-wrap { position:relative; min-height:320px; flex:1; }
 canvas.editor-canvas { display:block; width:100%; height:100%; min-height:320px; aspect-ratio:auto; touch-action:none; outline:none; cursor:default; }
 canvas.editor-canvas:focus { border-color:#4c6578; }
-.view-badge { position:absolute; top:9px; right:9px; padding:4px 7px; border-radius:4px; background:rgba(8,12,16,.72); color:#c9d4de; font-size:10px; letter-spacing:.1em; pointer-events:none; }
+.view-badge { position:absolute; top:9px; right:9px; padding:4px 7px; border-radius:4px; background:rgba(8,12,16,.78); color:#c9d4de; font-size:10px; letter-spacing:.08em; line-height:1.45; white-space:pre-line; text-align:right; pointer-events:none; }
+.view-badge.calibrated { color:var(--ok); border:1px solid rgba(70,190,120,.45); }
+.view-badge.provisional { color:#ffd166; border:1px solid rgba(255,209,102,.5); }
+.view-badge.blocked { color:#ff8f99; border:1px solid rgba(255,91,105,.45); }
 .editor-help { margin-top:8px; min-height:16px; }
 .properties-panel hr { border:0; border-top:1px solid var(--line); margin:14px 0; }
 .property-section { margin:13px 0; padding:10px; border:1px solid var(--line); border-radius:7px; background:rgba(0,0,0,.08); }
