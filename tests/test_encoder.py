@@ -464,6 +464,26 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(reloaded.tracking["axes"]["pan"]["referenced"])
             self.assertFalse(reloaded.tracking["axes"]["pan"]["valid"])
 
+    async def test_rig_geometry_change_invalidates_world_without_losing_encoder_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_pan(store)
+            store.sample_tick(self.sample("RIG-REFERENCE"))
+            await store.generate_synthetic_world_calibration({"camera": {"x": 0, "y": 0, "z": 1.8}})
+            self.assertTrue(store.camera["world_valid"])
+            generation = store.pose_history.generation
+
+            await store.update_rig_geometry(
+                store.profile_index["active_id"],
+                {"right_m": 0.0, "forward_m": 0.18, "up_m": 0.08},
+            )
+
+            self.assertEqual(store.tracking["axes"]["pan"]["reference_id"], "RIG-REFERENCE")
+            self.assertTrue(store.tracking["axes"]["pan"]["referenced"])
+            self.assertFalse(store.world_calibration["valid"])
+            self.assertFalse(store.camera["world_valid"])
+            self.assertGreater(store.pose_history.generation, generation)
+
     async def test_one_revolution_relative_and_direction_semantics(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)

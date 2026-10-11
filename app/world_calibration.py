@@ -5,8 +5,14 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
+from .kinematics import MAX_ABS_RIG_OFFSET_METRES, RigGeometryError, camera_position, normalise_rig_offset
 
-TARGET_POINTS = ("top_left", "top_right", "bottom_right", "bottom_left")
+
+TARGET_POINTS = (
+    "top_left", "top_center", "top_right",
+    "middle_left", "center", "middle_right",
+    "bottom_left", "bottom_center", "bottom_right",
+)
 DEFAULT_MAX_RMS_DEGREES = 1.0
 
 
@@ -72,10 +78,12 @@ def target_points(target: dict[str, Any]) -> dict[str, dict[str, float]]:
         }
 
     return {
-        "top_left": point(-1.0, 1.0),
-        "top_right": point(1.0, 1.0),
-        "bottom_right": point(1.0, -1.0),
-        "bottom_left": point(-1.0, -1.0),
+        name: point(horizontal, vertical)
+        for name, horizontal, vertical in (
+            ("top_left", -1.0, 1.0), ("top_center", 0.0, 1.0), ("top_right", 1.0, 1.0),
+            ("middle_left", -1.0, 0.0), ("center", 0.0, 0.0), ("middle_right", 1.0, 0.0),
+            ("bottom_left", -1.0, -1.0), ("bottom_center", 0.0, -1.0), ("bottom_right", 1.0, -1.0),
+        )
     }
 
 
@@ -126,11 +134,15 @@ def _observed(calibration: dict[str, Any]) -> list[tuple[str, dict[str, float], 
 
 
 def _residuals(params: list[float], rows: list[tuple[str, dict[str, float], float, float]]) -> list[float]:
-    camera = {"x": params[0], "y": params[1], "z": params[2]}
+    pivot = {"x": params[0], "y": params[1], "z": params[2]}
+    rig_offset = {"right_m": params[5], "forward_m": params[6], "up_m": params[7]}
     result: list[float] = []
     for _, point, observed_pan, observed_tilt in rows:
-        predicted_pan, predicted_tilt = tracking_angles(camera, point, params[3], params[4])
-        result.extend((wrap_degrees(predicted_pan - observed_pan), predicted_tilt - observed_tilt))
+        world_pan = observed_pan + params[3]
+        world_tilt = observed_tilt + params[4]
+        optical_centre = camera_position(pivot, world_pan, world_tilt, rig_offset)
+        bearing_pan, bearing_tilt = world_angles(optical_centre, point)
+        result.extend((wrap_degrees(bearing_pan - world_pan), bearing_tilt - world_tilt))
     return result
 
 
@@ -156,28 +168,38 @@ def _solve_linear(matrix: list[list[float]], vector: list[float]) -> list[float]
     return [augmented[row][-1] for row in range(size)]
 
 
-def solve_world_calibration(calibration: dict[str, Any], max_rms_degrees: float = DEFAULT_MAX_RMS_DEGREES) -> dict[str, Any]:
+def solve_world_calibration(
+    calibration: dict[str, Any],
+    max_rms_degrees: float = DEFAULT_MAX_RMS_DEGREES,
+    rig_hint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     rows = _observed(calibration)
     hint = calibration.get("camera_hint") or {}
     orientation = calibration.get("orientation_hint") or {}
+    rig = normalise_rig_offset(rig_hint)
     initial = [
         _finite(hint.get("x", 0.0), "Camera hint X"),
         _finite(hint.get("y", 0.0), "Camera hint Y"),
         _finite(hint.get("z", 1.8), "Camera hint Z"),
         _finite(orientation.get("pan_offset", 0.0), "Pan offset hint"),
         _finite(orientation.get("tilt_offset", 0.0), "Tilt offset hint"),
+        rig["right_m"], rig["forward_m"], rig["up_m"],
     ]
     # Coplanar bearing-only calibration becomes ill-conditioned under small
     # angular noise, especially for height versus tilt offset. These weak
     # priors make the documented operator estimates real constraints without
     # overpowering consistent observations.
-    weak_priors = (0.005, 0.005, 0.03, 0.0002, 0.0002)
+    weak_priors = (0.005, 0.005, 0.03, 0.0002, 0.0002, 0.01, 0.01, 0.01)
 
     def optimise(start: list[float], prior_weights: tuple[float, ...]) -> tuple[list[float], bool]:
         params = start[:]
 
         def objective(values: list[float]) -> float:
-            return _cost(_residuals(values, rows)) + sum(weight * (value - hint_value) ** 2 for weight, value, hint_value in zip(prior_weights, values, initial))
+            try:
+                residuals = _residuals(values, rows)
+            except RigGeometryError:
+                return float("inf")
+            return _cost(residuals) + sum(weight * (value - hint_value) ** 2 for weight, value, hint_value in zip(prior_weights, values, initial))
 
         damping = 1e-3
         converged = False
@@ -214,7 +236,11 @@ def solve_world_calibration(calibration: dict[str, Any], max_rms_degrees: float 
                 damping *= 10.0
         return params, converged
 
-    params, converged = optimise(initial, (0.0,) * len(initial))
+    # First establish the familiar fixed-rig solution around the operator's
+    # measured offset, then release all eight variables. This avoids a poor
+    # early trade between pivot translation and rig translation.
+    seed, _ = optimise(initial, (0.0, 0.0, 0.0, 0.0, 0.0, 1_000_000.0, 1_000_000.0, 1_000_000.0))
+    params, converged = optimise(seed, (0.0,) * len(initial))
     residual = _residuals(params, rows)
     if math.sqrt(_cost(residual) / len(residual)) > 1e-5:
         params, converged = optimise(params, weak_priors)
@@ -233,13 +259,20 @@ def solve_world_calibration(calibration: dict[str, Any], max_rms_degrees: float 
     maximum = max(value["angular_error"] for value in per_point.values())
     if not all(math.isfinite(value) for value in params + [rms, maximum]):
         raise CalibrationError("Calibration solution contains a non-finite value")
+    if any(abs(value) > MAX_ABS_RIG_OFFSET_METRES for value in params[5:8]):
+        raise CalibrationError(
+            f"Solved camera rig offset exceeds the physical ±{MAX_ABS_RIG_OFFSET_METRES:g} m limit"
+        )
     if rms > max_rms_degrees:
         raise CalibrationError(f"Calibration RMS error {rms:.3f}° exceeds {max_rms_degrees:.3f}°")
     return {
         "solved": True,
+        "pivot": {"x": params[0], "y": params[1], "z": params[2]},
+        # Kept as a compatibility alias for zero-offset callers and old UI.
         "camera": {"x": params[0], "y": params[1], "z": params[2]},
         "pan_offset": wrap_degrees(params[3]),
         "tilt_offset": params[4],
+        "rig_offset": {"right_m": params[5], "forward_m": params[6], "up_m": params[7]},
         "fixed_roll": _finite(calibration.get("fixed_roll", 0.0), "Fixed roll"),
         "horizontal_fov": _finite(calibration.get("horizontal_fov", 60.0), "Horizontal FOV"),
         "observation_count": len(rows),
@@ -250,11 +283,27 @@ def solve_world_calibration(calibration: dict[str, Any], max_rms_degrees: float 
     }
 
 
-def synthetic_observations(calibration: dict[str, Any], camera: dict[str, Any], pan_offset: float, tilt_offset: float, noise: dict[str, tuple[float, float]] | None = None) -> dict[str, Any]:
+def synthetic_observations(
+    calibration: dict[str, Any],
+    camera: dict[str, Any],
+    pan_offset: float,
+    tilt_offset: float,
+    noise: dict[str, tuple[float, float]] | None = None,
+    rig_offset: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     points = target_points(calibration["target"])
+    rig = normalise_rig_offset(rig_offset)
     observations = {}
     for name in TARGET_POINTS:
-        pan, tilt = tracking_angles(camera, points[name], pan_offset, tilt_offset)
+        world_pan, world_tilt = world_angles(camera, points[name])
+        for _ in range(50):
+            optical_centre = camera_position(camera, world_pan, world_tilt, rig)
+            next_pan, next_tilt = world_angles(optical_centre, points[name])
+            if abs(wrap_degrees(next_pan - world_pan)) < 1e-12 and abs(next_tilt - world_tilt) < 1e-12:
+                world_pan, world_tilt = next_pan, next_tilt
+                break
+            world_pan, world_tilt = next_pan, next_tilt
+        pan, tilt = wrap_degrees(world_pan - pan_offset), world_tilt - tilt_offset
         pan_noise, tilt_noise = (noise or {}).get(name, (0.0, 0.0))
         observations[name] = {
             "target": name,

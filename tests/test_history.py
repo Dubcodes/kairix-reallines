@@ -156,6 +156,37 @@ class HistoryStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mark["mapped_pan"], 20)
             self.assertEqual(mark["mapped_tilt"], 4)
 
+    async def test_rig_geometry_moves_provisional_xyz_and_delayed_pose_interpolates_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await store.update_rig_geometry(
+                store.profile_index["active_id"],
+                {"right_m": 0.0, "forward_m": 0.2, "up_m": 0.08},
+            )
+            generation = store.pose_history.generation
+            await store.set_camera({"tilt": 10})
+            self.assertEqual(store.pose_history.generation, generation, "ordinary rig motion must not reset history")
+            store.pose_history.reset("rig interpolation fixture")
+            with patch("app.state.time.monotonic", return_value=100.0):
+                await store.set_camera({"pan": 0, "tilt": 0})
+            first = store.pose_history.samples[-1]
+            self.assertAlmostEqual(first.x, 0.0)
+            self.assertAlmostEqual(first.y, 0.2)
+            self.assertAlmostEqual(first.z, 1.78)
+
+            with patch("app.state.time.monotonic", return_value=101.0):
+                await store.set_camera({"pan": 90})
+            second = store.pose_history.samples[-1]
+            self.assertAlmostEqual(second.x, 0.2)
+            self.assertAlmostEqual(second.y, 0.0)
+            self.assertAlmostEqual(second.z, 1.78)
+            store.sync_config["graphics_delay_ms"] = 500
+            with patch("app.state.time.monotonic", return_value=second.timestamp):
+                render, _sync = store._render_pose_state(second.timestamp)
+            self.assertAlmostEqual(render["x"], 0.1, places=5)
+            self.assertAlmostEqual(render["y"], 0.1, places=5)
+            self.assertAlmostEqual(render["z"], 1.78, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

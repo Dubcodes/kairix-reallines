@@ -50,7 +50,12 @@ def default_profile(name: str = "Development Simulator") -> dict[str, Any]:
     return {
         "name": name,
         "axes": {axis: default_axis_config(axis) for axis in AXES},
-        "camera": {"fov": 60.0, "height": 1.7},
+        "camera": {
+            "fov": 60.0,
+            "height": 1.7,
+            "rig_model": "intersecting_pan_tilt_v1",
+            "rig_offset": {"right_m": 0.0, "forward_m": 0.0, "up_m": 0.0},
+        },
         "calibration": {"marks": {}},
     }
 

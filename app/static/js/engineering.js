@@ -197,7 +197,7 @@ function renderState(incoming,event){
       if(simulator&&runtime.raw!==null&&byId(id)!==document.activeElement){byId(id).value=runtime.raw;showSlider(id,runtime.raw);}
       if(!simulator)byId(id+'Out').textContent=`Simulator inactive — ${sourceLabel(runtime.source)} source active`;
     }
-    for(const [id,value] of [['fov',state.camera.fov],['height',state.camera.height]])if(value!==null&&byId(id)!==document.activeElement){byId(id).value=value;showSlider(id,value);}
+    for(const [id,value] of [['fov',state.camera.fov],['height',state.profiles.active.camera.height]])if(value!==null&&byId(id)!==document.activeElement){byId(id).value=value;showSlider(id,value);}
     byId('fov').disabled=false;byId('height').disabled=false;
     const gfxToggle=byId('allowProvisionalGfx');
     gfxToggle.disabled=false;

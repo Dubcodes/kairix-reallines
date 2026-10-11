@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from app.state import StateStore
+from app.kinematics import RigGeometryError, camera_position
 from app.world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, tracking_angles, world_angles
 
 
@@ -15,6 +16,35 @@ class SilentDebug:
 
 
 class GeometryCase(unittest.TestCase):
+    def test_rig_kinematics_follow_project_axis_conventions(self):
+        pivot = {"x": 1.0, "y": 2.0, "z": 3.0}
+        zero = camera_position(pivot, 47, -23, None)
+        self.assertEqual(zero, pivot)
+        offset = {"right_m": 0.1, "forward_m": 0.2, "up_m": 0.3}
+        self.assertEqual(camera_position(pivot, 0, 0, offset), {"x": 1.1, "y": 2.2, "z": 3.3})
+        pan_90 = camera_position(pivot, 90, 0, {"right_m": 0, "forward_m": 0.2, "up_m": 0})
+        self.assertAlmostEqual(pan_90["x"], 1.2)
+        self.assertAlmostEqual(pan_90["y"], 2.0)
+        tilted = camera_position(pivot, 0, 90, offset)
+        self.assertAlmostEqual(tilted["x"], 1.1)
+        self.assertAlmostEqual(tilted["y"], 1.7)
+        self.assertAlmostEqual(tilted["z"], 3.2)
+        compound = camera_position(pivot, 90, 90, offset)
+        self.assertAlmostEqual(compound["x"], 0.7)
+        self.assertAlmostEqual(compound["y"], 1.9)
+        self.assertAlmostEqual(compound["z"], 3.2)
+        with self.assertRaisesRegex(RigGeometryError, "within"):
+            camera_position(pivot, 0, 0, {"right_m": 3, "forward_m": 0, "up_m": 0})
+
+    def test_three_by_three_target_points(self):
+        calibration = default_world_calibration("Grid", "profile")
+        points = target_points(calibration["target"])
+        self.assertEqual(tuple(points), TARGET_POINTS)
+        self.assertEqual(points["center"], calibration["target"]["center"])
+        self.assertEqual(points["top_center"]["x"], points["center"]["x"])
+        self.assertGreater(points["top_center"]["z"], points["center"]["z"])
+        self.assertLess(points["bottom_center"]["z"], points["center"]["z"])
+
     def test_world_vectors_angles_and_offsets(self):
         camera = {"x": 0, "y": 0, "z": 1}
         self.assertEqual(world_angles(camera, {"x": 0, "y": 10, "z": 1}), (0.0, 0.0))
@@ -84,6 +114,34 @@ class GeometryCase(unittest.TestCase):
         with self.assertRaises(CalibrationError):
             solve_world_calibration(calibration)
 
+    def test_nonzero_rig_offset_is_recovered_from_synthetic_marks(self):
+        calibration = default_world_calibration("Rig", "profile")
+        pivot = {"x": 1.2, "y": -0.5, "z": 1.4}
+        rig = {"right_m": 0.03, "forward_m": 0.18, "up_m": 0.08}
+        calibration["camera_hint"] = {"x": 1.3, "y": -0.6, "z": 1.5}
+        calibration["orientation_hint"] = {"pan_offset": 4.0, "tilt_offset": -2.0}
+        calibration["observations"] = synthetic_observations(calibration, pivot, 5, -3, rig_offset=rig)
+        result = solve_world_calibration(calibration, rig_hint={"right_m": 0.02, "forward_m": 0.18, "up_m": 0.06})
+        for axis in ("x", "y", "z"):
+            self.assertAlmostEqual(result["pivot"][axis], pivot[axis], places=4)
+        self.assertAlmostEqual(result["rig_offset"]["right_m"], rig["right_m"], places=4)
+        self.assertAlmostEqual(result["rig_offset"]["forward_m"], rig["forward_m"], places=3)
+        self.assertAlmostEqual(result["rig_offset"]["up_m"], rig["up_m"], places=4)
+
+    def test_noisy_nonzero_rig_solve_remains_useful(self):
+        calibration = default_world_calibration("Noisy rig", "profile")
+        pivot = {"x": 1.2, "y": -0.5, "z": 1.4}
+        rig = {"right_m": 0.03, "forward_m": 0.18, "up_m": 0.08}
+        calibration["camera_hint"] = {"x": 1.3, "y": -0.6, "z": 1.5}
+        calibration["orientation_hint"] = {"pan_offset": 4.0, "tilt_offset": -2.0}
+        noise = {name: ((index % 3 - 1) * 0.015, (index // 3 - 1) * 0.01) for index, name in enumerate(TARGET_POINTS)}
+        calibration["observations"] = synthetic_observations(calibration, pivot, 5, -3, noise, rig)
+        result = solve_world_calibration(calibration, rig_hint={"right_m": 0.02, "forward_m": 0.18, "up_m": 0.06})
+        self.assertLess(result["rms_angular_error"], 0.05)
+        self.assertLess(abs(result["pivot"]["x"] - pivot["x"]), 0.15)
+        self.assertLess(abs(result["pivot"]["z"] - pivot["z"]), 0.15)
+        self.assertLess(abs(result["rig_offset"]["up_m"] - rig["up_m"]), 0.1)
+
 
 class WorldCalibrationStoreCase(unittest.IsolatedAsyncioTestCase):
     def make_store(self, directory):
@@ -146,6 +204,21 @@ class WorldCalibrationStoreCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.world_calibration["name"], "Trackside Two")
             await store.select_world_calibration(original)
             self.assertNotEqual(store.world_calibration_index["active_id"], created["id"])
+
+    async def test_legacy_four_point_calibration_loads_but_requires_new_solve(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            calibration_id = store.world_calibration_index["active_id"]
+            legacy = deepcopy(store.world_calibration)
+            legacy["observations"] = {name: {"mapped_pan": 0, "mapped_tilt": 0} for name in ("top_left", "top_right", "bottom_right", "bottom_left")}
+            legacy["valid"] = True
+            legacy["solution"] = {"solved": True, "camera": {"x": 0, "y": 0, "z": 1.8}}
+            legacy.pop("rig_geometry_fingerprint", None)
+            (Path(directory) / "world_calibrations" / f"{calibration_id}.json").write_text(json.dumps(legacy))
+            reloaded = self.make_store(directory)
+            self.assertFalse(reloaded.world_calibration["valid"])
+            self.assertIn("RIG GEOMETRY", reloaded.world_calibration["status"])
+            self.assertEqual(len(reloaded.snapshot()["world_calibrations"]["active"]["target_points"]), 9)
 
 
 if __name__ == "__main__":

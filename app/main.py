@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .debug import DebugRecorder
+from .kinematics import RigGeometryError
 from .state import StateStore
 from .source_manager import TrackingSourceManager
 from .runtime import pose_publication_loop, tracking_loop
@@ -302,6 +303,19 @@ async def update_axis_config(profile_id: str, axis: str, body: AxisConfigUpdate)
         raise HTTPException(404, "Active setup profile or axis not found")
     source_manager.configure(store.profile_index["active_id"], store.profile)
     return config
+
+
+@app.patch("/api/profiles/{profile_id}/camera-rig")
+async def update_camera_rig(profile_id: str, body: AxisConfigUpdate):
+    try:
+        rig_offset = await store.update_rig_geometry(profile_id, body.values)
+    except RigGeometryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if rig_offset is None:
+        raise HTTPException(404, "Active setup profile not found")
+    # Rig geometry does not alter encoder acquisition or reference semantics,
+    # so the GPIO source manager is deliberately not reconfigured here.
+    return rig_offset
 
 
 @app.post("/api/tracking/{axis}/reference")

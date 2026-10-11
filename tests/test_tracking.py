@@ -99,6 +99,22 @@ class TrackingStoreCase(unittest.IsolatedAsyncioTestCase):
             source = reloaded.profile["axes"]["pan"]["source_config"]
             self.assertEqual((source["chip"], source["line_a"], source["line_b"], source["bias"]), ("/dev/gpiochip4", 9, 10, "pull_up"))
 
+    async def test_rig_geometry_persists_and_old_profiles_migrate_to_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            await store.update_rig_geometry(profile_id, {"right_m": 0.01, "forward_m": 0.18, "up_m": 0.08})
+            reloaded = self.make_store(directory)
+            self.assertEqual(reloaded.profile["camera"]["rig_offset"], {"right_m": 0.01, "forward_m": 0.18, "up_m": 0.08})
+
+            path = Path(directory) / "profiles" / f"{profile_id}.json"
+            old_profile = json.loads(path.read_text())
+            old_profile["camera"].pop("rig_offset")
+            old_profile["camera"].pop("rig_model")
+            path.write_text(json.dumps(old_profile))
+            migrated = self.make_store(directory)
+            self.assertEqual(migrated.profile["camera"]["rig_offset"], {"right_m": 0.0, "forward_m": 0.0, "up_m": 0.0})
+
     async def test_profile_crud_switching_and_cannot_delete_last(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)

@@ -123,6 +123,7 @@ class FrontendContractCase(unittest.TestCase):
             '@app.post("/api/profiles/{profile_id}/duplicate")',
             '@app.delete("/api/profiles/{profile_id}")',
             '@app.patch("/api/profiles/{profile_id}/axes/{axis}")',
+            '@app.patch("/api/profiles/{profile_id}/camera-rig")',
             '@app.post("/api/tracking/{axis}/reference")',
             '@app.delete("/api/tracking/{axis}/reference")',
             '@app.patch("/api/engineering")',
@@ -201,6 +202,20 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("direction_learned:true", calibration)
         self.assertIn("require a new encoder reference", html)
         self.assertIn("invalidate", html)
+
+    def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        for target in ("top_center", "middle_left", "center", "middle_right", "bottom_center"):
+            self.assertIn(target, calibration)
+        for field in ("right_m", "forward_m", "up_m"):
+            self.assertIn(field, calibration)
+            self.assertIn(f'data-rig-offset="{field}"', html)
+        self.assertIn("Apply solved rig geometry", html)
+        self.assertIn("/camera-rig", calibration)
+        endpoint = main.split('@app.patch("/api/profiles/{profile_id}/camera-rig")', 1)[1].split("@app.", 1)[0]
+        self.assertNotIn("source_manager.configure", endpoint)
 
     def test_projection_policy_is_shared_and_gfx_override_is_explicit(self):
         render = (STATIC / "js" / "render.js").read_text(encoding="utf-8")

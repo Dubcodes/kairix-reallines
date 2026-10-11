@@ -66,10 +66,13 @@ The installer creates a `kairix` system user, a Python venv, `/opt/kairix-realli
 - +Y = world forward
 - +Z = up
 - Camera position is `camera.x`, `camera.y`, `camera.z`; legacy `camera.height` mirrors Z
+- Setup profiles store an intersecting-axis V1 rig offset from tripod pivot to optical centre as local right/forward/up metres. At zero Pan/Tilt these align with world +X/+Y/+Z.
 - Pan 0 looks along +Y
 - Tilt 0 is level
 - Positive pan turns toward +X/right; positive tilt turns upward
 - World orientation is `tracking angle + world-calibration offset`
+
+For every pose, the backend computes optical-centre position as `tripod pivot + pan rotation × tilt rotation × rig offset`. Positive Tilt rotates local forward toward world up, then positive Pan rotates world +Y toward +X. A zero rig offset exactly preserves the earlier fixed-camera position model. Pose history stores the resulting moving XYZ alongside Pan/Tilt so delayed rendering interpolates a physically matching position and orientation.
 
 Planar items use a deterministic orientation convention: yaw rotates about world +Z, pitch rotates about the yawed local right axis, then roll rotates about the resulting plane normal. A zero-rotation plane is vertical; the Floor preset uses pitch -90° so every corner has the same world Z. The lightweight Canvas renderer projects the four corners and uses tessellated texture mapping without a 3D-engine dependency.
 
@@ -142,15 +145,16 @@ Important profile and layout JSON writes use atomic temporary-file replacement. 
 
 ## World/camera calibration
 
-World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID and a deterministic SHA-256 fingerprint covering source, direction, offset, PPR, decode multiplier, gearing, GPIO identity/bias, and reference semantics. A solved calibration also records the current session reference identity for every quadrature Pan/Tilt axis. A profile/fingerprint mismatch or a different, absent, or invalidated runtime reference prevents world tracking and is reported as requiring recalibration. Observations captured under mixed reference identities cannot be solved together. Simulator-only calibrations remain compatible without an encoder identity. Legacy calibrations without a fingerprint remain stored but invalid until solved again. Control and `/preview` allow a clearly labelled provisional camera whenever tracking is valid. `/gfx` remains strict unless its explicit Engineering override is enabled.
+World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID, the tracking fingerprint, and a separate rig-geometry fingerprint. A solved calibration also records the current session reference identity for every quadrature Pan/Tilt axis. A profile, tracking, rig, or reference mismatch prevents world tracking and is reported as requiring recalibration. Editing rig geometry resets pose-coordinate history and invalidates the world solve without reconfiguring GPIO workers or discarding encoder references. Legacy calibrations remain stored but require a new solve. Control and `/preview` continue to provide a provisional kinematic camera whenever tracking is valid; `/gfx` remains strict unless its explicit Engineering override is enabled.
 
-V1 uses four known corners of a vertical rectangular target: top-left, top-right, bottom-right and bottom-left. The target stores its world centre, width, height and yaw. Each operator mark captures raw and mapped Pan/Tilt values, monotonic time, target identity and setup-profile ID. Direction-learning LEFT/RIGHT/DOWN/UP marks remain a separate process.
+V1 uses a 3×3 grid derived from a known vertical rectangular target: its corners, edge centres, and centre. The target stores its world centre, width, height and yaw. Each operator mark captures raw and mapped Pan/Tilt values, monotonic time, target identity, setup-profile ID, and encoder reference identity. Direction-learning LEFT/RIGHT/DOWN/UP marks remain a separate process.
 
-The project-owned deterministic least-squares solver estimates five values from eight angular measurements: camera X/Y/Z plus Pan and Tilt world-zero offsets. Horizontal FOV and fixed roll are supplied configuration, not solver unknowns. For any world point:
+The deterministic least-squares solver uses 18 angular residuals to estimate tripod pivot X/Y/Z, Pan and Tilt world-zero offsets, and local right/forward/up optical-centre offsets. Manual rig measurements are weak priors rather than forced answers. An offset exactly along the instantaneous optical axis does not change a crosshair bearing, so physical measurement remains the primary constraint for the forward component. Horizontal FOV and fixed roll are supplied configuration, not solver unknowns. For every observation:
 
 ```text
-world_pan  = atan2(point_x - camera_x, point_y - camera_y)
-world_tilt = atan2(point_z - camera_z, horizontal_distance)
+optical_centre = tripod_pivot + pan_rotation × tilt_rotation × rig_offset
+world_pan  = atan2(point_x - optical_centre_x, point_y - optical_centre_y)
+world_tilt = atan2(point_z - optical_centre_z, horizontal_distance)
 
 world_pan  = tracking_pan  + pan_offset
 world_tilt = tracking_tilt + tilt_offset

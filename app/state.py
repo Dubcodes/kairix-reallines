@@ -18,6 +18,7 @@ from fastapi import WebSocket
 
 from .debug import DebugRecorder
 from .history import PoseHistory, PoseSample
+from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
 from .tracking import AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 
@@ -180,8 +181,9 @@ class StateStore:
             bool(self.world_calibration.get("valid")),
             solution.get("solved_at"),
             runtime_references,
-            self.camera.get("fov"),
-            self.camera.get("height"),
+            self.profile.get("camera", {}).get("fov"),
+            self.profile.get("camera", {}).get("height"),
+            rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")),
         )
 
     def _record_pose_sample(self, timestamp: float | None = None) -> None:
@@ -266,6 +268,12 @@ class StateStore:
         result.setdefault("camera", {})
         result["camera"].setdefault("fov", 60.0)
         result["camera"].setdefault("height", 1.7)
+        result["camera"].setdefault("rig_model", "intersecting_pan_tilt_v1")
+        try:
+            result["camera"]["rig_offset"] = normalise_rig_offset(result["camera"].get("rig_offset"))
+        except RigGeometryError as exc:
+            self.debug.error("rig_geometry_invalid", error=str(exc))
+            result["camera"]["rig_offset"] = normalise_rig_offset(None)
         result.setdefault("calibration", {}).setdefault("marks", {})
         axes = result.setdefault("axes", {})
         for axis in AXES:
@@ -352,6 +360,8 @@ class StateStore:
         result["observations"] = deepcopy(calibration.get("observations") or {})
         if not calibration.get("tracking_fingerprint"):
             result.update({"valid": False, "status": "TRACKING FINGERPRINT MISSING — SOLVE REQUIRED"})
+        if not calibration.get("rig_geometry_fingerprint"):
+            result.update({"valid": False, "status": "RIG GEOMETRY FINGERPRINT MISSING — SOLVE REQUIRED"})
         if result.get("current_target") not in TARGET_POINTS:
             result["current_target"] = TARGET_POINTS[0]
         return result
@@ -371,6 +381,7 @@ class StateStore:
         calibration_id = _new_id()
         calibration = default_world_calibration("Default World Calibration", self.profile_index["active_id"])
         calibration["tracking_fingerprint"] = tracking_fingerprint(self.profile)
+        calibration["rig_geometry_fingerprint"] = rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset"))
         calibration["id"] = calibration_id
         meta = {key: calibration[key] for key in ("id", "name", "setup_profile_id", "created", "modified")}
         self._atomic_write_path(self._world_calibration_path(calibration_id), calibration)
@@ -397,6 +408,11 @@ class StateStore:
 
     def _world_calibration_matches_tracking(self) -> bool:
         return self.world_calibration.get("tracking_fingerprint") == tracking_fingerprint(self.profile)
+
+    def _world_calibration_matches_rig(self) -> bool:
+        return self.world_calibration.get("rig_geometry_fingerprint") == rig_geometry_fingerprint(
+            self.profile.get("camera", {}).get("rig_offset")
+        )
 
     def _current_tracking_reference_identity(self) -> dict[str, str | None]:
         return {
@@ -485,24 +501,34 @@ class StateStore:
         reference_match = self._world_calibration_matches_reference()
         solution = self.world_calibration.get("solution")
         required_referenced = all(self.tracking["axes"][axis].get("source") != "quadrature_gpio" or self.tracking["axes"][axis].get("referenced") for axis in REQUIRED_AXES)
-        calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match and fingerprint_match and required_referenced and reference_match)
-        if calibration_valid:
-            solved_camera = solution["camera"]
-            self.camera.update({"x": solved_camera["x"], "y": solved_camera["y"], "z": solved_camera["z"], "height": solved_camera["z"], "roll": solution.get("fixed_roll", 0.0), "fov": solution.get("horizontal_fov", self.camera["fov"])})
-        else:
-            height = float(self.profile.get("camera", {}).get("height", self.camera.get("height", 1.7)))
-            self.camera.update({"x": 0.0, "y": 0.0, "z": height, "height": height, "roll": 0.0})
+        rig_match = self._world_calibration_matches_rig()
+        calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match and fingerprint_match and rig_match and required_referenced and reference_match)
         for axis in ("pan", "tilt"):
             if tracked[axis] is not None:
                 offset = float(solution.get(f"{axis}_offset", 0.0)) if calibration_valid else 0.0
                 self.camera[f"tracking_{axis}"] = tracked[axis]
                 self.camera[axis] = tracked[axis] + offset
+        if calibration_valid:
+            pivot = solution.get("pivot") or solution["camera"]
+            self.camera.update({"roll": solution.get("fixed_roll", 0.0), "fov": solution.get("horizontal_fov", self.camera["fov"])})
+        else:
+            pivot_height = float(self.profile.get("camera", {}).get("height", self.camera.get("height", 1.7)))
+            pivot = {"x": 0.0, "y": 0.0, "z": pivot_height}
+            self.camera.update({"roll": 0.0})
+        optical_centre = camera_position(
+            pivot,
+            float(self.camera.get("pan", 0.0)),
+            float(self.camera.get("tilt", 0.0)),
+            self.profile.get("camera", {}).get("rig_offset"),
+        )
+        self.camera.update({**optical_centre, "height": optical_centre["z"], "pivot": deepcopy(pivot)})
         self.camera["source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
         self.camera["valid"] = self.tracking["valid"]
         self.camera["world_valid"] = self.tracking["valid"] and calibration_valid
         self.camera["world_calibration_id"] = self.world_calibration_index["active_id"]
         self.camera["calibration_profile_match"] = profile_match
         self.camera["calibration_fingerprint_match"] = fingerprint_match
+        self.camera["calibration_rig_match"] = rig_match
         self.camera["calibration_reference_match"] = reference_match
         self.camera["world_status"] = "VALID" if calibration_valid else "REFERENCE MISMATCH — RECALIBRATE" if not reference_match else "NOT VALID"
         self.camera["updated_mono"] = max((self.tracking["axes"][axis]["updated_mono"] for axis in REQUIRED_AXES), default=0.0)
@@ -674,11 +700,14 @@ class StateStore:
         world = deepcopy(self.world_calibration)
         world["target_points"] = target_points(world["target"])
         reference_match = self._world_calibration_matches_reference()
-        if not reference_match and world.get("solution"):
+        rig_match = self._world_calibration_matches_rig()
+        if not rig_match and world.get("solution"):
+            world["effective_status"] = "RIG GEOMETRY CHANGED — SOLVE REQUIRED"
+        elif not reference_match and world.get("solution"):
             world["effective_status"] = "REFERENCE MISMATCH — RECALIBRATE"
         else:
             world["effective_status"] = world.get("status")
-        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "tracking_reference_identity": self._current_tracking_reference_identity()}
+        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
         return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
@@ -925,10 +954,32 @@ class StateStore:
         self.debug.tracking("tracking_source_status", axis=axis, source=candidate["source"], health=self.tracking["axes"][axis]["health"], status=self.tracking["axes"][axis]["status"])
         await self.broadcast_state(); return saved
 
+    async def update_rig_geometry(self, profile_id: str, values: dict[str, Any]) -> dict[str, float] | None:
+        if profile_id != self.profile_index["active_id"]:
+            return None
+        current = normalise_rig_offset(self.profile.get("camera", {}).get("rig_offset"))
+        candidate = normalise_rig_offset({**current, **(values or {})})
+        async with self.lock:
+            if candidate != current:
+                self.profile.setdefault("camera", {})["rig_model"] = "intersecting_pan_tilt_v1"
+                self.profile["camera"]["rig_offset"] = candidate
+                self._write_active_profile_locked()
+                if self._world_calibration_matches_profile():
+                    self.world_calibration.update({
+                        "valid": False,
+                        "status": "RIG GEOMETRY CHANGED — SOLVE REQUIRED",
+                    })
+                    self._write_active_world_calibration_locked()
+                self._refresh_camera_from_tracking()
+        self.debug.app("rig_geometry_updated", profile_id=profile_id, before=current, after=candidate)
+        await self.broadcast_state()
+        return deepcopy(candidate)
+
     async def create_world_calibration(self, name: str) -> dict[str, Any]:
         calibration_id = _new_id()
         calibration = default_world_calibration(name.strip() or "New World Calibration", self.profile_index["active_id"])
         calibration["tracking_fingerprint"] = tracking_fingerprint(self.profile)
+        calibration["rig_geometry_fingerprint"] = rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset"))
         calibration["id"] = calibration_id
         meta = {key: calibration[key] for key in ("id", "name", "setup_profile_id", "created", "modified")}
         async with self.lock:
@@ -1066,7 +1117,7 @@ class StateStore:
         self.debug.app("calibration_solve_started", calibration_id=calibration_id, observation_count=len(candidate.get("observations") or {}))
         try:
             reference_identity = self._validate_observation_reference_identities(candidate)
-            solution = solve_world_calibration(candidate)
+            solution = solve_world_calibration(candidate, rig_hint=self.profile.get("camera", {}).get("rig_offset"))
         except CalibrationError as exc:
             async with self.lock:
                 self.world_calibration.update({"valid": False, "status": f"SOLVE FAILED: {exc}", "last_solve_error": str(exc)})
@@ -1075,8 +1126,10 @@ class StateStore:
             self.debug.error("calibration_solve_failed", calibration_id=calibration_id, error=str(exc))
             await self.broadcast_state()
             raise
+        current_rig = normalise_rig_offset(self.profile.get("camera", {}).get("rig_offset"))
+        rig_applied = max(abs(solution["rig_offset"][key] - current_rig[key]) for key in current_rig) <= 0.001
         async with self.lock:
-            self.world_calibration.update({"solution": solution, "valid": True, "status": "CALIBRATION VALID", "last_solve_error": None, "tracking_fingerprint": tracking_fingerprint(self.profile), "tracking_reference_identity": deepcopy(reference_identity)})
+            self.world_calibration.update({"solution": solution, "valid": rig_applied, "status": "CALIBRATION VALID" if rig_applied else "SOLVED RIG GEOMETRY — APPLY REQUIRED", "last_solve_error": None, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": deepcopy(reference_identity)})
             self._write_active_world_calibration_locked()
             self._refresh_camera_from_tracking()
         self.debug.app("calibration_solve_success", calibration_id=calibration_id, camera=solution["camera"], pan_offset=solution["pan_offset"], tilt_offset=solution["tilt_offset"], rms=solution["rms_angular_error"], maximum=solution["max_angular_error"], residuals=solution["residuals"])
@@ -1096,17 +1149,18 @@ class StateStore:
         camera = {axis: float((values.get("camera") or {}).get(axis, self.world_calibration["camera_hint"][axis])) for axis in ("x", "y", "z")}
         pan_offset = float(values.get("pan_offset", 0.0))
         tilt_offset = float(values.get("tilt_offset", 0.0))
+        rig_offset = normalise_rig_offset(values.get("rig_offset", self.profile.get("camera", {}).get("rig_offset")))
         update: dict[str, Any] = {"camera_hint": camera, "orientation_hint": {"pan_offset": pan_offset, "tilt_offset": tilt_offset}}
         if "target" in values:
             update["target"] = values["target"]
         await self.update_world_calibration(update)
-        observations = synthetic_observations(self.world_calibration, camera, pan_offset, tilt_offset)
+        observations = synthetic_observations(self.world_calibration, camera, pan_offset, tilt_offset, rig_offset=rig_offset)
         reference_identity = self._current_tracking_reference_identity()
         for observation in observations.values():
             observation["tracking_reference_identity"] = deepcopy(reference_identity)
         async with self.lock:
             self.world_calibration["observations"] = observations
-            self.world_calibration["synthetic_ground_truth"] = {"camera": camera, "pan_offset": pan_offset, "tilt_offset": tilt_offset}
+            self.world_calibration["synthetic_ground_truth"] = {"camera": camera, "pan_offset": pan_offset, "tilt_offset": tilt_offset, "rig_offset": rig_offset}
             self.world_calibration.update({"valid": False, "status": "SYNTHETIC MARKS GENERATED"})
             self._write_active_world_calibration_locked()
         self.debug.app("synthetic_calibration_generated", calibration_id=self.world_calibration["id"], camera=camera, pan_offset=pan_offset, tilt_offset=tilt_offset, target=self.world_calibration["target"])

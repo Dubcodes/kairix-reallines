@@ -3,7 +3,7 @@ import {calculateMovementCalibration} from './calibration_contract.js?v=world-me
 import {updatePreviewMedia} from './preview_media.js?v=world-media1';
 
 const byId=id=>document.getElementById(id);
-const targets=['top_left','top_right','bottom_right','bottom_left'];
+const targets=['top_left','top_center','top_right','middle_left','center','middle_right','bottom_left','bottom_center','bottom_right'];
 const targetLabel=value=>value.replaceAll('_',' ').toUpperCase();
 let state=null,applying=false;
 const movement={pan:{start:null,end:null,angle:'',proposal:null,error:''},tilt:{start:null,end:null,angle:'',proposal:null,error:''}};
@@ -21,9 +21,9 @@ function setInput(selector,value){const input=document.querySelector(selector);i
 function renderCalibration(){
   const collection=state.world_calibrations,calibration=collection.active,solution=calibration.solution;
   byId('activeProfile').textContent=state.profiles.active.name;
-  const identityMatch=collection.profile_match&&collection.fingerprint_match;
+  const identityMatch=collection.profile_match&&collection.fingerprint_match&&collection.rig_match;
   const worldReady=calibration.valid&&identityMatch&&collection.reference_match;
-  const mismatchReason=!collection.profile_match?'This calibration belongs to a different setup profile.':!collection.fingerprint_match?'Tracking configuration changed; update this calibration.':!collection.reference_match?'Encoder reference changed; update this calibration.':!calibration.valid?'World calibration has not been solved.':'';
+  const mismatchReason=!collection.profile_match?'This calibration belongs to a different setup profile.':!collection.fingerprint_match?'Tracking configuration changed; update this calibration.':!collection.rig_match?'Camera rig geometry changed; solve this calibration again.':!collection.reference_match?'Encoder reference changed; update this calibration.':!calibration.valid?'World calibration has not been solved.':'';
   byId('profileMatch').textContent=worldReady?'Tracking and world calibration are valid.':state.tracking.valid?`TRACKING VALID. ${mismatchReason} Camera Preview is available using a provisional pose; calibration improves world accuracy and enables strict GFX output.`:`TRACKING INVALID. ${mismatchReason||'A required tracking axis needs attention.'}`;
   byId('profileMatch').className=worldReady?'small status-ok':state.tracking.valid?'small status-warn':'form-error';
   const select=byId('worldCalibrationSelect');
@@ -32,6 +32,8 @@ function renderCalibration(){
   for(const axis of ['x','y','z']){setInput(`[data-target-center="${axis}"]`,calibration.target.center[axis]);setInput(`[data-camera-hint="${axis}"]`,calibration.camera_hint[axis]);}
   for(const key of ['width','height','yaw'])setInput(`[data-target="${key}"]`,calibration.target[key]);
   for(const key of ['pan_offset','tilt_offset'])setInput(`[data-orientation-hint="${key}"]`,calibration.orientation_hint[key]);
+  const currentRig=state.profiles.active.camera.rig_offset;
+  for(const key of ['right_m','forward_m','up_m'])setInput(`[data-rig-offset="${key}"]`,currentRig[key]*1000);
   setInput('#worldFov',calibration.horizontal_fov);
   setInput('#worldRoll',calibration.fixed_roll);
   byId('status').textContent=worldReady?'CALIBRATED':state.tracking.valid?'TRACKING VALID · WORLD CALIBRATION NEEDS UPDATING':'TRACKING INVALID';
@@ -47,11 +49,21 @@ function renderCalibration(){
   byId('generateSynthetic').disabled=!state.tracking.valid;
   const rows=solution?{
     Status:worldReady?'VALID':mismatchReason||calibration.effective_status||'NOT VALID',
-    'Camera X':`${format(solution.camera.x)} m`,'Camera Y':`${format(solution.camera.y)} m`,'Camera Z':`${format(solution.camera.z)} m`,
+    'Tripod pivot X':`${format((solution.pivot||solution.camera).x)} m`,'Tripod pivot Y':`${format((solution.pivot||solution.camera).y)} m`,'Tripod pivot Z':`${format((solution.pivot||solution.camera).z)} m`,
     'Pan offset':`${format(solution.pan_offset)}°`,'Tilt offset':`${format(solution.tilt_offset)}°`,
     'RMS error':`${format(solution.rms_angular_error,4)}°`,'Max error':`${format(solution.max_angular_error,4)}°`,Observations:solution.observation_count,
   }:{Status:calibration.status,Observations:Object.keys(calibration.observations).length};
   byId('solution').replaceChildren(...Object.entries(rows).flatMap(([key,value])=>{const label=document.createElement('div'),content=document.createElement('div');label.textContent=key;content.textContent=value;return[label,content];}));
+  const solvedRig=solution?.rig_offset;
+  const rigRows={};
+  for(const [key,label] of [['right_m','Right'],['forward_m','Forward'],['up_m','Up']]){
+    const solved=solvedRig?.[key];
+    rigRows[`${label} measured/current`]=`${format(currentRig[key]*1000,1)} mm`;
+    rigRows[`${label} solved`]=solved===undefined?'—':`${format(solved*1000,1)} mm`;
+    rigRows[`${label} difference`]=solved===undefined?'—':`${format((solved-currentRig[key])*1000,1)} mm`;
+  }
+  byId('rigSolution').replaceChildren(...Object.entries(rigRows).flatMap(([key,value])=>{const label=document.createElement('div'),content=document.createElement('div');label.textContent=key;content.textContent=value;return[label,content];}));
+  byId('applySolvedRig').disabled=!solvedRig;
   const truth=calibration.synthetic_ground_truth;
   byId('syntheticComparison').textContent=truth&&solution?`Ground truth camera (${format(truth.camera.x)}, ${format(truth.camera.y)}, ${format(truth.camera.z)}), solved (${format(solution.camera.x)}, ${format(solution.camera.y)}, ${format(solution.camera.z)}).` : '';
 }
@@ -72,6 +84,8 @@ byId('movementCalibration').addEventListener('click',async event=>{const button=
 byId('worldCalibrationSelect').onchange=event=>safe(()=>api(`/api/world-calibrations/${event.target.value}/select`,{method:'POST'}));
 byId('newWorldCalibration').onclick=()=>safe(()=>api('/api/world-calibrations',{method:'POST',body:JSON.stringify({name:'New World Calibration'})}));
 byId('saveWorldCalibration').onclick=()=>safe(()=>api('/api/world-calibration',{method:'PATCH',body:JSON.stringify({values:collectUpdate()})}));
+byId('saveRigGeometry').onclick=()=>safe(()=>api(`/api/profiles/${state.profiles.active_id}/camera-rig`,{method:'PATCH',body:JSON.stringify({values:Object.fromEntries(['right_m','forward_m','up_m'].map(key=>[key,+document.querySelector(`[data-rig-offset="${key}"]`).value/1000]))})}));
+byId('applySolvedRig').onclick=()=>safe(()=>api(`/api/profiles/${state.profiles.active_id}/camera-rig`,{method:'PATCH',body:JSON.stringify({values:state.world_calibrations.active.solution.rig_offset})}));
 byId('previousTarget').onclick=()=>safe(()=>api('/api/world-calibration/previous',{method:'POST'}));
 byId('nextTarget').onclick=()=>safe(()=>api('/api/world-calibration/next',{method:'POST'}));
 byId('markTarget').onclick=()=>safe(()=>api('/api/world-calibration/mark',{method:'POST'}));
