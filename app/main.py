@@ -8,7 +8,7 @@ import socket
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -49,6 +49,7 @@ class CameraUpdate(BaseModel):
 
 class ItemCreate(BaseModel):
     type: str = "line"
+    asset_id: str | None = None
 
 
 class ItemUpdate(BaseModel):
@@ -125,7 +126,7 @@ async def request_logging(request: Request, call_next):
     elapsed = (time.monotonic() - start) * 1000.0
     if not request.url.path.startswith("/static/"):
         debug.app("http_request", method=request.method, path=request.url.path, status=response.status_code, ms=round(elapsed, 3))
-    if request.url.path.startswith("/static/") or request.url.path in {"/", "/engineering", "/calibration", "/control", "/gfx"}:
+    if request.url.path.startswith("/static/") or request.url.path in {"/", "/engineering", "/calibration", "/control", "/gfx", "/preview"}:
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -176,6 +177,11 @@ async def control():
 @app.get("/gfx")
 async def gfx():
     return FileResponse(STATIC / "gfx.html")
+
+
+@app.get("/preview")
+async def preview():
+    return FileResponse(STATIC / "preview.html")
 
 
 @app.get("/api/state")
@@ -409,9 +415,33 @@ async def generate_synthetic_world_calibration(body: WorldCalibrationUpdate):
 
 @app.post("/api/scene/items")
 async def add_item(body: ItemCreate):
-    if body.type not in {"line", "text", "marker"}:
-        raise HTTPException(400, "Only line, text and marker are supported")
+    if body.type not in {"line", "text", "marker", "image"}:
+        raise HTTPException(400, "Only line, text, marker and image are supported")
+    if body.type == "image":
+        asset = store.asset_info(body.asset_id or "")
+        if asset is None:
+            raise HTTPException(400, "A valid PNG asset_id is required")
+        return await store.add_image_item(asset)
     return await store.add_item(body.type)
+
+
+@app.post("/api/assets/png")
+async def upload_png(file: UploadFile = File(...)):
+    if file.content_type != "image/png":
+        raise HTTPException(415, "Only image/png uploads are accepted")
+    data = await file.read(10 * 1024 * 1024 + 1)
+    try:
+        return store.save_png_asset(data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/assets/{asset_id}")
+async def get_asset(asset_id: str):
+    path = store.asset_path(asset_id)
+    if path is None:
+        raise HTTPException(404, "Asset not found")
+    return FileResponse(path, media_type="image/png")
 
 
 @app.patch("/api/scene/items/{item_id}")

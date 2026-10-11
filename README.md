@@ -6,7 +6,8 @@ Early development skeleton for a headless Raspberry Pi camera-tracking graphics 
 
 - `/engineering` is the only navigation/system hub.
 - `/calibration` provides separate axis-direction and world/camera calibration workflows.
-- `/control` can add/edit/remove live world-coordinate lines and text.
+- `/control` can add/edit/remove live world-coordinate lines, markers, text and PNG images.
+- `/preview` composites configured operator preview media with the delayed RealLines render camera; `/gfx` remains graphics-only.
 - `/gfx` is a clean graphics-only output.
 - Simulator drives pan and tilt through the canonical tracking pipeline; FOV and camera height remain persisted camera/profile settings.
 - A bounded monotonic pose history supplies an independently delayed render camera for video/graphics synchronization.
@@ -27,6 +28,7 @@ Then open:
 - http://PI-IP:8080/engineering
 - http://PI-IP:8080/calibration
 - http://PI-IP:8080/control
+- http://PI-IP:8080/preview
 - http://PI-IP:8080/gfx
 
 
@@ -69,7 +71,7 @@ The installer creates a `kairix` system user, a Python venv, `/opt/kairix-realli
 - Positive pan turns toward +X/right; positive tilt turns upward
 - World orientation is `tracking angle + world-calibration offset`
 
-The initial Canvas renderer is intentionally lightweight for the Pi 3B. It is a proof of the world-coordinate/state architecture rather than the final textured/3D renderer.
+Planar items use a deterministic orientation convention: yaw rotates about world +Z, pitch rotates about the yawed local right axis, then roll rotates about the resulting plane normal. A zero-rotation plane is vertical; the Floor preset uses pitch -90° so every corner has the same world Z. The lightweight Canvas renderer projects the four corners and uses tessellated texture mapping without a 3D-engine dependency.
 
 ## Control editor
 
@@ -93,7 +95,9 @@ Layouts are stored under the configured data directory in `layouts/<stable-id>.j
 
 On first launch after upgrading, an existing `scene.json` is imported into a Default Layout without deleting or modifying the legacy file. A clean installation instead receives a Home Run demo containing Finish, 50M, 100M and 200M lines and markers.
 
-Current group support is intentionally limited to a single grouping level and X/Y translation. Nested groups, group rotation/scaling, PNG assets, custom planes and undo/redo are not implemented yet.
+Text retains its legacy camera-facing billboard mode and can alternatively use a world-height-sized plane with Floor, Vertical, or custom rotation. PNG images preserve alpha, support billboard/world-plane modes, and use metre dimensions. Uploaded PNGs are stored under `data/assets` with generated IDs; layouts store only that ID. Deleting an item or layout deliberately does not delete its asset because other layouts may reuse it. Asset cleanup is future Engineering work.
+
+Current group support is intentionally limited to a single grouping level and X/Y translation. Nested groups, arbitrary 3D meshes and undo/redo are not implemented.
 
 ## Tracking inputs and setup profiles
 
@@ -114,6 +118,8 @@ mapped_angle = reference_angle + offset + direction × (raw_count - reference_co
 At 600 PPR the decoder yields 600, 1200, or 2400 counts per encoder revolution at ×1, ×2, or ×4. With 1 encoder revolution per camera revolution, 2400 ×4 counts maps to 360°. Counts are unbounded signed integers. Illegal Gray-code transitions are diagnosed and do not move the count. Software debounce is off by default because it can discard legitimate high-rate edges.
 
 Direction is always `+1` or `-1`. Direction marks learn only orientation; raw count motion is visible before referencing. A quadrature axis becomes valid only after the driver is alive and the operator uses **Set current angle** or **Zero** in Engineering. Each such action creates a new session-only UUID reference identity; clearing the reference, restarting the service, retrying the GPIO driver, detecting an illegal Gray-code transition, or detecting a kernel event sequence gap invalidates that identity. Raw counts and fault diagnostics remain available for troubleshooting, but a new reference must be established before the axis is valid again. A stationary referenced encoder remains valid because lack of edges is not stale.
+
+Calibration also provides a known-angle movement workflow for Pan/Tilt quadrature axes. It records start/end raw counts, divides encoder turns by the signed camera movement fraction, and proposes gearing plus direction without applying either silently. Applying uses the normal setup-profile update path, restarts/reconfigures the source, requires a new session reference, and makes incompatible world-calibration fingerprints invalid.
 
 GPIO edge processing uses the kernel's monotonic event timestamps rather than userspace read time. Engineering exposes the current A/B state, raw count, angle relative to the current reference, mapped angle, reference state and angle, edge/count/degree rates, separate global and per-line sequence-gap totals, illegal transitions, integrity-loss events, last-edge age, retry count, and driver status. Relative angle is unavailable until referenced and deliberately excludes direction, offset, and the operator-entered reference angle; mapped angle applies those settings.
 
@@ -136,7 +142,7 @@ Important profile and layout JSON writes use atomic temporary-file replacement. 
 
 ## World/camera calibration
 
-World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID and a deterministic SHA-256 fingerprint covering source, direction, offset, PPR, decode multiplier, gearing, GPIO identity/bias, and reference semantics. A solved calibration also records the current session reference identity for every quadrature Pan/Tilt axis. A profile/fingerprint mismatch or a different, absent, or invalidated runtime reference prevents world tracking and is reported as requiring recalibration. Observations captured under mixed reference identities cannot be solved together. Simulator-only calibrations remain compatible without an encoder identity. Legacy calibrations without a fingerprint remain stored but invalid until solved again. `/gfx` and the Control Camera editor require both `camera.valid` and `camera.world_valid`; Top Down editing remains available.
+World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID and a deterministic SHA-256 fingerprint covering source, direction, offset, PPR, decode multiplier, gearing, GPIO identity/bias, and reference semantics. A solved calibration also records the current session reference identity for every quadrature Pan/Tilt axis. A profile/fingerprint mismatch or a different, absent, or invalidated runtime reference prevents world tracking and is reported as requiring recalibration. Observations captured under mixed reference identities cannot be solved together. Simulator-only calibrations remain compatible without an encoder identity. Legacy calibrations without a fingerprint remain stored but invalid until solved again. Control and `/preview` allow a clearly labelled provisional camera whenever tracking is valid. `/gfx` remains strict unless its explicit Engineering override is enabled.
 
 V1 uses four known corners of a vertical rectangular target: top-left, top-right, bottom-right and bottom-left. The target stores its world centre, width, height and yaw. Each operator mark captures raw and mapped Pan/Tilt values, monotonic time, target identity and setup-profile ID. Direction-learning LEFT/RIGHT/DOWN/UP marks remain a separate process.
 

@@ -1,10 +1,10 @@
-import {api,connectState,logFrontend} from './common.js?v=ui-repair1';
+import {api,connectState,logFrontend} from './common.js?v=world-media1';
 import {
   ENGINEERING_AXES,
   buildEncoderSourceConfig,
   sourceChoicesFor,
   validateEngineeringState,
-} from './engineering_contract.js?v=ui-repair1';
+} from './engineering_contract.js?v=world-media1';
 
 const byId=id=>document.getElementById(id);
 const axes=ENGINEERING_AXES;
@@ -185,6 +185,7 @@ byId('duplicateProfile').onclick=async()=>{const answer=await showDialog({title:
 byId('deleteProfile').onclick=async()=>{const answer=await showDialog({title:`Delete “${state.profiles.active.name}”?`,message:'At least one setup profile is always retained.',accept:'Delete'});if(answer.accepted)await safe(()=>api(`/api/profiles/${state.profiles.active_id}`,{method:'DELETE'}));};
 byId('debugOn').onclick=()=>safe(()=>api('/api/debug/true',{method:'POST'}));byId('debugOff').onclick=()=>safe(()=>api('/api/debug/false',{method:'POST'}));
 byId('allowProvisionalGfx').onchange=async event=>{const enabled=event.target.checked,result=await safe(()=>api('/api/engineering',{method:'PATCH',body:JSON.stringify({values:{allow_provisional_gfx:enabled}})}));if(!result)event.target.checked=state.engineering.allow_provisional_gfx;};
+byId('savePreviewMedia').onclick=async()=>{byId('previewMediaError').textContent='';const result=await safe(()=>api('/api/engineering',{method:'PATCH',body:JSON.stringify({values:{preview_source:byId('previewSource').value,preview_url:byId('previewUrl').value}})}));if(!result)byId('previewMediaError').textContent='Preview settings were not saved.';};
 
 function renderState(incoming,event){
   try {
@@ -204,6 +205,9 @@ function renderState(incoming,event){
     const gfxStatus=byId('gfxProjectionStatus');
     gfxStatus.textContent=state.camera.world_valid?'CALIBRATED GFX':state.tracking.valid&&state.engineering.allow_provisional_gfx?'PROVISIONAL GFX ENABLED':state.tracking.valid?'STRICT GFX — WORLD CALIBRATION REQUIRED':'GFX BLOCKED — TRACKING INVALID';
     gfxStatus.className=state.camera.world_valid?'status-ok':state.tracking.valid&&state.engineering.allow_provisional_gfx?'status-warn':'status-bad';
+    for(const id of ['previewSource','previewUrl','savePreviewMedia'])byId(id).disabled=false;
+    if(byId('previewSource')!==document.activeElement)byId('previewSource').value=state.engineering.preview_source||'none';
+    if(byId('previewUrl')!==document.activeElement)byId('previewUrl').value=state.engineering.preview_url||'';
     applying=false;
     byId('trackingStatus').textContent=state.tracking.valid?(state.camera.world_valid?'TRACKING + WORLD VALID':'TRACKING VALID · WORLD CALIBRATION REQUIRED'):'TRACKING INVALID';
     byId('trackingStatus').className=state.tracking.valid?(state.camera.world_valid?'status-ok':'status-warn'):'status-bad';

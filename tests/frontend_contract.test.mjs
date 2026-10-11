@@ -9,7 +9,8 @@ import {
   validateEncoderDraft,
   validateEngineeringState,
 } from '../app/static/js/engineering_contract.js';
-import {projectItemGeometry, projectionMode} from '../app/static/js/render.js';
+import {planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
+import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
 
 test('Engineering source choices expose only implemented paths as usable', () => {
   for (const axis of ENGINEERING_AXES) {
@@ -84,4 +85,51 @@ test('a default new Line projects provisionally and exposes selection geometry',
   assert.equal(geometry.type, 'line');
   assert.ok(geometry.a.x < 640 && geometry.b.x > 640);
   assert.equal(projectItemGeometry(line, {...camera, valid:false}, 1280, 720, true), null, 'override never bypasses invalid tracking');
+});
+
+test('floor and vertical world-plane presets produce deterministic world corners', () => {
+  const floor={type:'image',x:2,y:8,z:.2,width_m:4,height_m:2,yaw_deg:0,pitch_deg:-90,roll_deg:0};
+  const floorCorners=planeWorldCorners(floor);
+  assert.ok(floorCorners.every(point=>Math.abs(point.z-.2)<1e-9), 'floor corners keep constant Z');
+  const vertical=planeWorldCorners({...floor,pitch_deg:0});
+  assert.ok(vertical.every(point=>Math.abs(point.y-8)<1e-9), 'vertical plane has constant Y at zero yaw');
+  assert.deepEqual(planeWorldCorners(floor), floorCorners, 'plane transform is deterministic');
+});
+
+test('world planes perspective-scale while billboards remain screen-facing', () => {
+  const camera={valid:true,world_valid:true,x:0,y:0,z:1.7,pan:12,tilt:-3,roll:0,fov:60};
+  const billboard={type:'image',x:2,y:12,z:1.7,width_m:2,height_m:1,orientation_mode:'billboard'};
+  const bg=projectItemGeometry(billboard,camera,1280,720,false);
+  assert.equal(bg.quad[0].y,bg.quad[1].y);
+  assert.equal(bg.quad[1].x,bg.quad[2].x);
+  const near={...billboard,orientation_mode:'world',yaw_deg:20,pitch_deg:0,roll_deg:0};
+  const far={...near,y:24};
+  const ng=projectItemGeometry(near,camera,1280,720,false),fg=projectItemGeometry(far,camera,1280,720,false);
+  const width=g=>Math.hypot(g.quad[1].x-g.quad[0].x,g.quad[1].y-g.quad[0].y);
+  assert.ok(width(ng)>width(fg));
+  assert.equal(pointInProjectedQuad(ng.p,ng),true);
+  assert.equal(pointInProjectedQuad({x:-100,y:-100},ng),false);
+});
+
+test('camera pan changes floor-text projection without mutating its world transform', () => {
+  const item={type:'text',text:'FINISH',x:0,y:15,z:0,world_height_m:1,orientation_mode:'world',yaw_deg:0,pitch_deg:-90,roll_deg:0};
+  const before=structuredClone(item),camera={valid:true,world_valid:true,x:0,y:0,z:2,pan:0,tilt:-10,roll:0,fov:60};
+  const first=projectItemGeometry(item,camera,1280,720,false,3.2),second=projectItemGeometry(item,{...camera,pan:10},1280,720,false,3.2);
+  assert.ok(first&&second);
+  assert.notDeepEqual(first.quad,second.quad);
+  assert.deepEqual(item,before);
+});
+
+test('known-angle movement calibration computes gearing and direction', () => {
+  const exact=calculateMovementCalibration({start_count:0,end_count:600,actual_angle:90,ppr:600,multiplier:4});
+  assert.equal(exact.encoder_revs_per_camera_rev,1);
+  const forward=calculateMovementCalibration({start_count:100,end_count:1300,actual_angle:90,ppr:600,multiplier:4});
+  assert.equal(forward.encoder_turns,.5);
+  assert.equal(forward.camera_fraction,.25);
+  assert.equal(forward.encoder_revs_per_camera_rev,2);
+  assert.equal(forward.direction,1);
+  assert.equal(calculateMovementCalibration({start_count:1300,end_count:100,actual_angle:90,ppr:600,multiplier:4}).direction,-1);
+  assert.throws(()=>calculateMovementCalibration({start_count:1,end_count:1,actual_angle:90,ppr:600,multiplier:4}),/Move/);
+  assert.throws(()=>calculateMovementCalibration({start_count:1,end_count:2,actual_angle:0,ppr:600,multiplier:4}),/non-zero/);
+  assert.throws(()=>calculateMovementCalibration({start_count:null,end_count:2,actual_angle:90,ppr:600,multiplier:4}),/required/);
 });

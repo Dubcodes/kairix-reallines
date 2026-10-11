@@ -1,4 +1,5 @@
 import json
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,43 @@ class StoreCase(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(self.make_store(directory).engineering["allow_provisional_gfx"])
             with self.assertRaisesRegex(ValueError, "must be boolean"):
                 await store.update_engineering_settings({"allow_provisional_gfx": 1})
+
+    async def test_preview_media_settings_validate_and_persist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            self.assertEqual(store.engineering["preview_source"], "none")
+            await store.update_engineering_settings({"preview_source": "mjpeg", "preview_url": " http://camera/stream "})
+            reloaded = self.make_store(directory)
+            self.assertEqual(reloaded.engineering["preview_url"], "http://camera/stream")
+            with self.assertRaisesRegex(ValueError, "preview_source"):
+                await store.update_engineering_settings({"preview_source": "webcam"})
+            with self.assertRaisesRegex(ValueError, "http"):
+                await store.update_engineering_settings({"preview_url": "file:///secret"})
+
+    async def test_png_asset_is_validated_stored_and_attached_to_image(self):
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            asset = store.save_png_asset(png)
+            self.assertRegex(asset["id"], r"^[0-9a-f]{32}$")
+            self.assertEqual((asset["width"], asset["height"]), (1, 1))
+            self.assertEqual(store.asset_path(asset["id"]).read_bytes(), png)
+            item = await store.add_image_item(asset)
+            self.assertEqual(item["asset_id"], asset["id"])
+            self.assertEqual(self.make_store(directory).scene["items"][-1]["asset_id"], asset["id"])
+            with self.assertRaisesRegex(ValueError, "valid PNG"):
+                store.save_png_asset(b"not png")
+            self.assertIsNone(store.asset_path("../escape"))
+
+    async def test_legacy_text_gains_billboard_defaults_without_losing_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = {'background':'#000', 'items':[{'id':'caption','type':'text','name':'Caption','text':'LEGACY','size':30,'x':1,'y':2,'z':3,'visible':True,'color':'#fff'}]}
+            (root / 'scene.json').write_text(json.dumps(legacy))
+            item = self.make_store(directory).scene['items'][0]
+            self.assertEqual(item['text'], 'LEGACY')
+            self.assertEqual(item['orientation_mode'], 'billboard')
+            self.assertEqual(item['world_height_m'], 1.0)
 
     async def test_transient_item_update_broadcasts_without_layout_save(self):
         with tempfile.TemporaryDirectory() as directory:

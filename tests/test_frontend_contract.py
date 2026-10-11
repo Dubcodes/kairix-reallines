@@ -76,7 +76,7 @@ class FrontendContractCase(unittest.TestCase):
             for token in LEGACY_ASSET_TOKENS:
                 self.assertNotIn(f"?v={token}", content, owner.name)
         versioned = {value.split("?v=", 1)[1] for _, value in references if "?v=" in value}
-        self.assertEqual({"ui-repair1"}, versioned)
+        self.assertEqual({"world-media1"}, versioned)
         for owner, reference in references:
             self.assertTrue(module_target(owner, reference).is_file(), f"{owner.name}: {reference}")
 
@@ -163,6 +163,42 @@ class FrontendContractCase(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         for name in ("common", "engineering", "engineering_contract", "calibration", "control", "editor", "render"):
             self.assertIn(f"node --check app/static/js/{name}.js", workflow)
+        for name in ("calibration_contract", "preview", "preview_media"):
+            self.assertIn(f"node --check app/static/js/{name}.js", workflow)
+
+    def test_preview_and_clean_gfx_contracts_are_separate(self):
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        preview = (STATIC / "js" / "preview.js").read_text(encoding="utf-8")
+        preview_html = (STATIC / "preview.html").read_text(encoding="utf-8")
+        gfx = (STATIC / "gfx.html").read_text(encoding="utf-8")
+        self.assertIn('@app.get("/preview")', main)
+        self.assertIn("renderScene(canvas,state", preview)
+        self.assertIn("allowProvisional:true", preview)
+        self.assertIn("state.render_camera", (STATIC / "js" / "render.js").read_text(encoding="utf-8"))
+        self.assertIn("NO CAMERA PREVIEW SOURCE", preview_html)
+        self.assertNotIn("preview-media", gfx)
+        self.assertNotRegex(gfx, r"<(?:img|video)\b")
+
+    def test_png_upload_and_asset_routes_are_safely_scoped(self):
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        state = (ROOT / "app" / "state.py").read_text(encoding="utf-8")
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn('@app.post("/api/assets/png")', main)
+        self.assertIn('file.content_type != "image/png"', main)
+        self.assertIn('media_type="image/png"', main)
+        self.assertIn("10 * 1024 * 1024", main)
+        self.assertIn("ASSET_ID_RE.fullmatch", state)
+        self.assertIn('self.assets_dir / f"{asset_id}.png"', state)
+        self.assertRegex(requirements, r"python-multipart==\d+\.\d+\.\d+")
+
+    def test_movement_calibration_uses_existing_profile_update_path(self):
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        self.assertIn("calculateMovementCalibration", calibration)
+        self.assertIn("/api/profiles/${state.profiles.active_id}/axes/${axis}", calibration)
+        self.assertIn("direction_learned:true", calibration)
+        self.assertIn("require a new encoder reference", html)
+        self.assertIn("invalidate", html)
 
     def test_projection_policy_is_shared_and_gfx_override_is_explicit(self):
         render = (STATIC / "js" / "render.js").read_text(encoding="utf-8")

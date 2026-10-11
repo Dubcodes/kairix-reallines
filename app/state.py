@@ -4,8 +4,11 @@ import asyncio
 import json
 import math
 import os
+import re
+import struct
 import time
 import uuid
+import zlib
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,8 +23,40 @@ from .world_calibration import CalibrationError, TARGET_POINTS, default_world_ca
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
-DEFAULT_ENGINEERING = {"profile_name": "Development Simulator", "debug_enabled": True, "allow_provisional_gfx": False, "input_sources": {"pan": "simulator", "tilt": "simulator", "zoom": "simulator", "focus": "disabled"}}
+DEFAULT_ENGINEERING = {"profile_name": "Development Simulator", "debug_enabled": True, "allow_provisional_gfx": False, "preview_source": "none", "preview_url": "", "input_sources": {"pan": "simulator", "tilt": "simulator", "zoom": "simulator", "focus": "disabled"}}
 DEFAULT_SYNC = {"graphics_delay_ms": 0, "history_duration_seconds": 5.0}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_PNG_BYTES = 10 * 1024 * 1024
+ASSET_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def png_dimensions(data: bytes) -> tuple[int, int]:
+    if len(data) < 33 or data[:8] != PNG_SIGNATURE:
+        raise ValueError("File is not a valid PNG")
+    offset, dimensions, ended, has_idat = 8, None, False, False
+    while offset + 12 <= len(data):
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        chunk_type = data[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            raise ValueError("PNG is truncated")
+        payload = data[offset + 8:offset + 8 + length]
+        expected = struct.unpack(">I", data[offset + 8 + length:end])[0]
+        if zlib.crc32(chunk_type + payload) & 0xffffffff != expected:
+            raise ValueError("PNG chunk checksum is invalid")
+        if offset == 8:
+            if chunk_type != b"IHDR" or length != 13:
+                raise ValueError("PNG IHDR is invalid")
+            dimensions = struct.unpack(">II", payload[:8])
+        if chunk_type == b"IDAT":
+            has_idat = True
+        if chunk_type == b"IEND":
+            ended = end == len(data)
+            break
+        offset = end
+    if not ended or not has_idat or not dimensions or not all(dimensions):
+        raise ValueError("PNG structure is invalid")
+    return dimensions
 
 
 def _utc_now() -> str:
@@ -57,11 +92,18 @@ class StateStore:
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.world_calibrations_dir = self.data_dir / "world_calibrations"
         self.world_calibrations_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_dir = self.data_dir / "assets"
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
         self.debug = debug
         self.camera = deepcopy(DEFAULT_CAMERA)
         self.calibration = self._load("calibration.json", DEFAULT_CALIBRATION)
         self.engineering = self._load("engineering.json", DEFAULT_ENGINEERING)
+        original_engineering = deepcopy(self.engineering)
         self.engineering["allow_provisional_gfx"] = self.engineering.get("allow_provisional_gfx") is True
+        self.engineering["preview_source"] = self.engineering.get("preview_source") if self.engineering.get("preview_source") in {"none", "mjpeg", "video"} else "none"
+        self.engineering["preview_url"] = str(self.engineering.get("preview_url") or "")
+        if self.engineering != original_engineering:
+            self._save("engineering.json", self.engineering)
         self.profile_index = self._load_or_migrate_profiles(legacy_engineering_exists)
         self.profile = self._read_profile(self.profile_index["active_id"])
         self._sync_calibration_from_profile()
@@ -536,6 +578,18 @@ class StateStore:
         result.setdefault("background", "#00ff00")
         result.setdefault("groups", [])
         result.setdefault("items", [])
+        for item in result["items"]:
+            if item.get("type") in {"text", "image"}:
+                item.setdefault("orientation_mode", "billboard")
+                item.setdefault("orientation_preset", "face_camera" if item["orientation_mode"] == "billboard" else "vertical")
+                item.setdefault("yaw_deg", 0.0)
+                item.setdefault("pitch_deg", 0.0)
+                item.setdefault("roll_deg", 0.0)
+            if item.get("type") == "text":
+                item.setdefault("world_height_m", 1.0)
+            if item.get("type") == "image":
+                item.setdefault("width_m", 2.0)
+                item.setdefault("height_m", 1.0)
         valid_ids = {item.get("id") for item in result["items"]}
         assigned: set[str] = set()
         for group in result["groups"]:
@@ -550,7 +604,12 @@ class StateStore:
         return result
 
     def _read_layout(self, layout_id: str) -> dict[str, Any]:
-        return self._normalise_scene(json.loads(self._layout_path(layout_id).read_text(encoding="utf-8")))
+        path = self._layout_path(layout_id)
+        original = json.loads(path.read_text(encoding="utf-8"))
+        result = self._normalise_scene(original)
+        if result != original:
+            self._atomic_write_path(path, result)
+        return result
 
     def _load_or_migrate_layouts(self) -> dict[str, Any]:
         index_path = self.layouts_dir / "index.json"
@@ -650,16 +709,25 @@ class StateStore:
         await self.broadcast({"type": "pose", "data": self.pose_snapshot()})
 
     async def update_engineering_settings(self, values: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(values) - {"allow_provisional_gfx"}
+        unknown = set(values) - {"allow_provisional_gfx", "preview_source", "preview_url"}
         if unknown:
             raise ValueError(f"Unknown Engineering setting: {sorted(unknown)[0]}")
         if "allow_provisional_gfx" in values and not isinstance(values["allow_provisional_gfx"], bool):
             raise ValueError("allow_provisional_gfx must be boolean")
+        if "preview_source" in values and values["preview_source"] not in {"none", "mjpeg", "video"}:
+            raise ValueError("preview_source must be none, mjpeg or video")
+        if "preview_url" in values:
+            if not isinstance(values["preview_url"], str) or len(values["preview_url"]) > 2048:
+                raise ValueError("preview_url must be a string of at most 2048 characters")
+            url = values["preview_url"].strip()
+            if url and not url.lower().startswith(("http://", "https://")):
+                raise ValueError("preview_url must use http:// or https://")
+            values = {**values, "preview_url": url}
         async with self.lock:
             self.engineering.update(values)
             self._save("engineering.json", self.engineering)
             result = deepcopy(self.engineering)
-        self.debug.app("engineering_settings_updated", allow_provisional_gfx=result["allow_provisional_gfx"])
+        self.debug.app("engineering_settings_updated", allow_provisional_gfx=result["allow_provisional_gfx"], preview_source=result["preview_source"])
         await self.broadcast_state()
         return result
 
@@ -1045,10 +1113,60 @@ class StateStore:
         await self.broadcast_state()
         return await self.solve_active_world_calibration()
 
+    def save_png_asset(self, data: bytes) -> dict[str, Any]:
+        if len(data) > MAX_PNG_BYTES:
+            raise ValueError("PNG exceeds the 10 MB limit")
+        width, height = png_dimensions(data)
+        asset_id = uuid.uuid4().hex
+        path = self.assets_dir / f"{asset_id}.png"
+        tmp = path.with_suffix(".png.tmp")
+        try:
+            with tmp.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp.replace(path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        self.debug.app("png_asset_saved", asset_id=asset_id, bytes=len(data), width=width, height=height)
+        return {"id": asset_id, "width": width, "height": height, "bytes": len(data), "url": f"/api/assets/{asset_id}"}
+
+    def asset_path(self, asset_id: str) -> Path | None:
+        if not ASSET_ID_RE.fullmatch(asset_id):
+            return None
+        path = self.assets_dir / f"{asset_id}.png"
+        return path if path.is_file() else None
+
+    def asset_info(self, asset_id: str) -> dict[str, Any] | None:
+        path = self.asset_path(asset_id)
+        if path is None:
+            return None
+        try:
+            width, height = png_dimensions(path.read_bytes())
+        except ValueError:
+            return None
+        return {"id": asset_id, "width": width, "height": height, "url": f"/api/assets/{asset_id}"}
+
+    async def add_image_item(self, asset: dict[str, Any]) -> dict[str, Any]:
+        item = self._new_item("image")
+        item["asset_id"] = asset["id"]
+        aspect = asset["width"] / asset["height"]
+        item["height_m"] = 1.0
+        item["width_m"] = round(aspect, 6)
+        async with self.lock:
+            self.scene["items"].append(item)
+            self._persist_active_locked()
+        self.debug.app("scene_item_added", id=item["id"], type="image", asset_id=asset["id"])
+        await self.broadcast_state()
+        return deepcopy(item)
+
     def _new_item(self, item_type: str) -> dict[str, Any]:
         common = {"id": _new_id(), "type": item_type, "visible": True, "color": "#ffffff"}
         if item_type == "text":
-            return {**common, "name": "Text", "text": "TEXT", "size": 42, "x": 0.0, "y": 10.0, "z": 0.1}
+            return {**common, "name": "Text", "text": "TEXT", "size": 42, "x": 0.0, "y": 10.0, "z": 0.1, "orientation_mode": "billboard", "orientation_preset": "face_camera", "yaw_deg": 0.0, "pitch_deg": 0.0, "roll_deg": 0.0, "world_height_m": 1.0}
+        if item_type == "image":
+            return {**common, "name": "Image", "asset_id": None, "x": 0.0, "y": 10.0, "z": 0.1, "orientation_mode": "billboard", "orientation_preset": "face_camera", "yaw_deg": 0.0, "pitch_deg": 0.0, "roll_deg": 0.0, "width_m": 2.0, "height_m": 1.0}
         if item_type == "marker":
             return {**common, "name": "Marker", "size": 0.5, "label": "MARKER", "show_label": True, "x": 0.0, "y": 10.0, "z": 0.0}
         return {**common, "name": "Line", "width": 5, "x1": -2.0, "y1": 10.0, "z1": 0.0, "x2": 2.0, "y2": 10.0, "z2": 0.0}
