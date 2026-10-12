@@ -7,6 +7,7 @@ import {
   validateEngineeringState,
 } from './engineering_contract.js?v=world-media1';
 
+window.__kairixEngineeringInitialized=true;
 const byId=id=>document.getElementById(id);
 const axes=ENGINEERING_AXES;
 const dialog=byId('engineeringDialog');
@@ -195,8 +196,14 @@ function renderSetupStatus(){
   else if(!state.camera.world_valid)message='Camera movement is working. Finish camera/world calibration.';
   else message='Camera tracking is ready.';
   byId('setupSummary').textContent=message;
-  const stages={setupHardware:drivers,setupReference:referenced,setupCalibration:state.camera.world_valid,setupGraphics:Boolean(state.layouts),setupOutput:state.camera.world_valid||state.engineering.allow_provisional_gfx};
-  for(const [id,ready] of Object.entries(stages)){const element=byId(id);element.textContent=ready?'Ready':'Next step';element.className=ready?'status-ok':'status-warn';}
+  const stages={
+    setupHardware:drivers?{label:'Ready',status:'ok'}:{label:'Next step',status:'warn'},
+    setupReference:referenced?{label:'Ready',status:'ok'}:{label:'Next step',status:'warn'},
+    setupCalibration:state.camera.world_valid?{label:'Ready',status:'ok'}:{label:'Next step',status:'warn'},
+    setupGraphics:{label:'Available',status:'ok'},
+    setupOutput:state.camera.world_valid||state.engineering.allow_provisional_gfx?{label:'Ready',status:'ok'}:{label:'Waiting',status:'warn'},
+  };
+  for(const [id,stage] of Object.entries(stages)){const element=byId(id);element.textContent=stage.label;element.className=`status-${stage.status}`;}
 }
 
 const simulatorIds=['pan','tilt','fov','height'];
@@ -254,7 +261,7 @@ function renderState(incoming,event){
 }
 
 function connectionStatus(status,detail){
-  if(status==='connecting'&&!state)setUiStatus('UI LOADING');
+  if(status==='connecting'&&!state)setUiStatus(window.__kairixEngineeringLoadingLabel);
   if(status==='websocket-open'){connectionMode='websocket';setUiStatus(state?'Connected':'Connected — waiting for state');}
   if(status==='websocket-error'){connectionMode='retrying';setUiStatus('WEBSOCKET ERROR / RETRYING',detail);}
   if(status==='polling'){connectionMode='polling';setUiStatus('POLLING FALLBACK',detail||'WebSocket unavailable; HTTP polling is active while retrying.');}

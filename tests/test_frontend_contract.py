@@ -61,7 +61,15 @@ class FrontendContractCase(unittest.TestCase):
         self.assertTrue(required <= anchors)
         literal_references = set(re.findall(r"byId\(['\"]([^'\"]+)['\"]\)", js))
         self.assertEqual(set(), literal_references - anchors)
-        self.assertIn("UI LOADING", html)
+        initial_status = re.search(r'id="uiStatus"[^>]*>([^<]+)</span>', html)
+        self.assertIsNotNone(initial_status)
+        self.assertEqual("Loading", initial_status.group(1))
+        self.assertIn("__kairixEngineeringLoadingLabel=document.getElementById('uiStatus').textContent.trim()", html)
+        self.assertIn("!window.__kairixEngineeringInitialized", html)
+        self.assertIn("el.textContent===window.__kairixEngineeringLoadingLabel", html)
+        self.assertIn("window.__kairixEngineeringInitialized=true", js)
+        self.assertIn("setUiStatus(window.__kairixEngineeringLoadingLabel)", js)
+        self.assertNotIn("UI LOADING", html + js)
         self.assertIn("__kairixEngineeringBoot", html)
         self.assertIn("UI ERROR", html)
         for field in ("filename", "lineno", "colno"):
@@ -300,6 +308,10 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("18 angular residuals", readme)
         self.assertIn("eight principal unknowns", readme)
         self.assertNotIn("five-unknown solve", readme)
+        self.assertNotIn("Boolean(state.layouts)", engineering)
+        self.assertIn("setupGraphics:{label:'Available',status:'ok'}", engineering)
+        self.assertIn("setupOutput:state.camera.world_valid||state.engineering.allow_provisional_gfx", engineering)
+        self.assertIn("{label:'Waiting',status:'warn'}", engineering)
 
         for control_id in (
             "trackingAxes", "profileSelect", "allowProvisionalGfx", "previewSource",
