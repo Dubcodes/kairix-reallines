@@ -169,7 +169,7 @@ def merge_axis_update(axis: str, current: dict[str, Any], updates: dict[str, Any
     for section in ("mapping", "source_config"):
         if section in updates:
             candidate.setdefault(section, {}).update(updates[section] or {})
-    if candidate.get("source") == "linux_rotary":
+    if current.get("source") != "linux_rotary" and candidate.get("source") == "linux_rotary":
         candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
     validate_axis_config(axis, candidate)
     return candidate

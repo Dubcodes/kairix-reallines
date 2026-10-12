@@ -54,6 +54,12 @@ export function buildEncoderSourceConfig(draft) {
   return {source_config:validateEncoderDraft(draft)};
 }
 
+export function buildSourceUpdate(source) {
+  return source === 'linux_rotary'
+    ? {source, mapping:{quadrature_multiplier:4}}
+    : {source};
+}
+
 export function validateEngineeringState(state) {
   if (!state || typeof state !== 'object') throw new Error('State payload is unavailable');
   for (const field of ENGINEERING_STATE_FIELDS) {

@@ -5,6 +5,7 @@ import {
   ENGINEERING_AXES,
   ENGINEERING_STATE_FIELDS,
   buildEncoderSourceConfig,
+  buildSourceUpdate,
   sourceChoicesFor,
   validateEncoderDraft,
   validateEngineeringState,
@@ -24,6 +25,14 @@ test('Engineering source choices expose only implemented paths as usable', () =>
     assert.equal(choices.quadrature_gpio.enabled, axis === 'pan' || axis === 'tilt');
     assert.equal(choices.linux_rotary.enabled, axis === 'pan' || axis === 'tilt');
   }
+});
+
+test('Linux rotary source selection applies source and fixed x4 atomically', () => {
+  assert.deepEqual(buildSourceUpdate('linux_rotary'), {
+    source:'linux_rotary',
+    mapping:{quadrature_multiplier:4},
+  });
+  assert.deepEqual(buildSourceUpdate('quadrature_gpio'), {source:'quadrature_gpio'});
 });
 
 test('Engineering state contract accepts the required page payload', () => {

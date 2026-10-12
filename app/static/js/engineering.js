@@ -2,6 +2,7 @@ import {api,connectState,logFrontend} from './common.js?v=world-media1';
 import {
   ENGINEERING_AXES,
   buildEncoderSourceConfig,
+  buildSourceUpdate,
   sourceChoicesFor,
   validateEngineeringState,
 } from './engineering_contract.js?v=world-media1';
@@ -92,7 +93,7 @@ function bindAxisCards(){
   byId('trackingAxes').querySelectorAll('.axis-card').forEach(card=>{
     const axis=card.dataset.axis;
     card.querySelector('[data-config="source"]').addEventListener('change',event=>{
-      updateAxis(axis,{source:event.target.value});
+      updateAxis(axis,buildSourceUpdate(event.target.value));
     });
 
     card.querySelectorAll('[data-mapping]').forEach(input=>{

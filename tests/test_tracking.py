@@ -80,6 +80,30 @@ class MappingCase(unittest.TestCase):
         with self.assertRaisesRegex(TrackingConfigError, "requires quadrature multiplier"):
             normalise_axis_config("pan", pan)
 
+    def test_linux_rotary_source_switch_atomically_normalises_only_multiplier(self):
+        for multiplier in (1, 2, 4):
+            current = default_axis_config("pan", "quadrature_gpio")
+            current["mapping"].update({
+                "ppr": 1234,
+                "quadrature_multiplier": multiplier,
+                "encoder_revs_per_camera_rev": 9.5,
+                "direction": -1,
+                "offset": 12.25,
+            })
+            expected_mapping = {**current["mapping"], "quadrature_multiplier": 4}
+            selected = merge_axis_update("pan", current, {"source": "linux_rotary"})
+            self.assertEqual(selected["source"], "linux_rotary")
+            self.assertEqual(selected["mapping"], expected_mapping)
+
+        gpio = merge_axis_update("pan", selected, {"source": "quadrature_gpio"})
+        self.assertEqual(gpio["mapping"]["quadrature_multiplier"], 4)
+
+    def test_invalid_linux_rotary_multiplier_is_rejected_after_source_switch(self):
+        current = default_axis_config("pan", "quadrature_gpio")
+        rotary = merge_axis_update("pan", current, {"source": "linux_rotary"})
+        with self.assertRaisesRegex(TrackingConfigError, "requires quadrature multiplier"):
+            merge_axis_update("pan", rotary, {"mapping": {"quadrature_multiplier": 1}})
+
     def test_invalid_encoder_config_is_rejected(self):
         current = default_axis_config("pan", "quadrature_gpio")
         for values in ({"ppr": 0}, {"quadrature_multiplier": 3}, {"encoder_revs_per_camera_rev": 0}, {"direction": 0}):
