@@ -21,11 +21,11 @@ class MappingCase(unittest.TestCase):
         self.assertEqual(pan["source"], "simulator")
         self.assertEqual(tilt["source"], "simulator")
         self.assertEqual(
-            pan["source_config"],
+            {key: pan["source_config"][key] for key in ("stale_timeout_seconds", "chip", "line_a", "line_b", "bias")},
             {"stale_timeout_seconds": 2.0, "chip": "/dev/gpiochip0", "line_a": 17, "line_b": 27, "bias": "as_is"},
         )
         self.assertEqual(
-            tilt["source_config"],
+            {key: tilt["source_config"][key] for key in ("stale_timeout_seconds", "chip", "line_a", "line_b", "bias")},
             {"stale_timeout_seconds": 2.0, "chip": "/dev/gpiochip0", "line_a": 22, "line_b": 23, "bias": "as_is"},
         )
         self.assertEqual({pan["source_config"]["line_a"], pan["source_config"]["line_b"]} & {tilt["source_config"]["line_a"], tilt["source_config"]["line_b"]}, set())
@@ -60,6 +60,25 @@ class MappingCase(unittest.TestCase):
         self.assertAlmostEqual(map_raw_value("pan", 100, config), 3.0)
         config["mapping"].update({"direction": -1, "offset": 10})
         self.assertAlmostEqual(map_raw_value("pan", 100, config), 7.0)
+
+    def test_linux_rotary_defaults_and_fixed_x4_validation(self):
+        pan = default_axis_config("pan", "linux_rotary")
+        tilt = default_axis_config("tilt", "linux_rotary")
+        self.assertEqual(
+            {key: pan["source_config"][key] for key in ("discovery", "rel_axis", "pin_a", "pin_b", "steps_per_period")},
+            {"discovery": "auto", "rel_axis": "REL_X", "pin_a": 17, "pin_b": 27, "steps_per_period": 4},
+        )
+        self.assertEqual(
+            {key: tilt["source_config"][key] for key in ("discovery", "rel_axis", "pin_a", "pin_b", "steps_per_period")},
+            {"discovery": "auto", "rel_axis": "REL_Y", "pin_a": 22, "pin_b": 23, "steps_per_period": 4},
+        )
+        selected = merge_axis_update("pan", default_axis_config("pan", "quadrature_gpio"), {
+            "source": "linux_rotary", "mapping": {"quadrature_multiplier": 1},
+        })
+        self.assertEqual(selected["mapping"]["quadrature_multiplier"], 4)
+        pan["mapping"]["quadrature_multiplier"] = 2
+        with self.assertRaisesRegex(TrackingConfigError, "requires quadrature multiplier"):
+            normalise_axis_config("pan", pan)
 
     def test_invalid_encoder_config_is_rejected(self):
         current = default_axis_config("pan", "quadrature_gpio")

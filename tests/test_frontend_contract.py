@@ -244,11 +244,23 @@ class FrontendContractCase(unittest.TestCase):
     def test_engineering_exposes_high_rate_encoder_diagnostics(self):
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
         for label in (
-            "Requested kernel event buffer", "Read batch size", "Edges/sec", "Peak edges/sec",
-            "Largest read batch", "Total events", "Global sequence gaps", "Line sequence gaps",
-            "Integrity-loss events", "Integrity", "Counts/sec", "Degrees/sec", "Last edge age",
+            "Requested GPIO event buffer", "Read batch size", "Events/sec", "Peak events/sec",
+            "Total movement events", "Confirmed global gaps", "Line sequence gaps",
+            "Integrity-loss events", "Integrity", "Counts/sec", "Degrees/sec", "Last event age",
         ):
             self.assertIn(label, engineering)
+
+    def test_linux_rotary_ui_is_distinct_fixed_x4_and_overlay_explicit(self):
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        contract = (STATIC / "js" / "engineering_contract.js").read_text(encoding="utf-8")
+        self.assertIn("Linux Rotary Encoder", contract)
+        self.assertIn("rotary-encoder", engineering)
+        self.assertIn("×4 quarter-period", engineering)
+        self.assertIn("device-tree overlay", engineering)
+        self.assertIn("SYN_DROPPED", engineering)
+        self.assertIn("rotaryEncoder?' disabled'", engineering)
+        self.assertIn("'linux_rotary'", calibration)
 
     def test_state_and_system_payloads_cover_engineering_fields(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -292,6 +304,9 @@ class FrontendContractCase(unittest.TestCase):
             source = (ROOT / "installer" / name).read_text(encoding="utf-8")
             self.assertIn(f"systemctl restart {service}", source)
             self.assertIn(f"systemctl is-active --quiet {service}", source)
+            self.assertIn("gpio,input", source)
+        production_service = (ROOT / "installer" / "kairix-reallines.service").read_text(encoding="utf-8")
+        self.assertIn("SupplementaryGroups=gpio input", production_service)
 
 
 if __name__ == "__main__":

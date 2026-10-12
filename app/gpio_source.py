@@ -14,6 +14,18 @@ from .tracking import degrees_per_count
 
 KERNEL_EVENT_BUFFER_SIZE = 4096
 READ_BATCH_SIZE = 1024
+SEQUENCE_MODULUS = 1 << 32
+SEQUENCE_HALF_RANGE = SEQUENCE_MODULUS >> 1
+
+
+def _sequence_gap(previous: int, current: int) -> tuple[int, bool]:
+    """Return missing forward values and whether the counter moved backwards."""
+    delta = (int(current) - int(previous)) % SEQUENCE_MODULUS
+    if delta <= 1:
+        return 0, False
+    if delta < SEQUENCE_HALF_RANGE:
+        return delta - 1, False
+    return 0, True
 
 
 class GpioUnavailable(RuntimeError):
@@ -26,6 +38,8 @@ class QuadratureGpioWorker:
     RATE_WINDOW_NS = 1_000_000_000
     RATE_BUCKET_NS = 10_000_000
     RATE_BUCKET_CAPACITY = RATE_WINDOW_NS // RATE_BUCKET_NS + 2
+    PEAK_MIN_WINDOW_NS = 100_000_000
+    PEAK_MIN_EVENTS = 16
 
     def __init__(self, axis: str, config: dict[str, Any]) -> None:
         self.axis = axis
@@ -51,6 +65,8 @@ class QuadratureGpioWorker:
             "counts_per_second": 0.0, "degrees_per_second": 0.0,
             "global_seqno": None, "line_seqno": {"a": None, "b": None},
             "global_sequence_gaps": 0, "line_sequence_gaps": 0,
+            "confirmed_global_gaps": 0, "global_only_sequence_gaps": 0,
+            "global_out_of_order_events": 0, "line_out_of_order_events": 0,
             "integrity_loss_events": 0, "integrity_lost": False, "integrity_status": "TRUSTED",
             "illegal_transitions": 0, "restarts": 0,
         }
@@ -104,7 +120,7 @@ class QuadratureGpioWorker:
             result["raw_count"] = self.decoder.count
             result["illegal_transitions"] = self.decoder.diagnostics.illegal_transitions
             edge_rate, counts_rate, degrees_rate = self._rates_locked(now_ns)
-            self._snapshot["peak_event_rate_hz"] = max(self._snapshot["peak_event_rate_hz"], edge_rate)
+            self._update_peak_locked(now_ns, edge_rate)
             result.update({
                 "event_rate_hz": round(edge_rate, 2),
                 "peak_event_rate_hz": round(self._snapshot["peak_event_rate_hz"], 2),
@@ -171,15 +187,28 @@ class QuadratureGpioWorker:
         before_illegal = self.decoder.diagnostics.illegal_transitions
         self.decoder.update(self._snapshot["a_state"], self._snapshot["b_state"])
         illegal = self.decoder.diagnostics.illegal_transitions > before_illegal
-        global_gap = global_seqno is not None and self._last_global_seqno is not None and global_seqno > self._last_global_seqno + 1
+        global_missing, global_backward = (0, False)
+        if global_seqno is not None and self._last_global_seqno is not None:
+            global_missing, global_backward = _sequence_gap(self._last_global_seqno, global_seqno)
+        global_gap = global_missing > 0
         previous_line = self._last_line_seqno.get(line_offset)
-        line_gap = line_seqno is not None and previous_line is not None and line_seqno > previous_line + 1
+        line_missing, line_backward = (0, False)
+        if line_seqno is not None and previous_line is not None:
+            line_missing, line_backward = _sequence_gap(previous_line, line_seqno)
+        line_gap = line_missing > 0
         if global_gap:
-            self._snapshot["global_sequence_gaps"] += global_seqno - self._last_global_seqno - 1
+            self._snapshot["global_sequence_gaps"] += global_missing
+            self._snapshot["confirmed_global_gaps"] += global_missing
+            if not line_gap:
+                self._snapshot["global_only_sequence_gaps"] += global_missing
         if line_gap:
-            self._snapshot["line_sequence_gaps"] += line_seqno - previous_line - 1
-        if illegal or global_gap or line_gap:
-            causes = (["illegal transition"] if illegal else []) + (["global sequence gap"] if global_gap else []) + (["line sequence gap"] if line_gap else [])
+            self._snapshot["line_sequence_gaps"] += line_missing
+        if global_backward:
+            self._snapshot["global_out_of_order_events"] += 1
+        if line_backward:
+            self._snapshot["line_out_of_order_events"] += 1
+        if illegal or global_gap or line_gap or global_backward or line_backward:
+            causes = (["illegal transition"] if illegal else []) + (["global sequence gap"] if global_gap else []) + (["line sequence gap"] if line_gap else []) + (["global sequence regression"] if global_backward else []) + (["line sequence regression"] if line_backward else [])
             self._invalidate_reference_locked(f"Count integrity lost ({', '.join(causes)}); set a new reference", integrity_loss=True)
         self._last_global_seqno = global_seqno if global_seqno is not None else self._last_global_seqno
         if line_seqno is not None:
@@ -197,6 +226,14 @@ class QuadratureGpioWorker:
         self._snapshot["largest_read_batch"] = max(self._snapshot["largest_read_batch"], batch_size)
         if timestamp_ns is not None:
             event_rate, _, _ = self._rates_locked(timestamp_ns)
+            self._update_peak_locked(timestamp_ns, event_rate)
+
+    def _update_peak_locked(self, now_ns: int, event_rate: float) -> None:
+        if not self._motion_buckets:
+            return
+        first, last = self._motion_buckets[0], self._motion_buckets[-1]
+        event_count = sum(bucket[3] for bucket in self._motion_buckets)
+        if event_count >= self.PEAK_MIN_EVENTS and last[2] - first[1] >= self.PEAK_MIN_WINDOW_NS:
             self._snapshot["peak_event_rate_hz"] = max(self._snapshot["peak_event_rate_hz"], event_rate)
 
     def process_edge(self, line_offset: int, is_rising: bool, timestamp_ns: int, global_seqno: int | None = None, line_seqno: int | None = None) -> None:

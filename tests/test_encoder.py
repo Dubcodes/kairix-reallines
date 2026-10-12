@@ -173,6 +173,8 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         worker.process_edge(5, True, 1_100_000_000, global_seqno=3, line_seqno=1)
         snapshot = worker.snapshot(1_100_000_000)
         self.assertEqual(snapshot["global_sequence_gaps"], 1)
+        self.assertEqual(snapshot["confirmed_global_gaps"], 1)
+        self.assertEqual(snapshot["global_only_sequence_gaps"], 1)
         self.assertEqual(snapshot["line_sequence_gaps"], 0)
         self.assertEqual(snapshot["integrity_loss_events"], 1)
         self.assertFalse(snapshot["referenced"])
@@ -186,6 +188,31 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(snapshot["line_sequence_gaps"], 1)
         self.assertEqual(snapshot["integrity_loss_events"], 1)
         self.assertFalse(snapshot["referenced"])
+
+    def test_global_and_line_sequence_wraparound_are_contiguous(self):
+        worker, reference_id = self.referenced_worker()
+        worker._last_global_seqno = 0xFFFFFFFF
+        worker._last_line_seqno[6] = 0xFFFFFFFF
+        worker.process_edge(6, True, 1_000_000_000, global_seqno=0, line_seqno=0)
+        snapshot = worker.snapshot(1_000_000_000)
+        self.assertEqual(snapshot["global_sequence_gaps"], 0)
+        self.assertEqual(snapshot["line_sequence_gaps"], 0)
+        self.assertEqual(snapshot["reference_id"], reference_id)
+
+    def test_sequence_regression_is_not_treated_as_legitimate_reordering(self):
+        worker, _ = self.referenced_worker()
+        worker.process_edge(6, True, 1, global_seqno=100, line_seqno=100)
+        worker.process_edge(5, True, 2, global_seqno=102, line_seqno=100)
+        worker.process_edge(6, False, 3, global_seqno=101, line_seqno=101)
+        snapshot = worker.snapshot(3)
+        self.assertFalse(snapshot["referenced"])
+        self.assertGreaterEqual(snapshot["confirmed_global_gaps"], 1)
+        self.assertEqual(snapshot["global_out_of_order_events"], 1)
+
+    def test_short_burst_does_not_create_absurd_peak_rate(self):
+        worker, _ = self.referenced_worker()
+        worker.process_edge_batch(edge_records(3, interval_ns=1))
+        self.assertEqual(worker.snapshot(1_000_000_002)["peak_event_rate_hz"], 0)
 
     def test_kernel_timestamps_levels_and_signed_motion_rates(self):
         worker, _ = self.referenced_worker()
@@ -271,15 +298,16 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
 
     def test_batch_diagnostics_report_capacity_rate_peak_and_size(self):
         worker, _ = self.referenced_worker()
-        records = edge_records(READ_BATCH_SIZE)
-        worker.process_edge_batch(records)
+        records = edge_records(READ_BATCH_SIZE * 2)
+        worker.process_edge_batch(records[:READ_BATCH_SIZE])
+        worker.process_edge_batch(records[READ_BATCH_SIZE:])
         snapshot = worker.snapshot(records[-1][2])
         self.assertEqual(snapshot["kernel_event_buffer_size"], KERNEL_EVENT_BUFFER_SIZE)
         self.assertEqual(snapshot["read_batch_size"], READ_BATCH_SIZE)
         self.assertEqual(snapshot["largest_read_batch"], READ_BATCH_SIZE)
-        self.assertEqual(snapshot["events"], READ_BATCH_SIZE)
+        self.assertEqual(snapshot["events"], READ_BATCH_SIZE * 2)
         self.assertGreater(snapshot["peak_event_rate_hz"], 19_900)
-        self.assertEqual(snapshot["raw_count"], READ_BATCH_SIZE)
+        self.assertEqual(snapshot["raw_count"], READ_BATCH_SIZE * 2)
 
     def test_request_uses_explicit_kernel_event_buffer_size(self):
         worker = QuadratureGpioWorker("pan", worker_config())

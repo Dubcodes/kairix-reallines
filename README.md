@@ -106,7 +106,7 @@ Current group support is intentionally limited to a single grouping level and X/
 
 The renderer still consumes the stable `camera.pan`, `camera.tilt`, `camera.fov`, `camera.height` and `camera.valid` contract. Behind that contract, runtime `tracking.axes` records source, raw value, mapped value, health, validity, timestamp, age and sample-rate information independently for Pan, Tilt, Zoom and Focus.
 
-Source selection is per axis. `simulator`, `disabled`, and `quadrature_gpio` are functional; `imu` and `external` remain recognised but unconfigured. Pan and Tilt are required for overall tracking validity. Zoom and Focus may be disabled. Each GPIO axis has a dedicated libgpiod v2 event thread; one source manager owns lifecycle, diagnostics, and retry after driver errors. GPIO code is imported only by the Linux adapter, so development and tests remain import-safe on Windows.
+Source selection is per axis. `simulator`, `disabled`, `quadrature_gpio`, and `linux_rotary` are functional; `imu` and `external` remain recognised but unconfigured. Pan and Tilt are required for overall tracking validity. Zoom and Focus may be disabled. Each hardware axis has a dedicated worker; one source manager owns lifecycle, diagnostics, and retry after driver errors. Linux adapters remain import-safe on Windows.
 
 Hardware/tracking setup profiles are separate from graphics layouts and persist under `data/profiles/<stable-id>.json`, with `data/profiles/index.json` holding metadata and the active ID. Profiles support create, select, rename, duplicate, delete and per-axis updates. A clean install starts with **Development Simulator**. Existing `engineering.json` source selections and direction calibration are imported once without deleting either legacy file.
 
@@ -118,13 +118,13 @@ degrees_per_count = 360 / counts_per_camera_revolution
 mapped_angle = reference_angle + offset + direction × (raw_count - reference_count) × degrees_per_count
 ```
 
-At 600 PPR the decoder yields 600, 1200, or 2400 counts per encoder revolution at ×1, ×2, or ×4. With 1 encoder revolution per camera revolution, 2400 ×4 counts maps to 360°. Counts are unbounded signed integers. Illegal Gray-code transitions are diagnosed and do not move the count. Software debounce is off by default because it can discard legitimate high-rate edges.
+At 600 PPR the decoder yields 600, 1200, or 2400 counts per encoder revolution at ×1, ×2, or ×4. With 1 encoder revolution per camera revolution, 2400 ×4-decoded counts maps to 360°. Counts are unbounded signed integers. Illegal Gray-code transitions are diagnosed and do not move the count. Software debounce is off by default because it can discard legitimate high-rate edges.
 
 Direction is always `+1` or `-1`. Direction marks learn only orientation; raw count motion is visible before referencing. A quadrature axis becomes valid only after the driver is alive and the operator uses **Set current angle** or **Zero** in Engineering. Each such action creates a new session-only UUID reference identity; clearing the reference, restarting the service, retrying the GPIO driver, detecting an illegal Gray-code transition, or detecting a kernel event sequence gap invalidates that identity. Raw counts and fault diagnostics remain available for troubleshooting, but a new reference must be established before the axis is valid again. A stationary referenced encoder remains valid because lack of edges is not stale.
 
 Calibration also provides a known-angle movement workflow for Pan/Tilt quadrature axes. It records start/end raw counts, divides encoder turns by the signed camera movement fraction, and proposes gearing plus direction without applying either silently. Applying uses the normal setup-profile update path, restarts/reconfigures the source, requires a new session reference, and makes incompatible world-calibration fingerprints invalid.
 
-GPIO edge processing uses the kernel's monotonic event timestamps rather than userspace read time. Engineering exposes the current A/B state, raw count, angle relative to the current reference, mapped angle, reference state and angle, edge/count/degree rates, separate global and per-line sequence-gap totals, illegal transitions, integrity-loss events, last-edge age, retry count, and driver status. Relative angle is unavailable until referenced and deliberately excludes direction, offset, and the operator-entered reference angle; mapped angle applies those settings.
+GPIO edge processing uses the kernel's monotonic event timestamps rather than userspace read time. Engineering exposes the current A/B state, raw count, angle relative to the current reference, mapped angle, reference state and angle, edge/count/degree rates, confirmed global and per-line sequence-gap totals, illegal transitions, integrity-loss events, last-edge age, retry count, and driver status. The displayed 4096-event GPIO capacity is requested; the kernel may grant or cap it at a lower value. Relative angle is unavailable until referenced and deliberately excludes direction, offset, and the operator-entered reference angle; mapped angle applies those settings.
 
 The integrity policy is intentionally conservative for first-hardware bring-up: any observed illegal transition or sequence discontinuity may mean an unknown count was lost, so it latches integrity loss and requires re-referencing. Real bench data may justify a more nuanced policy later, but the system will not silently preserve absolute world calibration while count integrity is uncertain.
 
@@ -141,11 +141,54 @@ The standard E38S6G5-600B-G24N encoders are 600 PPR and use quadrature ×4. They
 
 A safe initial bench profile can use Pan=`quadrature_gpio`, Tilt=`simulator`, and Zoom/Focus=`disabled`. With power off, connect encoder ground through the chosen interface, connect A/B to the configured offsets, then power up. Confirm raw counts change, learn direction if needed, set a known current angle, and only then capture world-calibration marks. Diagnostics show event totals, illegal transitions, and sequence gaps.
 
+### Linux rotary-encoder ×4 production trial
+
+`linux_rotary` moves quadrature decoding into the Linux `rotary-encoder` driver while preserving every quarter-period transition. One signed `EV_REL` unit is exactly one RealLines raw count. At 600 PPR and ×4 this is 2400 counts per encoder shaft revolution; at 10 encoder revolutions per camera revolution it is 24,000 counts per camera revolution, or 0.015° per count. RealLines never decimates or rescales these kernel counts.
+
+The Raspberry Pi overlay parameters are documented by the official `rotary-encoder` overlay: `relative_axis` selects relative events, `steps-per-period=4` selects quarter-period mode, and `linux_axis=0`/`1` selects `REL_X`/`REL_Y`. The overlay exclusively owns the named GPIOs, so a physical axis cannot use `quadrature_gpio` and `linux_rotary` simultaneously.
+
+Enable the overlays deliberately on the Pi; the installers do not edit boot configuration:
+
+```bash
+CONFIG=/boot/firmware/config.txt
+test -f "$CONFIG" || CONFIG=/boot/config.txt
+sudo cp -- "$CONFIG" "$CONFIG.kairix-backup-$(date +%Y%m%d-%H%M%S)"
+sudoedit "$CONFIG"
+```
+
+Append this clearly marked block, save, and reboot:
+
+```text
+# BEGIN KAIRIX REALLINES ROTARY ENCODERS
+dtoverlay=rotary-encoder,pin_a=17,pin_b=27,relative_axis=1,steps-per-period=4,linux_axis=0
+dtoverlay=rotary-encoder,pin_a=22,pin_b=23,relative_axis=1,steps-per-period=4,linux_axis=1
+# END KAIRIX REALLINES ROTARY ENCODERS
+```
+
+```bash
+sudo reboot
+```
+
+After reboot, verify the devices before selecting **Linux Rotary Encoder** in Engineering:
+
+```bash
+grep -H . /sys/class/input/event*/device/name
+grep -H . /sys/class/input/event*/device/capabilities/rel
+sudo systemctl restart kairix-reallines-dev.service
+sudo journalctl -u kairix-reallines-dev.service -n 100 --no-pager
+```
+
+RealLines auto-discovery accepts only a device whose name plausibly identifies the `rotary-encoder` driver and whose capability bitmap contains the expected axis. Pan requires `REL_X`; Tilt requires `REL_Y`. It refuses missing or ambiguous devices rather than attaching to a mouse. Event numbers are reported diagnostically but are not persisted in the tracking fingerprint. `SYN_DROPPED`, disconnect, or reopen clears the session reference and requires the operator to reference again.
+
+For a physical ×4 torture test, reference both axes, then exercise Pan slow/medium/very-fast, Tilt slow/medium/very-fast, and finally both very fast together. Confirm raw counts continue, `SYN_DROPPED` remains zero, integrity remains `TRUSTED`, both references remain present, and the measured history rate remains near 200 Hz. One encoder shaft revolution should produce approximately 2400 counts; ten shaft revolutions should produce approximately 24,000 counts and about 360° with a measured 10:1 ratio. This is a gross check, not a precision gearing calibration.
+
+For an A/B comparison, record maximum practical motion, reference losses, confirmed GPIO sequence loss or evdev `SYN_DROPPED`, CPU load, event rate, and measured history rate. Test `quadrature_gpio`, then stop the service, enable the overlay block, reboot, and test `linux_rotary` with the same motion. To return to libgpiod, remove only the marked Kairix block from the boot config, reboot, select **Quadrature GPIO**, and re-reference both axes. Never attempt the two sources simultaneously on the same pins.
+
 Important profile and layout JSON writes use atomic temporary-file replacement. Diagnostic bundles include profile configuration alongside existing state and debug logs.
 
 ## World/camera calibration
 
-World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID, the tracking fingerprint, and a separate rig-geometry fingerprint. A solved calibration also records the current session reference identity for every quadrature Pan/Tilt axis. A profile, tracking, rig, or reference mismatch prevents world tracking and is reported as requiring recalibration. Editing rig geometry resets pose-coordinate history and invalidates the world solve without reconfiguring GPIO workers or discarding encoder references. Legacy calibrations remain stored but require a new solve. Control and `/preview` continue to provide a provisional kinematic camera whenever tracking is valid; `/gfx` remains strict unless its explicit Engineering override is enabled.
+World calibration is deliberately separate from setup profiles and graphics layouts. Named calibrations are stored atomically under `data/world_calibrations/<stable-id>.json`, with the active ID and metadata in `data/world_calibrations/index.json`. Each calibration references its setup-profile ID, the tracking fingerprint, and a separate rig-geometry fingerprint. A solved calibration also records the current session reference identity for every hardware-encoder Pan/Tilt axis. A profile, tracking, rig, or reference mismatch prevents world tracking and is reported as requiring recalibration. Editing rig geometry resets pose-coordinate history and invalidates the world solve without reconfiguring encoder workers or discarding encoder references. Legacy calibrations remain stored but require a new solve. Control and `/preview` continue to provide a provisional kinematic camera whenever tracking is valid; `/gfx` remains strict unless its explicit Engineering override is enabled.
 
 V1 uses a 3×3 grid derived from a known vertical rectangular target: its corners, edge centres, and centre. The target stores its world centre, width, height and yaw. Each operator mark captures raw and mapped Pan/Tilt values, monotonic time, target identity, setup-profile ID, and encoder reference identity. Direction-learning LEFT/RIGHT/DOWN/UP marks remain a separate process.
 

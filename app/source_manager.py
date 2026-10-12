@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 from .gpio_source import QuadratureGpioWorker
+from .linux_rotary_source import LinuxRotaryWorker
 from .tracking import AXES
 
 
@@ -13,30 +14,32 @@ class TrackingSourceManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._workers: dict[str, QuadratureGpioWorker] = {}
+        self._workers: dict[str, Any] = {}
         self._profile_id: str | None = None
 
     def configure(self, profile_id: str, profile: dict[str, Any]) -> None:
-        wanted = {
-            axis: deepcopy(profile["axes"][axis])
-            for axis in AXES
-            if profile["axes"][axis]["source"] == "quadrature_gpio"
-            and bool(profile["axes"][axis].get("source_config", {}).get("chip"))
-            and profile["axes"][axis].get("source_config", {}).get("line_a") is not None
-            and profile["axes"][axis].get("source_config", {}).get("line_b") is not None
-        }
+        wanted: dict[str, dict[str, Any]] = {}
+        for axis in AXES:
+            config = profile["axes"][axis]
+            source = config["source"]
+            source_config = config.get("source_config", {})
+            if source == "quadrature_gpio" and bool(source_config.get("chip")) and source_config.get("line_a") is not None and source_config.get("line_b") is not None:
+                wanted[axis] = deepcopy(config)
+            elif source == "linux_rotary":
+                wanted[axis] = deepcopy(config)
         with self._lock:
             old = self._workers
             same_profile = self._profile_id == profile_id
             self._workers = {}
             self._profile_id = profile_id
-        created: dict[str, QuadratureGpioWorker] = {}
+        created: dict[str, Any] = {}
         for axis, config in wanted.items():
             worker = old.pop(axis, None)
-            if worker is None or not same_profile or worker.config != config:
+            worker_type = QuadratureGpioWorker if config["source"] == "quadrature_gpio" else LinuxRotaryWorker
+            if worker is None or not isinstance(worker, worker_type) or not same_profile or worker.config != config:
                 if worker is not None:
                     worker.stop()
-                worker = QuadratureGpioWorker(axis, config)
+                worker = worker_type(axis, config)
                 worker.start()
             created[axis] = worker
         for worker in old.values():
@@ -59,13 +62,13 @@ class TrackingSourceManager:
         with self._lock:
             worker = self._workers.get(axis)
         if worker is None:
-            raise ValueError(f"{axis.title()} is not using quadrature GPIO")
+            raise ValueError(f"{axis.title()} is not using a hardware encoder")
         return worker.set_reference(angle)
 
     def clear_reference(self, axis: str) -> None:
         with self._lock:
             worker = self._workers.get(axis)
         if worker is None:
-            raise ValueError(f"{axis.title()} is not using quadrature GPIO")
+            raise ValueError(f"{axis.title()} is not using a hardware encoder")
         worker.clear_reference()
 

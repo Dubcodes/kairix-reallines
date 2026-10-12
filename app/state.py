@@ -19,7 +19,7 @@ from fastapi import WebSocket
 from .debug import DebugRecorder
 from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
-from .tracking import AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
+from .tracking import AXES, ENCODER_SOURCES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
@@ -172,7 +172,7 @@ class StateStore:
         runtime_references = tuple(
             (axis, self.tracking["axes"].get(axis, {}).get("reference_id"))
             for axis in REQUIRED_AXES
-            if self.profile["axes"][axis]["source"] == "quadrature_gpio"
+            if self.profile["axes"][axis]["source"] in ENCODER_SOURCES
         )
         return (
             self.profile_index["active_id"],
@@ -418,7 +418,7 @@ class StateStore:
         return {
             axis: self.tracking["axes"].get(axis, {}).get("reference_id")
             for axis in REQUIRED_AXES
-            if self.profile["axes"][axis]["source"] == "quadrature_gpio"
+            if self.profile["axes"][axis]["source"] in ENCODER_SOURCES
         }
 
     def _world_calibration_matches_reference(self) -> bool:
@@ -448,7 +448,7 @@ class StateStore:
             "status": "Disabled" if source == "disabled" else f"{source.replace('_', ' ').title()} is not implemented",
             "updated_mono": previous.get("updated_mono", 0.0),
             "update_hz": previous.get("update_hz"),
-            "expects_periodic_samples": source not in {"simulator", "disabled", "quadrature_gpio"},
+            "expects_periodic_samples": source not in {"simulator", "disabled", *ENCODER_SOURCES},
         }
         if source == "simulator":
             try:
@@ -460,9 +460,12 @@ class StateStore:
             except (TypeError, ValueError, TrackingConfigError) as exc:
                 runtime.update({"health": "ERROR", "status": str(exc)})
                 self.debug.error("tracking_mapping_error", axis=axis, error=str(exc))
-        elif source == "quadrature_gpio":
+        elif source in ENCODER_SOURCES:
             source_config = config.get("source_config") or {}
-            configured = bool(source_config.get("chip")) and source_config.get("line_a") is not None and source_config.get("line_b") is not None
+            configured = (
+                bool(source_config.get("chip")) and source_config.get("line_a") is not None and source_config.get("line_b") is not None
+                if source == "quadrature_gpio" else True
+            )
             runtime.update({
                 "raw_count": int(previous.get("raw_count", 0)),
                 "relative_angle": previous.get("relative_angle"),
@@ -474,7 +477,7 @@ class StateStore:
                 "configured": configured,
                 "diagnostics": deepcopy(previous.get("diagnostics", {})),
                 "health": "UNCONFIGURED" if not configured else "REFERENCE_REQUIRED",
-                "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for GPIO driver",
+                "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for encoder driver",
             })
         self.tracking["axes"][axis] = runtime
 
@@ -500,7 +503,7 @@ class StateStore:
         fingerprint_match = self._world_calibration_matches_tracking()
         reference_match = self._world_calibration_matches_reference()
         solution = self.world_calibration.get("solution")
-        required_referenced = all(self.tracking["axes"][axis].get("source") != "quadrature_gpio" or self.tracking["axes"][axis].get("referenced") for axis in REQUIRED_AXES)
+        required_referenced = all(self.tracking["axes"][axis].get("source") not in ENCODER_SOURCES or self.tracking["axes"][axis].get("referenced") for axis in REQUIRED_AXES)
         rig_match = self._world_calibration_matches_rig()
         calibration_valid = bool(self.world_calibration.get("valid") and solution and solution.get("solved") and profile_match and fingerprint_match and rig_match and required_referenced and reference_match)
         for axis in ("pan", "tilt"):
@@ -546,7 +549,7 @@ class StateStore:
         """Canonical StateStore boundary for a combined source-manager sample."""
         now = time.monotonic() if timestamp is None else float(timestamp)
         for axis, sample in samples.items():
-            if axis not in AXES or self.profile["axes"][axis]["source"] != "quadrature_gpio":
+            if axis not in AXES or self.profile["axes"][axis]["source"] not in ENCODER_SOURCES:
                 continue
             runtime = self.tracking["axes"][axis]
             raw_count = int(sample.get("raw_count", runtime.get("raw_count", 0)))
@@ -929,11 +932,12 @@ class StateStore:
             used_lines: dict[tuple[str, int], str] = {}
             prospective = {name: (candidate if name == axis else self.profile["axes"][name]) for name in AXES}
             for other_axis, other in prospective.items():
-                if other["source"] != "quadrature_gpio":
+                if other["source"] not in ENCODER_SOURCES:
                     continue
                 source_config = other.get("source_config") or {}
-                chip = str(source_config.get("chip") or "")
-                for key in ("line_a", "line_b"):
+                chip = str(source_config.get("chip") or "/dev/gpiochip0") if other["source"] == "quadrature_gpio" else "/dev/gpiochip0"
+                keys = ("line_a", "line_b") if other["source"] == "quadrature_gpio" else ("pin_a", "pin_b")
+                for key in keys:
                     line = source_config.get(key)
                     if chip and line is not None:
                         identity = (chip, int(line))

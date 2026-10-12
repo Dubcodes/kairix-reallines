@@ -11,8 +11,9 @@ echo "Installing Kairix RealLines $VERSION"
 apt-get update
 apt-get install -y python3-venv python3-pip gpiod
 getent group gpio >/dev/null || groupadd --system gpio
+getent group input >/dev/null || groupadd --system input
 id -u kairix >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin kairix
-usermod -a -G gpio kairix
+usermod -a -G gpio,input kairix
 cat > /etc/udev/rules.d/60-kairix-reallines-gpio.rules <<'UDEV_EOF'
 SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
 UDEV_EOF

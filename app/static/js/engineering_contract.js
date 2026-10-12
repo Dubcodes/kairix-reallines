@@ -9,6 +9,7 @@ export const SOURCE_CHOICES = Object.freeze([
   Object.freeze({value:'simulator', label:'Simulator', implemented:true}),
   Object.freeze({value:'disabled', label:'Disabled', implemented:true}),
   Object.freeze({value:'quadrature_gpio', label:'Quadrature GPIO', implemented:true, axes:['pan', 'tilt']}),
+  Object.freeze({value:'linux_rotary', label:'Linux Rotary Encoder', implemented:true, axes:['pan', 'tilt']}),
   Object.freeze({value:'imu', label:'IMU (future — not implemented)', implemented:false}),
   Object.freeze({value:'external', label:'External (future — not implemented)', implemented:false}),
 ]);

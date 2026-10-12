@@ -22,6 +22,7 @@ test('Engineering source choices expose only implemented paths as usable', () =>
     assert.match(choices.imu.label, /not implemented/);
     assert.match(choices.external.label, /not implemented/);
     assert.equal(choices.quadrature_gpio.enabled, axis === 'pan' || axis === 'tilt');
+    assert.equal(choices.linux_rotary.enabled, axis === 'pan' || axis === 'tilt');
   }
 });
 
