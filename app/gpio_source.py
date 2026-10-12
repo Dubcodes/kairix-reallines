@@ -6,10 +6,14 @@ import time
 import uuid
 from collections import deque
 from copy import deepcopy
-from typing import Any
+from typing import Any, Iterable
 
 from .quadrature import QuadratureDecoder
 from .tracking import degrees_per_count
+
+
+KERNEL_EVENT_BUFFER_SIZE = 4096
+READ_BATCH_SIZE = 1024
 
 
 class GpioUnavailable(RuntimeError):
@@ -20,6 +24,8 @@ class QuadratureGpioWorker:
     """One-axis libgpiod v2 worker with hardware-independent edge processing."""
 
     RATE_WINDOW_NS = 1_000_000_000
+    RATE_BUCKET_NS = 10_000_000
+    RATE_BUCKET_CAPACITY = RATE_WINDOW_NS // RATE_BUCKET_NS + 2
 
     def __init__(self, axis: str, config: dict[str, Any]) -> None:
         self.axis = axis
@@ -29,7 +35,9 @@ class QuadratureGpioWorker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._request: Any = None
-        self._motion_samples: deque[tuple[int, int]] = deque(maxlen=512)
+        # Ten-millisecond aggregates retain a useful one-second rate window
+        # without allocating or scanning one entry per high-rate edge.
+        self._motion_buckets: deque[list[int]] = deque(maxlen=self.RATE_BUCKET_CAPACITY)
         self._last_global_seqno: int | None = None
         self._last_line_seqno: dict[int, int | None] = {}
         self._snapshot: dict[str, Any] = {
@@ -38,6 +46,8 @@ class QuadratureGpioWorker:
             "referenced": False, "reference_count": None, "reference_angle": 0.0, "reference_id": None,
             "health": "UNCONFIGURED", "status": "GPIO worker has not started", "last_error": None,
             "last_edge_timestamp_ns": None, "events": 0, "event_rate_hz": 0.0,
+            "peak_event_rate_hz": 0.0, "largest_read_batch": 0,
+            "kernel_event_buffer_size": KERNEL_EVENT_BUFFER_SIZE, "read_batch_size": READ_BATCH_SIZE,
             "counts_per_second": 0.0, "degrees_per_second": 0.0,
             "global_seqno": None, "line_seqno": {"a": None, "b": None},
             "global_sequence_gaps": 0, "line_sequence_gaps": 0,
@@ -60,17 +70,32 @@ class QuadratureGpioWorker:
 
     def _rates_locked(self, now_ns: int) -> tuple[float, float, float]:
         cutoff = now_ns - self.RATE_WINDOW_NS
-        while len(self._motion_samples) > 1 and self._motion_samples[1][0] < cutoff:
-            self._motion_samples.popleft()
+        while len(self._motion_buckets) > 1 and self._motion_buckets[1][2] < cutoff:
+            self._motion_buckets.popleft()
         last_edge = self._snapshot["last_edge_timestamp_ns"]
-        if last_edge is None or now_ns - last_edge > self.RATE_WINDOW_NS or len(self._motion_samples) < 2:
+        if last_edge is None or now_ns - last_edge > self.RATE_WINDOW_NS or not self._motion_buckets:
             return 0.0, 0.0, 0.0
-        span = (self._motion_samples[-1][0] - self._motion_samples[0][0]) / 1_000_000_000
+        first, last = self._motion_buckets[0], self._motion_buckets[-1]
+        event_count = sum(bucket[3] for bucket in self._motion_buckets)
+        span = (last[2] - first[1]) / 1_000_000_000
         if span <= 0:
             return 0.0, 0.0, 0.0
-        edge_rate = (len(self._motion_samples) - 1) / span
-        counts_rate = (self._motion_samples[-1][1] - self._motion_samples[0][1]) / span
+        edge_rate = (event_count - 1) / span
+        counts_rate = (last[5] - first[4]) / span
         return edge_rate, counts_rate, counts_rate * degrees_per_count(self.config)
+
+    def _record_motion_locked(self, timestamp_ns: int) -> None:
+        timestamp_ns = int(timestamp_ns)
+        bucket_id = timestamp_ns // self.RATE_BUCKET_NS
+        count = self.decoder.count
+        if self._motion_buckets and self._motion_buckets[-1][0] == bucket_id:
+            bucket = self._motion_buckets[-1]
+            bucket[2] = timestamp_ns
+            bucket[3] += 1
+            bucket[5] = count
+        else:
+            # bucket id, first timestamp, last timestamp, events, first count, last count
+            self._motion_buckets.append([bucket_id, timestamp_ns, timestamp_ns, 1, count, count])
 
     def snapshot(self, now_ns: int | None = None) -> dict[str, Any]:
         now_ns = time.monotonic_ns() if now_ns is None else int(now_ns)
@@ -79,8 +104,10 @@ class QuadratureGpioWorker:
             result["raw_count"] = self.decoder.count
             result["illegal_transitions"] = self.decoder.diagnostics.illegal_transitions
             edge_rate, counts_rate, degrees_rate = self._rates_locked(now_ns)
+            self._snapshot["peak_event_rate_hz"] = max(self._snapshot["peak_event_rate_hz"], edge_rate)
             result.update({
                 "event_rate_hz": round(edge_rate, 2),
+                "peak_event_rate_hz": round(self._snapshot["peak_event_rate_hz"], 2),
                 "counts_per_second": round(counts_rate, 2),
                 "degrees_per_second": round(degrees_rate, 3),
                 "last_edge_age_ms": round(max(0, now_ns - result["last_edge_timestamp_ns"]) / 1_000_000, 3) if result["last_edge_timestamp_ns"] is not None else None,
@@ -124,6 +151,7 @@ class QuadratureGpioWorker:
             source = self.config["source_config"]
             self._last_global_seqno = None
             self._last_line_seqno = {int(source["line_a"]): None, int(source["line_b"]): None}
+            self._motion_buckets.clear()
             self._snapshot.update({
                 "driver_alive": True, "configured": True,
                 "a_state": int(bool(a_state)), "b_state": int(bool(b_state)),
@@ -131,40 +159,62 @@ class QuadratureGpioWorker:
             })
             self._invalidate_reference_locked("Set an encoder reference")
 
-    def process_edge(self, line_offset: int, is_rising: bool, timestamp_ns: int, global_seqno: int | None = None, line_seqno: int | None = None) -> None:
-        """Apply one ordered kernel event without importing or requiring gpiod."""
+    def _process_edge_locked(self, line_offset: int, is_rising: bool, timestamp_ns: int, global_seqno: int | None, line_seqno: int | None) -> bool:
         source = self.config["source_config"]
         line_a, line_b = int(source["line_a"]), int(source["line_b"])
+        if line_offset == line_a:
+            self._snapshot["a_state"] = int(is_rising)
+        elif line_offset == line_b:
+            self._snapshot["b_state"] = int(is_rising)
+        else:
+            return False
+        before_illegal = self.decoder.diagnostics.illegal_transitions
+        self.decoder.update(self._snapshot["a_state"], self._snapshot["b_state"])
+        illegal = self.decoder.diagnostics.illegal_transitions > before_illegal
+        global_gap = global_seqno is not None and self._last_global_seqno is not None and global_seqno > self._last_global_seqno + 1
+        previous_line = self._last_line_seqno.get(line_offset)
+        line_gap = line_seqno is not None and previous_line is not None and line_seqno > previous_line + 1
+        if global_gap:
+            self._snapshot["global_sequence_gaps"] += global_seqno - self._last_global_seqno - 1
+        if line_gap:
+            self._snapshot["line_sequence_gaps"] += line_seqno - previous_line - 1
+        if illegal or global_gap or line_gap:
+            causes = (["illegal transition"] if illegal else []) + (["global sequence gap"] if global_gap else []) + (["line sequence gap"] if line_gap else [])
+            self._invalidate_reference_locked(f"Count integrity lost ({', '.join(causes)}); set a new reference", integrity_loss=True)
+        self._last_global_seqno = global_seqno if global_seqno is not None else self._last_global_seqno
+        if line_seqno is not None:
+            self._last_line_seqno[line_offset] = line_seqno
+        self._record_motion_locked(timestamp_ns)
+        self._snapshot.update({
+            "raw_count": self.decoder.count, "last_edge_timestamp_ns": int(timestamp_ns),
+            "events": self._snapshot["events"] + 1, "global_seqno": global_seqno,
+            "line_seqno": {"a": self._last_line_seqno[line_a], "b": self._last_line_seqno[line_b]},
+            "illegal_transitions": self.decoder.diagnostics.illegal_transitions,
+        })
+        return True
+
+    def _finish_batch_locked(self, batch_size: int, timestamp_ns: int | None) -> None:
+        self._snapshot["largest_read_batch"] = max(self._snapshot["largest_read_batch"], batch_size)
+        if timestamp_ns is not None:
+            event_rate, _, _ = self._rates_locked(timestamp_ns)
+            self._snapshot["peak_event_rate_hz"] = max(self._snapshot["peak_event_rate_hz"], event_rate)
+
+    def process_edge(self, line_offset: int, is_rising: bool, timestamp_ns: int, global_seqno: int | None = None, line_seqno: int | None = None) -> None:
+        """Apply one ordered kernel event without importing or requiring gpiod."""
         with self._lock:
-            if line_offset == line_a:
-                self._snapshot["a_state"] = int(is_rising)
-            elif line_offset == line_b:
-                self._snapshot["b_state"] = int(is_rising)
-            else:
-                return
-            before_illegal = self.decoder.diagnostics.illegal_transitions
-            self.decoder.update(self._snapshot["a_state"], self._snapshot["b_state"])
-            illegal = self.decoder.diagnostics.illegal_transitions > before_illegal
-            global_gap = global_seqno is not None and self._last_global_seqno is not None and global_seqno > self._last_global_seqno + 1
-            previous_line = self._last_line_seqno.get(line_offset)
-            line_gap = line_seqno is not None and previous_line is not None and line_seqno > previous_line + 1
-            if global_gap:
-                self._snapshot["global_sequence_gaps"] += global_seqno - self._last_global_seqno - 1
-            if line_gap:
-                self._snapshot["line_sequence_gaps"] += line_seqno - previous_line - 1
-            if illegal or global_gap or line_gap:
-                causes = (["illegal transition"] if illegal else []) + (["global sequence gap"] if global_gap else []) + (["line sequence gap"] if line_gap else [])
-                self._invalidate_reference_locked(f"Count integrity lost ({', '.join(causes)}); set a new reference", integrity_loss=True)
-            self._last_global_seqno = global_seqno if global_seqno is not None else self._last_global_seqno
-            if line_seqno is not None:
-                self._last_line_seqno[line_offset] = line_seqno
-            self._motion_samples.append((int(timestamp_ns), self.decoder.count))
-            self._snapshot.update({
-                "raw_count": self.decoder.count, "last_edge_timestamp_ns": int(timestamp_ns),
-                "events": self._snapshot["events"] + 1, "global_seqno": global_seqno,
-                "line_seqno": {"a": self._last_line_seqno[line_a], "b": self._last_line_seqno[line_b]},
-                "illegal_transitions": self.decoder.diagnostics.illegal_transitions,
-            })
+            if self._process_edge_locked(line_offset, is_rising, timestamp_ns, global_seqno, line_seqno):
+                self._snapshot["largest_read_batch"] = max(self._snapshot["largest_read_batch"], 1)
+
+    def process_edge_batch(self, events: Iterable[tuple[int, bool, int, int | None, int | None]]) -> None:
+        """Apply ordered ``(line, rising, timestamp, global seq, line seq)`` records under one lock."""
+        with self._lock:
+            processed = 0
+            last_timestamp: int | None = None
+            for line_offset, is_rising, timestamp_ns, global_seqno, line_seqno in events:
+                if self._process_edge_locked(line_offset, is_rising, timestamp_ns, global_seqno, line_seqno):
+                    processed += 1
+                    last_timestamp = int(timestamp_ns)
+            self._finish_batch_locked(processed, last_timestamp)
 
     def process_levels(self, a_state: int, b_state: int, timestamp_ns: int) -> None:
         """Testable sampled-level path for detecting impossible two-bit transitions."""
@@ -175,7 +225,7 @@ class QuadratureGpioWorker:
             illegal = self.decoder.diagnostics.illegal_transitions > before_illegal
             if illegal:
                 self._invalidate_reference_locked("Count integrity lost (illegal transition); set a new reference", integrity_loss=True)
-            self._motion_samples.append((int(timestamp_ns), self.decoder.count))
+            self._record_motion_locked(timestamp_ns)
             self._snapshot.update({
                 "raw_count": self.decoder.count, "last_edge_timestamp_ns": int(timestamp_ns),
                 "events": self._snapshot["events"] + 1,
@@ -213,6 +263,30 @@ class QuadratureGpioWorker:
         with self._lock:
             self._snapshot["driver_alive"] = False
 
+    def _process_gpiod_batch(self, events: list[Any], rising_edge_type: Any) -> None:
+        with self._lock:
+            processed = 0
+            last_timestamp: int | None = None
+            for event in events:
+                timestamp_ns = int(event.timestamp_ns)
+                if self._process_edge_locked(
+                    int(event.line_offset), event.event_type == rising_edge_type, timestamp_ns,
+                    int(event.global_seqno), int(event.line_seqno),
+                ):
+                    processed += 1
+                    last_timestamp = timestamp_ns
+            self._finish_batch_locked(processed, last_timestamp)
+
+    def _drain_ready_events(self, request: Any, rising_edge_type: Any) -> None:
+        """Consume all currently queued batches before returning to the blocking wait."""
+        while not self._stop.is_set():
+            events = request.read_edge_events(max_events=READ_BATCH_SIZE)
+            if not events:
+                return
+            self._process_gpiod_batch(events, rising_edge_type)
+            if not request.wait_edge_events(timeout=0):
+                return
+
     def _open_and_consume(self) -> None:
         if platform.system() != "Linux":
             raise GpioUnavailable("libgpiod GPIO acquisition is available on Linux only")
@@ -228,18 +302,14 @@ class QuadratureGpioWorker:
             direction=gpiod.line.Direction.INPUT, edge_detection=gpiod.line.Edge.BOTH,
             bias=bias, event_clock=gpiod.line.Clock.MONOTONIC,
         )
-        request = gpiod.request_lines(chip, consumer=f"kairix-reallines-{self.axis}", config={(line_a, line_b): settings})
+        request = gpiod.request_lines(
+            chip, consumer=f"kairix-reallines-{self.axis}", config={(line_a, line_b): settings},
+            event_buffer_size=KERNEL_EVENT_BUFFER_SIZE,
+        )
         self._request = request
         values = request.get_values([line_a, line_b])
         self.begin_acquisition(values[0].value, values[1].value)
         while not self._stop.is_set():
             if not request.wait_edge_events(timeout=0.25):
                 continue
-            for event in request.read_edge_events():
-                self.process_edge(
-                    line_offset=int(event.line_offset),
-                    is_rising=event.event_type == gpiod.EdgeEvent.Type.RISING_EDGE,
-                    timestamp_ns=event.timestamp_ns,
-                    global_seqno=event.global_seqno,
-                    line_seqno=event.line_seqno,
-                )
+            self._drain_ready_events(request, gpiod.EdgeEvent.Type.RISING_EDGE)

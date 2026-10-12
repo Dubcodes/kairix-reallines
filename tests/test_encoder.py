@@ -4,10 +4,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.quadrature import QuadratureDecoder
-from app.gpio_source import QuadratureGpioWorker
+from app.gpio_source import KERNEL_EVENT_BUFFER_SIZE, READ_BATCH_SIZE, QuadratureGpioWorker
 from app.runtime import publish_pose_once, sample_tracking_once
 from app.source_manager import TrackingSourceManager
 from app.state import StateStore
@@ -104,6 +105,20 @@ def worker_config(axis="pan", line_a=5, line_b=6):
     return config
 
 
+def edge_records(edge_count, line_a=5, line_b=6, start_global=1, start_timestamp=1_000_000_000, interval_ns=50_000):
+    pattern = ((line_b, True), (line_a, True), (line_b, False), (line_a, False))
+    line_sequences = {line_a: 0, line_b: 0}
+    records = []
+    for index in range(edge_count):
+        line, rising = pattern[index % len(pattern)]
+        line_sequences[line] += 1
+        records.append((
+            line, rising, start_timestamp + index * interval_ns,
+            start_global + index, line_sequences[line],
+        ))
+    return records
+
+
 class GpioWorkerIntegrityCase(unittest.TestCase):
     def referenced_worker(self):
         worker = QuadratureGpioWorker("pan", worker_config())
@@ -189,6 +204,150 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(stationary["degrees_per_second"], 0)
         self.assertEqual(stationary["health"], "VALID")
 
+    def test_ordered_100000_edge_batch_keeps_count_reference_and_integrity(self):
+        worker, reference_id = self.referenced_worker()
+        records = edge_records(100_000)
+        worker.process_edge_batch(records)
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(snapshot["raw_count"], 100_000)
+        self.assertEqual(snapshot["events"], 100_000)
+        self.assertEqual(snapshot["illegal_transitions"], 0)
+        self.assertEqual(snapshot["global_sequence_gaps"], 0)
+        self.assertEqual(snapshot["line_sequence_gaps"], 0)
+        self.assertTrue(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertAlmostEqual(snapshot["event_rate_hz"], 20_000, delta=25)
+
+    def test_batch_and_single_event_paths_are_equivalent(self):
+        records = edge_records(8_000)
+        single, _ = self.referenced_worker()
+        batched, _ = self.referenced_worker()
+        for record in records:
+            single.process_edge(*record)
+        batched.process_edge_batch(records)
+        single_snapshot = single.snapshot(records[-1][2])
+        batch_snapshot = batched.snapshot(records[-1][2])
+        for field in (
+            "raw_count", "a_state", "b_state", "events", "global_seqno", "line_seqno",
+            "global_sequence_gaps", "line_sequence_gaps", "illegal_transitions", "integrity_lost",
+        ):
+            self.assertEqual(single_snapshot[field], batch_snapshot[field], field)
+
+    def test_sequence_numbers_are_contiguous_across_batch_boundaries(self):
+        worker, reference_id = self.referenced_worker()
+        records = edge_records(5_000)
+        for start in range(0, len(records), 777):
+            worker.process_edge_batch(records[start:start + 777])
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(snapshot["global_sequence_gaps"], 0)
+        self.assertEqual(snapshot["line_sequence_gaps"], 0)
+        self.assertEqual(snapshot["reference_id"], reference_id)
+
+    def test_global_gap_inside_batch_invalidates_reference(self):
+        worker, _ = self.referenced_worker()
+        records = edge_records(20)
+        records = [record if index < 10 else (*record[:3], record[3] + 1, record[4]) for index, record in enumerate(records)]
+        worker.process_edge_batch(records)
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(snapshot["global_sequence_gaps"], 1)
+        self.assertEqual(snapshot["line_sequence_gaps"], 0)
+        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["integrity_loss_events"], 1)
+
+    def test_line_gap_inside_batch_invalidates_reference(self):
+        worker, _ = self.referenced_worker()
+        records = edge_records(20)
+        gap_line = records[10][0]
+        records = [
+            record if index < 10 or record[0] != gap_line else (*record[:4], record[4] + 1)
+            for index, record in enumerate(records)
+        ]
+        worker.process_edge_batch(records)
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(snapshot["global_sequence_gaps"], 0)
+        self.assertEqual(snapshot["line_sequence_gaps"], 1)
+        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["integrity_loss_events"], 1)
+
+    def test_batch_diagnostics_report_capacity_rate_peak_and_size(self):
+        worker, _ = self.referenced_worker()
+        records = edge_records(READ_BATCH_SIZE)
+        worker.process_edge_batch(records)
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(snapshot["kernel_event_buffer_size"], KERNEL_EVENT_BUFFER_SIZE)
+        self.assertEqual(snapshot["read_batch_size"], READ_BATCH_SIZE)
+        self.assertEqual(snapshot["largest_read_batch"], READ_BATCH_SIZE)
+        self.assertEqual(snapshot["events"], READ_BATCH_SIZE)
+        self.assertGreater(snapshot["peak_event_rate_hz"], 19_900)
+        self.assertEqual(snapshot["raw_count"], READ_BATCH_SIZE)
+
+    def test_request_uses_explicit_kernel_event_buffer_size(self):
+        worker = QuadratureGpioWorker("pan", worker_config())
+        captured = {}
+
+        class FakeRequest:
+            def get_values(self, _lines):
+                return [SimpleNamespace(value=0), SimpleNamespace(value=0)]
+
+            def wait_edge_events(self, timeout):
+                worker._stop.set()
+                return False
+
+        request = FakeRequest()
+
+        def request_lines(chip, **kwargs):
+            captured.update({"chip": chip, **kwargs})
+            return request
+
+        fake_gpiod = SimpleNamespace(
+            line=SimpleNamespace(
+                Bias=SimpleNamespace(AS_IS="as-is", PULL_UP="up", PULL_DOWN="down"),
+                Direction=SimpleNamespace(INPUT="input"), Edge=SimpleNamespace(BOTH="both"),
+                Clock=SimpleNamespace(MONOTONIC="monotonic"),
+            ),
+            EdgeEvent=SimpleNamespace(Type=SimpleNamespace(RISING_EDGE="rise")),
+            LineSettings=lambda **kwargs: kwargs,
+            request_lines=request_lines,
+        )
+        with patch.dict(sys.modules, {"gpiod": fake_gpiod}), patch("app.gpio_source.platform.system", return_value="Linux"):
+            worker._open_and_consume()
+        self.assertEqual(captured["event_buffer_size"], KERNEL_EVENT_BUFFER_SIZE)
+        self.assertEqual(captured["chip"], "/dev/gpiochip0")
+
+    def test_drain_loop_reads_all_immediately_ready_batches(self):
+        worker, _ = self.referenced_worker()
+        records = edge_records(8)
+        batches = [records[:4], records[4:]]
+        events = [[
+            SimpleNamespace(
+                line_offset=line, event_type="rise" if rising else "fall", timestamp_ns=timestamp,
+                global_seqno=global_seqno, line_seqno=line_seqno,
+            )
+            for line, rising, timestamp, global_seqno, line_seqno in batch
+        ] for batch in batches]
+
+        class FakeRequest:
+            def __init__(self):
+                self.read_limits = []
+                self.wait_timeouts = []
+
+            def read_edge_events(self, max_events):
+                self.read_limits.append(max_events)
+                return events.pop(0)
+
+            def wait_edge_events(self, timeout):
+                self.wait_timeouts.append(timeout)
+                return bool(events)
+
+        request = FakeRequest()
+        worker._drain_ready_events(request, "rise")
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(request.read_limits, [READ_BATCH_SIZE, READ_BATCH_SIZE])
+        self.assertEqual(request.wait_timeouts, [0, 0])
+        self.assertEqual(snapshot["events"], 8)
+        self.assertEqual(snapshot["raw_count"], 8)
+        self.assertEqual(snapshot["largest_read_batch"], 4)
+
 
 class DualGpioManagerCase(unittest.TestCase):
     def test_manager_configures_and_retains_two_independent_workers(self):
@@ -261,6 +420,35 @@ class DualGpioManagerCase(unittest.TestCase):
         self.assertFalse(snapshots["tilt"]["integrity_lost"])
         self.assertTrue(snapshots["tilt"]["referenced"])
         self.assertEqual(snapshots["tilt"]["reference_id"], tilt_reference)
+
+    def test_high_rate_batches_and_gap_invalidation_are_worker_local(self):
+        pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
+        tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
+        pan.begin_acquisition(0, 0)
+        tilt.begin_acquisition(0, 0)
+        pan_reference = pan.set_reference(0)
+        tilt_reference = tilt.set_reference(0)
+
+        pan_records = edge_records(20_000, 17, 27)
+        tilt_records = edge_records(20_000, 22, 23)
+        pan.process_edge_batch(pan_records[:1_000])
+        self.assertEqual(tilt.snapshot()["raw_count"], 0)
+        tilt.process_edge_batch(tilt_records[:1_000])
+        self.assertEqual(pan.snapshot()["raw_count"], 1_000)
+        for start in range(1_000, 20_000, 1_000):
+            pan.process_edge_batch(pan_records[start:start + 1_000])
+            tilt.process_edge_batch(tilt_records[start:start + 1_000])
+        self.assertEqual(pan.snapshot(pan_records[-1][2])["raw_count"], 20_000)
+        self.assertEqual(tilt.snapshot(tilt_records[-1][2])["raw_count"], 20_000)
+        self.assertEqual(tilt.snapshot()["reference_id"], tilt_reference)
+        self.assertEqual(pan.snapshot()["raw_count"], 20_000)
+        self.assertEqual(pan.snapshot()["reference_id"], pan_reference)
+
+        pan_gap = edge_records(8, 17, 27, start_global=20_002, start_timestamp=pan_records[-1][2] + 50_000)
+        pan.process_edge_batch(pan_gap)
+        self.assertFalse(pan.snapshot()["referenced"])
+        self.assertTrue(tilt.snapshot()["referenced"])
+        self.assertEqual(tilt.snapshot()["reference_id"], tilt_reference)
 
 
 class EncoderStateCase(unittest.IsolatedAsyncioTestCase):

@@ -241,6 +241,15 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("Simulator inactive", engineering)
         self.assertIn("Camera Preview is available using a provisional pose", calibration)
 
+    def test_engineering_exposes_high_rate_encoder_diagnostics(self):
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        for label in (
+            "Requested kernel event buffer", "Read batch size", "Edges/sec", "Peak edges/sec",
+            "Largest read batch", "Total events", "Global sequence gaps", "Line sequence gaps",
+            "Integrity-loss events", "Integrity", "Counts/sec", "Degrees/sec", "Last edge age",
+        ):
+            self.assertIn(label, engineering)
+
     def test_state_and_system_payloads_cover_engineering_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = StateStore(Path(directory), SilentDebug()).snapshot()
