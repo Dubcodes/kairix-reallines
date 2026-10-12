@@ -200,7 +200,7 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("movement[axis]", calibration)
         self.assertIn("/api/profiles/${state.profiles.active_id}/axes/${axis}", calibration)
         self.assertIn("direction_learned:true", calibration)
-        self.assertIn("require a new encoder reference", html)
+        self.assertIn("requires a new encoder position reference", html)
         self.assertIn("invalidate", html)
 
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
@@ -212,7 +212,7 @@ class FrontendContractCase(unittest.TestCase):
         for field in ("right_m", "forward_m", "up_m"):
             self.assertIn(field, calibration)
             self.assertIn(f'data-rig-offset="{field}"', html)
-        self.assertIn("Apply solved rig geometry", html)
+        self.assertIn("Apply calculated camera position", html)
         self.assertIn("/camera-rig", calibration)
         endpoint = main.split('@app.patch("/api/profiles/{profile_id}/camera-rig")', 1)[1].split("@app.", 1)[0]
         self.assertNotIn("source_manager.configure", endpoint)
@@ -234,12 +234,12 @@ class FrontendContractCase(unittest.TestCase):
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
         engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
-        self.assertIn("Encoder shaft revs per 1 camera revolution", engineering)
+        self.assertIn("Gear ratio — encoder turns per full camera turn", engineering)
         self.assertIn("format(degreesPerCount,6)", engineering)
-        self.assertIn("° / count", engineering)
+        self.assertIn("per encoder count", engineering)
         self.assertIn("Simulator inputs", engineering_html)
         self.assertIn("Simulator inactive", engineering)
-        self.assertIn("Camera Preview is available using a provisional pose", calibration)
+        self.assertIn("Camera + Graphics Preview can use the provisional camera position", calibration)
 
     def test_engineering_exposes_high_rate_encoder_diagnostics(self):
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
@@ -254,13 +254,60 @@ class FrontendContractCase(unittest.TestCase):
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
         contract = (STATIC / "js" / "engineering_contract.js").read_text(encoding="utf-8")
-        self.assertIn("Linux Rotary Encoder", contract)
+        self.assertIn("Raspberry Pi Encoder — Recommended", contract)
         self.assertIn("rotary-encoder", engineering)
         self.assertIn("×4 quarter-period", engineering)
         self.assertIn("device-tree overlay", engineering)
         self.assertIn("SYN_DROPPED", engineering)
         self.assertIn("rotaryEncoder?' disabled'", engineering)
         self.assertIn("'linux_rotary'", calibration)
+
+    def test_operator_workflow_uses_plain_language_without_breaking_control_ids(self):
+        engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        calibration_html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        control_html = (STATIC / "control.html").read_text(encoding="utf-8")
+        preview_html = (STATIC / "preview.html").read_text(encoding="utf-8")
+        gfx_html = (STATIC / "gfx.html").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for text in (
+            "Setup &amp; System", "Camera Setup", "Open Camera Calibration",
+            "Open Graphics Editor", "Camera + Graphics Preview", "Graphics Output",
+            "camera video is intentionally not included", "Graphics Output Safety",
+            "Camera Preview Source", "Advanced encoder diagnostics",
+            "Set this position as 0°",
+        ):
+            self.assertIn(text, engineering_html + engineering)
+        for text in (
+            "Camera Calibration", "1. Calibrate camera movement",
+            "Calibrate gear ratio and direction", "How far did the camera move?",
+            "2. Measure the camera on the tripod", "Camera position on tripod",
+            "3. Place the camera in the venue", "Aim at the 9 calibration points",
+            "Advanced / Legacy direction-only calibration",
+            "Advanced / Development Tools", "Simulator Input",
+        ):
+            self.assertIn(text, calibration_html + calibration)
+        self.assertIn("Graphics Editor", control_html)
+        self.assertIn("Open Camera + Graphics Preview", control_html)
+        self.assertIn("Graphics output background", control_html)
+        self.assertIn("Camera + Graphics Preview", preview_html)
+        self.assertIn("Graphics Output", gfx_html)
+        self.assertNotRegex(gfx_html, r"<(?:header|nav|img|video)\b")
+        self.assertIn("## First-time camera setup", readme)
+        self.assertIn("mark all 9 calibration points", readme)
+        self.assertIn("18 angular residuals", readme)
+        self.assertIn("eight principal unknowns", readme)
+        self.assertNotIn("five-unknown solve", readme)
+
+        for control_id in (
+            "trackingAxes", "profileSelect", "allowProvisionalGfx", "previewSource",
+            "movementCalibration", "resetDirection", "pan", "tilt", "saveRigGeometry",
+            "worldCalibrationSelect", "markTarget", "solveWorld", "graphicsDelay",
+            "showMedia", "background",
+        ):
+            self.assertRegex(engineering_html + calibration_html + control_html, rf'id="{control_id}"')
 
     def test_state_and_system_payloads_cover_engineering_fields(self):
         with tempfile.TemporaryDirectory() as directory:

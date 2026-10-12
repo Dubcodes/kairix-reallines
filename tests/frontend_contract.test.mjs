@@ -20,8 +20,10 @@ test('Engineering source choices expose only implemented paths as usable', () =>
     assert.equal(choices.disabled.enabled, true);
     assert.equal(choices.imu.enabled, false);
     assert.equal(choices.external.enabled, false);
-    assert.match(choices.imu.label, /not implemented/);
-    assert.match(choices.external.label, /not implemented/);
+    assert.match(choices.imu.label, /Future/);
+    assert.match(choices.external.label, /Future/);
+    assert.match(choices.linux_rotary.label, /Raspberry Pi Encoder — Recommended/);
+    assert.match(choices.quadrature_gpio.label, /Direct GPIO Encoder — Advanced/);
     assert.equal(choices.quadrature_gpio.enabled, axis === 'pan' || axis === 'tilt');
     assert.equal(choices.linux_rotary.enabled, axis === 'pan' || axis === 'tilt');
   }

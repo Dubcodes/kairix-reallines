@@ -4,16 +4,31 @@ Early development skeleton for a headless Raspberry Pi camera-tracking graphics 
 
 ## v0.0.5-dev goals
 
-- `/engineering` is the only navigation/system hub.
-- `/calibration` provides separate axis-direction and world/camera calibration workflows.
-- `/control` can add/edit/remove live world-coordinate lines, markers, text and PNG images.
-- `/preview` composites configured operator preview media with the delayed RealLines render camera; `/gfx` remains graphics-only.
+- `/engineering` is the **Setup & System** navigation hub.
+- `/calibration` provides the **Camera Calibration** movement, tripod-position and venue-alignment workflows.
+- `/control` is the **Graphics Editor** for live world-coordinate lines, markers, text and PNG images.
+- `/preview` is **Camera + Graphics Preview**; `/gfx` is camera-free **Graphics Output**.
 - `/gfx` is a clean graphics-only output.
 - Simulator drives pan and tilt through the canonical tracking pipeline; FOV and camera height remain persisted camera/profile settings.
 - A bounded monotonic pose history supplies an independently delayed render camera for video/graphics synchronization.
 - Configuration uses infrequent full-state WebSocket messages; compact pose messages stream at about 50 Hz.
 - Scene, setup-profile, direction-calibration and world-calibration state persists under the data directory.
 - Heavy debugging is enabled by default and a diagnostic ZIP can be downloaded from Engineering.
+
+## First-time camera setup
+
+1. Open **Setup & System** and select the Pan and Tilt tracking hardware.
+2. Verify that both encoder counts change when the camera moves.
+3. Set the current Pan and Tilt position reference.
+4. Open **Camera Calibration** and calibrate movement, gear ratio and direction.
+5. Set the camera position reference again after applying movement calibration.
+6. Measure the lens position relative to the tripod Pan/Tilt pivot.
+7. Configure the physical calibration target and its approximate venue position.
+8. Aim at and mark all 9 calibration points.
+9. Calculate venue calibration.
+10. Open **Graphics Editor** and create the required graphics.
+11. Check alignment in **Camera + Graphics Preview**.
+12. Send **Graphics Output** to the vision mixer. Camera video is intentionally not included in this output.
 
 ## Quick development run
 
@@ -76,9 +91,9 @@ For every pose, the backend computes optical-centre position as `tripod pivot + 
 
 Planar items use a deterministic orientation convention: yaw rotates about world +Z, pitch rotates about the yawed local right axis, then roll rotates about the resulting plane normal. A zero-rotation plane is vertical; the Floor preset uses pitch -90° so every corner has the same world Z. The lightweight Canvas renderer projects the four corners and uses tessellated texture mapping without a 3D-engine dependency.
 
-## Control editor
+## Graphics Editor
 
-The Control page keeps the live camera-projected view and adds an independent orthographic **Top Down** editor. Lines, text and labelled marker objects can be selected from either viewport or the Layers tree. Drag markers, text, or a line body to move them in X/Y without changing Z; selected lines also expose fixed-size endpoint handles that can be dragged independently.
+The Graphics Editor keeps the live camera-projected view and adds an independent orthographic **Top Down** editor. Lines, text and labelled marker objects can be selected from either viewport or the Layers tree. Drag markers, text, or a line body to move them in X/Y without changing Z; selected lines also expose fixed-size endpoint handles that can be dragged independently.
 
 In Top Down, the mouse wheel zooms and middle-button drag or Space + left drag pans. **Fit All** frames the scene and camera origin. The metric grid can be hidden, and drag snapping can be set to Off, 0.1 m, 0.5 m, or 1.0 m. These viewport preferences are local to the browser and do not change broadcast camera state.
 
@@ -203,7 +218,7 @@ world_pan  = tracking_pan  + pan_offset
 world_tilt = tracking_tilt + tilt_offset
 ```
 
-Four exact, distinct corner observations overdetermine the five-unknown solve. Because bearing-only observations of one coplanar target become ill-conditioned under measurement noise—particularly camera height versus Tilt offset—the operator's approximate camera pose and offset estimates are used as weak regularising constraints only when observations are not mathematically exact. Solutions report per-point residuals, RMS angular error and maximum angular error; RMS above 1 degree is rejected. A failed solve preserves the previous solution but marks the active calibration invalid until a good solve succeeds.
+All 9 target observations provide 18 angular residuals for eight principal unknowns: tripod pivot X/Y/Z, Pan and Tilt world-zero offsets, and rig Right/Forward/Up. Because bearing-only observations of one coplanar target become ill-conditioned under measurement noise—particularly camera height versus Tilt offset—the operator's approximate camera pose and offset estimates are used as weak regularising constraints. Solutions report per-point residuals, RMS angular error and maximum angular error; RMS above 1 degree is rejected. A failed solve preserves the previous solution but marks the active calibration invalid until a good solve succeeds.
 
 Engineering and Calibration expose a synthetic scenario generator that creates observations from known geometry and feeds them through the same solver. No SciPy or other numerical dependency is required.
 

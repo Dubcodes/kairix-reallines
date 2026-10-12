@@ -6,12 +6,12 @@ export const ENGINEERING_STATE_FIELDS = Object.freeze([
 ]);
 
 export const SOURCE_CHOICES = Object.freeze([
-  Object.freeze({value:'simulator', label:'Simulator', implemented:true}),
-  Object.freeze({value:'disabled', label:'Disabled', implemented:true}),
-  Object.freeze({value:'quadrature_gpio', label:'Quadrature GPIO', implemented:true, axes:['pan', 'tilt']}),
-  Object.freeze({value:'linux_rotary', label:'Linux Rotary Encoder', implemented:true, axes:['pan', 'tilt']}),
-  Object.freeze({value:'imu', label:'IMU (future — not implemented)', implemented:false}),
-  Object.freeze({value:'external', label:'External (future — not implemented)', implemented:false}),
+  Object.freeze({value:'simulator', label:'Simulator (no hardware)', implemented:true}),
+  Object.freeze({value:'disabled', label:'Off', implemented:true}),
+  Object.freeze({value:'quadrature_gpio', label:'Direct GPIO Encoder — Advanced', implemented:true, axes:['pan', 'tilt']}),
+  Object.freeze({value:'linux_rotary', label:'Raspberry Pi Encoder — Recommended', implemented:true, axes:['pan', 'tilt']}),
+  Object.freeze({value:'imu', label:'IMU — Future', implemented:false}),
+  Object.freeze({value:'external', label:'External Tracker — Future', implemented:false}),
 ]);
 
 export const GPIO_BIASES = Object.freeze(['as_is', 'pull_up', 'pull_down']);
