@@ -479,6 +479,14 @@ async def apply_dot_calibration():
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/world-calibration/dot-calibration/solve-world")
+async def solve_dot_world_reference(body: DotCalibrationUpdate):
+    try:
+        return await store.solve_dot_world_reference((body.values or {}).get("target_id"))
+    except (DotCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/world-calibration")
 async def get_world_calibration():
     snapshot = store.snapshot()

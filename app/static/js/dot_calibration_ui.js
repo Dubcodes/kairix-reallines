@@ -99,7 +99,8 @@ export class DotCalibrationUi {
     id('dotOverlayVectors').onchange=async event=>{
       await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_vectors:event.target.checked}})});
     };
-    for(const field of ['dotTargetName','dotLockDistance','dotTargetWidth','dotTargetHeight'])id(field).addEventListener('change',()=>this.commitTargetFields());
+    for(const field of ['dotTargetName','dotLockDistance','dotTargetWidth','dotTargetHeight','dotTargetBottomHeight'])id(field).addEventListener('change',()=>this.commitTargetFields());
+    id('solveDotWorldReference').onclick=()=>this.solveWorldReference();
     id('dotEdgeMidpoints').addEventListener('change',()=>this.toggleEdgeMidpoints());
     const canvas=id('dotLockCanvas');
     canvas.addEventListener('pointerdown',event=>this.pointerDown(event));
@@ -111,7 +112,7 @@ export class DotCalibrationUi {
   async newTarget(type){
     const target={
       id:uid('target'),name:type==='rectangle'?'Measured rectangle':'Calibration target',type,
-      approx_distance_m:10,width_m:null,height_m:null,edge_midpoints:false,
+      approx_distance_m:10,width_m:null,height_m:null,bottom_height_m:0,edge_midpoints:false,
       markers:[],observations:[],model_points:{},
     };
     this.data.targets.push(target);this.data.active_target_id=target.id;this.data.last_solution=null;
@@ -149,6 +150,7 @@ export class DotCalibrationUi {
     const distance=Number(this.byId('dotLockDistance').value);if(finite(distance)&&distance>0)target.approx_distance_m=distance;
     const width=this.byId('dotTargetWidth').value.trim(),height=this.byId('dotTargetHeight').value.trim();
     target.width_m=width&&Number(width)>0?Number(width):null;target.height_m=height&&Number(height)>0?Number(height):null;
+    const bottom=Number(this.byId('dotTargetBottomHeight').value);target.bottom_height_m=finite(bottom)?bottom:0;
     this.data.last_solution=null;await this.persist();this.render();
   }
 
@@ -260,6 +262,28 @@ export class DotCalibrationUi {
     }catch(error){this.setStatus(String(error),'bad');}
   }
 
+  async solveWorldReference(){
+    const target=this.activeTarget();if(!target)return;
+    await this.commitTargetFields();
+    if(target.type!=='rectangle'||!target.width_m||!target.height_m){
+      this.setStatus('ENTER THE REAL RECTANGLE WIDTH AND HEIGHT BEFORE SOLVING THE VENUE/WORLD','bad');return;
+    }
+    if((target.observations?.length??0)<2){
+      this.setStatus('SAVE AT LEAST TWO RECTANGLE OBSERVATIONS BEFORE SOLVING THE VENUE/WORLD','bad');return;
+    }
+    try{
+      this.setStatus('SOLVING CAMERA + WORLD FROM THE MEASURED RECTANGLE…','warn');
+      const result=await api('/api/world-calibration/dot-calibration/solve-world',{
+        method:'POST',body:JSON.stringify({values:{target_id:target.id}}),
+      });
+      const solution=result.solution||{};
+      this.setStatus(`WORLD CALIBRATION APPLIED — ${fmt(solution.rms_pixel_error,1)} px RMS · PIVOT ${fmt(solution.pivot?.x,2)}, ${fmt(solution.pivot?.y,2)}, ${fmt(solution.pivot?.z,2)} m`,'ok');
+    }catch(error){
+      this.setStatus(String(error).replace(/^Error:\s*/,''),'bad');
+      logFrontend('calibration','dot_world_solve_failed',{error:String(error)});
+    }
+  }
+
   async clearObservations(){
     const target=this.activeTarget();if(!target)return;
     target.observations=[];target.model_points={};this.data.last_solution=null;
@@ -275,11 +299,12 @@ export class DotCalibrationUi {
       select.dataset.key=key;select.replaceChildren(...this.data.targets.map(target=>{const option=document.createElement('option');option.value=target.id;option.textContent=target.name;option.selected=target.id===this.data.active_target_id;return option;}));
       if(!this.data.targets.length){const option=document.createElement('option');option.value='';option.textContent='No target';select.append(option);}
     }
-    for(const [elementId,value] of [['dotTargetName',target?.name??''],['dotLockDistance',target?.approx_distance_m??10],['dotTargetWidth',target?.width_m??''],['dotTargetHeight',target?.height_m??'']]){
+    for(const [elementId,value] of [['dotTargetName',target?.name??''],['dotLockDistance',target?.approx_distance_m??10],['dotTargetWidth',target?.width_m??''],['dotTargetHeight',target?.height_m??''],['dotTargetBottomHeight',target?.bottom_height_m??0]]){
       const element=id(elementId);if(element!==document.activeElement)element.value=value;
     }
     id('dotEdgeMidpoints').checked=!!target?.edge_midpoints;id('dotEdgeMidpoints').disabled=!target||target.type!=='rectangle';
-    id('dotTargetWidth').disabled=!target||target.type!=='rectangle';id('dotTargetHeight').disabled=!target||target.type!=='rectangle';
+    id('dotTargetWidth').disabled=!target||target.type!=='rectangle';id('dotTargetHeight').disabled=!target||target.type!=='rectangle';id('dotTargetBottomHeight').disabled=!target||target.type!=='rectangle';
+    id('solveDotWorldReference').disabled=!target||target.type!=='rectangle'||!target.width_m||!target.height_m||(target.observations?.length??0)<2;
     id('deleteDotTarget').disabled=!target;id('addDotLock').disabled=!target;id('prepareDotObservation').disabled=!target;
     id('saveDotObservation').disabled=!target||!this.editor.editing;id('clearDotDraft').disabled=!this.editor.editing;
     const overlay=this.state?.calibration_overlay||{};
@@ -336,6 +361,8 @@ export class DotCalibrationUi {
       ['Pan ratio',parameters.has('pan_ratio')?`${fmt(c.pan_ratio,6)} → ${fmt(p.pan_ratio,6)}`:`${fmt(c.pan_ratio,6)} · not enough Pan movement`],
       ['Tilt ratio',parameters.has('tilt_ratio')?`${fmt(c.tilt_ratio,6)} → ${fmt(p.tilt_ratio,6)}`:`${fmt(c.tilt_ratio,6)} · not enough Tilt movement`],
       ['Horizontal FOV',parameters.has('horizontal_fov')?`${fmt(c.horizontal_fov,2)}° → ${fmt(p.horizontal_fov,2)}°`:`${fmt(c.horizontal_fov,2)}° · held`],
+      ['Wide FOV',parameters.has('wide_fov')?`${fmt(c.wide_fov,2)}° → ${fmt(p.wide_fov,2)}°`:`${fmt(c.wide_fov,2)}° · held`],
+      ['Tight FOV',parameters.has('tight_fov')?`${fmt(c.tight_fov,2)}° → ${fmt(p.tight_fov,2)}°`:`${fmt(c.tight_fov,2)}° · held`],
       ['Zoom curve',solution.zoom_saturated?'MODEL LIMIT — NOT APPLIED':parameters.has('zoom_curvature')?`${fmt(c.zoom_curvature,4)} → ${fmt(p.zoom_curvature,4)}`:`${fmt(c.zoom_curvature,4)} · held`],
       ['Coverage',`Pan ${coverage.pan??0} counts · Tilt ${coverage.tilt??0} · Zoom ${coverage.zoom??0}`],
     ];

@@ -21,7 +21,7 @@ from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
 from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, acquisition_signature, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
-from .dot_calibration import DotCalibrationError, default_dot_calibration, normalise_dot_calibration, solve_dot_calibration
+from .dot_calibration import DotCalibrationError, default_dot_calibration, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -1127,6 +1127,12 @@ class StateStore:
                     # only correct the FOV attached to it when the observation set
                     # was made close enough to that endpoint for the solver to bind it.
                     self.zoom_fov_mapping[point_name]["fov"] = round(horizontal_fov, 6)
+            if "wide_fov" in (solution.get("parameters") or []) and self.zoom_fov_mapping.get("wide"):
+                self.zoom_fov_mapping["wide"]["fov"] = round(max(5.0, min(160.0, float(proposed["wide_fov"]))), 6)
+                self.profile.setdefault("camera", {})["fov"] = self.zoom_fov_mapping["wide"]["fov"]
+                self.world_calibration["horizontal_fov"] = self.zoom_fov_mapping["wide"]["fov"]
+            if "tight_fov" in (solution.get("parameters") or []) and self.zoom_fov_mapping.get("tight"):
+                self.zoom_fov_mapping["tight"]["fov"] = round(max(5.0, min(160.0, float(proposed["tight_fov"]))), 6)
             if "zoom_curvature" in (solution.get("parameters") or []):
                 self.zoom_fov_mapping["curvature"] = max(-1.0, min(4.0, float(proposed.get("zoom_curvature", 0.0))))
             models = solution.get("target_models") or {}
@@ -1151,6 +1157,59 @@ class StateStore:
         self.debug.app("dot_calibration_applied", **result)
         await self.broadcast_state()
         return result
+
+    async def solve_dot_world_reference(self, target_id: str | None = None) -> dict[str, Any]:
+        if not self.tracking["valid"]:
+            raise DotCalibrationError("Valid Pan and Tilt tracking is required to solve the venue/world")
+        async with self.lock:
+            dot_data = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            current_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+            target = next(
+                (item for item in dot_data.get("targets") or [] if item.get("id") == (target_id or dot_data.get("active_target_id"))),
+                None,
+            )
+            if target is None:
+                raise DotCalibrationError("Select a measured rectangle target first")
+            for observation in target.get("observations") or []:
+                stored = observation.get("references") or {}
+                for axis in ("pan", "tilt"):
+                    if stored.get(axis) != current_refs.get(axis):
+                        raise DotCalibrationError(f"{target['name']} contains {axis.title()} observations from an older encoder reference — clear observations and realign the saved target")
+                if stored.get("zoom") is not None and stored.get("zoom") != current_refs.get("zoom"):
+                    raise DotCalibrationError(f"{target['name']} contains Zoom observations from an older encoder reference — clear observations and realign the saved target")
+            result = solve_dot_world_reference(self.profile, dot_data, self.zoom_fov_mapping, target_id=target.get("id"))
+            solution = result["solution"]
+            self.world_calibration["target"] = deepcopy(result["target"])
+            self.world_calibration["camera_hint"] = deepcopy(solution["pivot"])
+            self.world_calibration["orientation_hint"] = {
+                "pan_offset": solution["pan_offset"],
+                "tilt_offset": solution["tilt_offset"],
+            }
+            self.world_calibration["horizontal_fov"] = float(self.profile.get("camera", {}).get("fov", solution.get("horizontal_fov", 60.0)))
+            self.world_calibration.update({
+                "solution": solution,
+                "valid": True,
+                "status": "DOT TARGET WORLD CALIBRATION VALID",
+                "last_solve_error": None,
+                "tracking_fingerprint": tracking_fingerprint(self.profile),
+                "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")),
+                "tracking_reference_identity": deepcopy(self._current_tracking_reference_identity()),
+            })
+            self._write_active_world_calibration_locked()
+            self.pose_history.reset("dot target world calibration applied")
+            self._refresh_camera_from_tracking()
+            saved = {"solution": deepcopy(solution), "target": deepcopy(self.world_calibration["target"])}
+        self.debug.app(
+            "dot_world_calibration_solved",
+            calibration_id=self.world_calibration_index["active_id"],
+            target_id=target.get("id"),
+            rms_px=solution.get("rms_pixel_error"),
+            pivot=solution.get("pivot"),
+            pan_offset=solution.get("pan_offset"),
+            tilt_offset=solution.get("tilt_offset"),
+        )
+        await self.broadcast_state()
+        return saved
 
     async def update_sync_config(self, values: dict[str, Any]) -> dict[str, Any]:
         candidate = {**self.sync_config, **values}

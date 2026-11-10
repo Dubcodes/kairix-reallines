@@ -21,6 +21,7 @@
   <label>Approx. distance (m)<input id="dotLockDistance" type="number" min="0.05" step="0.1" value="10"><span class="small">Starting scale hint only — repeated marker observations drive the refinement once calibration begins.</span></label>
   <label>Measured width (m)<input id="dotTargetWidth" type="number" min="0.001" step="0.001" placeholder="optional"></label>
   <label>Measured height (m)<input id="dotTargetHeight" type="number" min="0.001" step="0.001" placeholder="optional"></label>
+  <label>Bottom edge height above ground (m)<input id="dotTargetBottomHeight" type="number" step="0.001" value="0"><span class="small">Use 0 only when the rectangle bottom edge is on the ground.</span></label>
   <label class="tool-check"><input id="dotEdgeMidpoints" type="checkbox"> Rectangle edge midpoints (8 markers)</label>
 </div>
 <div class="row dot-lock-actions">
@@ -29,6 +30,7 @@
   <button id="prepareDotObservation" type="button" class="primary">Adjust this view</button>
   <button id="saveDotObservation" type="button" class="primary">Save observation &amp; refine</button>
   <button id="clearDotDraft" type="button" class="danger subtle">Cancel adjustment</button>
+  <button id="solveDotWorldReference" type="button">Use measured rectangle as venue/world reference</button>
 </div>
 <strong id="dotLockStatus" class="status-warn">CREATE OR SELECT A TARGET</strong>
 <div id="dotLockViewport" class="calibration-overlay media-stage dot-lock-viewport">
@@ -42,7 +44,7 @@
   <div><h3>Saved observations</h3><div id="dotObservationList" class="observation-list"></div></div>
   <div><h3>Refinement</h3><div id="dotSolution" class="kv"></div><div class="row"><button id="solveDotCalibration" type="button">Calculate refinement</button><button id="applyDotCalibration" type="button" class="primary" disabled>Apply refinement</button></div></div>
 </div>
-<p class="small">A changed encoder reference invalidates the affected stored observations. The overlay uses the same delayed <code>render_camera</code> as normal graphics. Calibration overlay to GFX is session-only and defaults OFF after a service restart.</p>
+<p class="small">A changed encoder reference invalidates the affected stored observations. The overlay uses the same delayed <code>render_camera</code> as normal graphics. Calibration overlay to GFX is session-only and defaults OFF after a service restart. A measured rectangle can also define the local venue/world frame: its centre becomes X=0/Y=0, its plane is vertical, and the entered bottom-edge height defines ground Z=0.</p>
 </section>
 <section class="panel span-all section-intro"><h2>1. Calibrate camera movement</h2><p class="small">Verify live counts, calibrate gear ratio and direction, then set a fresh camera position in Setup &amp; System. This does not require venue calibration.</p></section>
 <section class="panel span-all"><h2>Live tracking axes</h2><div id="calibrationAxes" class="axis-grid"></div></section>

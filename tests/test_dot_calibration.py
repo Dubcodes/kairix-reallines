@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import tempfile
 import unittest
+from unittest.mock import patch
 from copy import deepcopy
 from pathlib import Path
 
@@ -14,10 +15,12 @@ from app.dot_calibration import (
     default_dot_calibration,
     normalise_dot_calibration,
     solve_dot_calibration,
+    solve_dot_world_reference,
     zoom_fov_for_count,
 )
 from app.state import StateStore
 from app.tracking import default_profile
+from app.kinematics import camera_position
 
 
 class SilentDebug:
@@ -237,6 +240,72 @@ class DotCalibrationMathCase(unittest.TestCase):
         self.assertAlmostEqual(zoom_fov_for_count(0, {**zoom, "curvature": true_curve}), 52.17, places=6)
         self.assertAlmostEqual(zoom_fov_for_count(1000, {**zoom, "curvature": true_curve}), 12.77, places=6)
 
+    def test_near_duplicate_observations_do_not_gain_extra_weight(self):
+        profile = profile_fixture(3.3, 2.2, 60.0)
+        zoom = {"wide": None, "tight": None, "curvature": 0.0}
+        true_pan = 3.8
+        baseline = observation("O1", pan_raw=0, tilt_raw=0, points=BASE_POINTS, refs={"pan": "P1", "tilt": "T1", "zoom": None}, fov=60.0)
+        baseline_camera = _camera_for_observation(baseline, profile, true_pan, 2.2, zoom, 0.0, horizontal_fov=60.0)
+        world = _world_points_for_baseline({"type": "free", "approx_distance_m": 15.0}, baseline, baseline_camera)
+        second = observation("O2", pan_raw=350, tilt_raw=0, refs={"pan": "P1", "tilt": "T1", "zoom": None}, fov=60.0)
+        second_camera = _camera_for_observation(second, profile, true_pan, 2.2, zoom, 0.0, horizontal_fov=60.0)
+        second["points"] = {marker_id: _project(point, second_camera) for marker_id, point in world.items()}
+        duplicate = deepcopy(second)
+        duplicate["id"] = "O3"
+        data = {"targets": [target_with([baseline, second, duplicate])], "active_target_id": "target-1"}
+        solved = solve_dot_calibration(profile, data, zoom)
+        baseline_solved = solve_dot_calibration(
+            profile,
+            {"targets": [target_with([deepcopy(baseline), deepcopy(second)])], "active_target_id": "target-1"},
+            zoom,
+        )
+        self.assertEqual(solved["analysis"]["duplicate_observations"], 1)
+        self.assertAlmostEqual(solved["proposed"]["pan_ratio"], baseline_solved["proposed"]["pan_ratio"], places=6)
+        self.assertAlmostEqual(solved["proposed"]["horizontal_fov"], baseline_solved["proposed"]["horizontal_fov"], places=6)
+
+    def test_measured_rectangle_world_reference_recovers_metric_camera_pose(self):
+        profile = profile_fixture(4.6, 2.3, 56.0)
+        profile["camera"]["height"] = 1.9
+        profile["camera"]["rig_offset"] = {"right_m": -0.015, "forward_m": -0.01, "up_m": 0.1}
+        zoom = {
+            "wide": {"relative_count": 0, "fov": 56.0, "reference_id": "Z1"},
+            "tight": {"relative_count": 725, "fov": 10.0, "reference_id": "Z1"},
+            "curvature": -0.7,
+        }
+        target = target_with(
+            [], type="rectangle", width_m=2.4, height_m=1.2,
+            bottom_height_m=0.8, approx_distance_m=9.0,
+        )
+        target["markers"] = [{"id": f"M{index}", "label": f"M{index}"} for index in range(1, 5)]
+        world_points = {
+            "M1": {"x": -1.2, "y": 0.0, "z": 2.0},
+            "M2": {"x": 1.2, "y": 0.0, "z": 2.0},
+            "M3": {"x": 1.2, "y": 0.0, "z": 0.8},
+            "M4": {"x": -1.2, "y": 0.0, "z": 0.8},
+        }
+        true_pivot = {"x": 1.2, "y": -8.5, "z": 1.7}
+        true_pan_offset, true_tilt_offset = 7.0, -2.0
+        for index, (pan_raw, tilt_raw) in enumerate(((0, 0), (350, 0), (-300, 0), (100, 180), (-200, -150)), 1):
+            obs = observation(
+                f"O{index}", pan_raw=pan_raw, tilt_raw=tilt_raw, zoom_count=0,
+                refs={"pan": "P1", "tilt": "T1", "zoom": "Z1"}, fov=56.0,
+            )
+            world_pan = _camera_for_observation(obs, profile, 4.6, 2.3, zoom, -0.7)["pan"] + true_pan_offset
+            world_tilt = _camera_for_observation(obs, profile, 4.6, 2.3, zoom, -0.7)["tilt"] + true_tilt_offset
+            optical = camera_position(true_pivot, world_pan, world_tilt, profile["camera"]["rig_offset"])
+            camera = {**optical, "pan": world_pan, "tilt": world_tilt, "roll": 0.0, "fov": 56.0}
+            obs["points"] = {marker_id: _project(point, camera) for marker_id, point in world_points.items()}
+            target["observations"].append(obs)
+        solved = solve_dot_world_reference(profile, {"targets": [target], "active_target_id": target["id"]}, zoom)
+        solution = solved["solution"]
+        self.assertAlmostEqual(solution["pivot"]["x"], true_pivot["x"], places=3)
+        self.assertAlmostEqual(solution["pivot"]["y"], true_pivot["y"], places=3)
+        self.assertAlmostEqual(solution["pivot"]["z"], true_pivot["z"], places=3)
+        self.assertAlmostEqual(solution["pan_offset"], true_pan_offset, places=3)
+        self.assertAlmostEqual(solution["tilt_offset"], true_tilt_offset, places=3)
+        self.assertLess(solution["rms_pixel_error"], 0.01)
+        self.assertAlmostEqual(solved["target"]["center"]["z"], 1.4, places=6)
+
     def test_insufficient_correspondence_data_is_rejected(self):
         profile = profile_fixture()
         dot_data = {"targets": [target_with([observation("O1", points=BASE_POINTS)])], "active_target_id": "target-1"}
@@ -287,6 +356,59 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
                 await store.solve_dot_calibration()
             self.assertEqual(len(store.world_calibration["dot_calibration"]["targets"]), 1)
             self.assertEqual(store.world_calibration["dot_calibration"]["targets"][0]["markers"][0]["id"], "M1")
+
+    async def test_measured_rectangle_world_solution_becomes_active_world_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_angle_axes(store)
+            store.sample_tick({
+                "pan": self.axis_sample("PAN-REF", raw_count=100, reference_count=0),
+                "tilt": self.axis_sample("TILT-REF", raw_count=50, reference_count=0),
+            })
+            target = target_with(
+                [
+                    observation("O1", points=BASE_POINTS, refs={"pan": "PAN-REF", "tilt": "TILT-REF", "zoom": None}),
+                    observation("O2", pan_raw=100, points=BASE_POINTS, refs={"pan": "PAN-REF", "tilt": "TILT-REF", "zoom": None}),
+                ],
+                type="rectangle", width_m=2.0, height_m=1.0, bottom_height_m=0.5,
+            )
+            await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
+            fake = {
+                "solution": {
+                    "solved": True,
+                    "pivot": {"x": 1.0, "y": -8.0, "z": 1.8},
+                    "camera": {"x": 1.0, "y": -8.0, "z": 1.8},
+                    "pan_offset": 5.0,
+                    "tilt_offset": -2.0,
+                    "rig_offset": deepcopy(store.profile["camera"]["rig_offset"]),
+                    "fixed_roll": 0.0,
+                    "horizontal_fov": 60.0,
+                    "observation_count": 8,
+                    "view_count": 2,
+                    "rms_pixel_error": 2.0,
+                    "max_pixel_error": 3.0,
+                    "target_source": target["id"],
+                    "target_name": target["name"],
+                    "solved_at": "2026-11-11T00:00:00+00:00",
+                },
+                "target": {
+                    "center": {"x": 0.0, "y": 0.0, "z": 1.0},
+                    "width": 2.0,
+                    "height": 1.0,
+                    "yaw": 0.0,
+                    "plane": "vertical_rectangle",
+                },
+            }
+            with patch("app.state.solve_dot_world_reference", return_value=fake):
+                result = await store.solve_dot_world_reference(target["id"])
+            self.assertTrue(store.world_calibration["valid"])
+            self.assertEqual(store.world_calibration["status"], "DOT TARGET WORLD CALIBRATION VALID")
+            self.assertEqual(store.world_calibration["solution"]["pivot"]["y"], -8.0)
+            self.assertEqual(result["target"]["center"]["z"], 1.0)
+            self.assertEqual(store.world_calibration["tracking_reference_identity"]["pan"], "PAN-REF")
+            self.assertEqual(store.world_calibration["tracking_reference_identity"]["tilt"], "TILT-REF")
+            snapshot = store.snapshot()
+            self.assertTrue(snapshot["camera"]["world_valid"])
 
     async def test_apply_refinement_preserves_live_encoder_reference_and_counts(self):
         with tempfile.TemporaryDirectory() as directory:
