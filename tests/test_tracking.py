@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from app.state import StateStore
-from app.tracking import TrackingConfigError, counts_per_camera_revolution, default_axis_config, degrees_per_count, map_raw_value, merge_axis_update, normalise_axis_config
+from app.tracking import TrackingConfigError, counts_per_camera_revolution, default_axis_config, default_profile, degrees_per_count, map_raw_value, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 
 
 class SilentDebug:
@@ -35,6 +35,32 @@ class MappingCase(unittest.TestCase):
             self.assertEqual(config["mapping"]["encoder_revs_per_camera_rev"], 1.0)
             self.assertEqual(config["mapping"]["direction"], 1)
             self.assertEqual(config["mapping"]["offset"], 0.0)
+
+    def test_zoom_gpio_default_is_full_resolution_raw_position(self):
+        zoom = default_axis_config("zoom")
+        self.assertEqual(zoom["source"], "simulator")
+        self.assertEqual(
+            {key: zoom["source_config"][key] for key in ("chip", "line_a", "line_b", "bias")},
+            {"chip": "/dev/gpiochip0", "line_a": 5, "line_b": 6, "bias": "as_is"},
+        )
+        self.assertEqual(zoom["mapping"]["ppr"], 600)
+        self.assertEqual(zoom["mapping"]["quadrature_multiplier"], 4)
+        selected = merge_axis_update("zoom", zoom, {"source": "quadrature_gpio", "mapping": {"quadrature_multiplier": 1}})
+        self.assertEqual(selected["mapping"]["quadrature_multiplier"], 4)
+        self.assertEqual(relative_position_count(selected, 18432, 13152), 5280)
+        selected["mapping"]["direction"] = -1
+        self.assertEqual(relative_position_count(selected, 18432, 13152), -5280)
+        self.assertEqual(map_raw_value("zoom", 2400, selected), -2400)
+        with self.assertRaisesRegex(TrackingConfigError, "Zoom encoder requires"):
+            merge_axis_update("zoom", selected, {"mapping": {"quadrature_multiplier": 2}})
+        with self.assertRaisesRegex(TrackingConfigError, "Pan and Tilt only"):
+            merge_axis_update("zoom", selected, {"source": "linux_rotary"})
+
+    def test_zoom_configuration_does_not_change_world_tracking_fingerprint(self):
+        profile = default_profile()
+        before = tracking_fingerprint(profile)
+        profile["axes"]["zoom"] = merge_axis_update("zoom", profile["axes"]["zoom"], {"source": "quadrature_gpio"})
+        self.assertEqual(tracking_fingerprint(profile), before)
 
     def test_normalisation_preserves_saved_custom_gpio_mapping(self):
         custom = {

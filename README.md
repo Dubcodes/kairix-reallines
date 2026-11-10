@@ -156,6 +156,14 @@ The standard E38S6G5-600B-G24N encoders are 600 PPR and use quadrature ×4. They
 
 A safe initial bench profile can use Pan=`quadrature_gpio`, Tilt=`simulator`, and Zoom/Focus=`disabled`. With power off, connect encoder ground through the chosen interface, connect A/B to the configured offsets, then power up. Confirm raw counts change, learn direction if needed, set a known current angle, and only then capture world-calibration marks. Diagnostics show event totals, illegal transitions, and sequence gaps.
 
+### Physical Zoom encoder — raw lens position
+
+Zoom can use the existing Direct GPIO worker as an optional full-resolution raw lens-position sensor. Its standard mapping is A=`GPIO5` (physical pin 29), B=`GPIO6` (pin 31), `/dev/gpiochip0`, bias=`as_is`, 600 PPR and quadrature ×4, giving 2400 counts per encoder shaft revolution. The E38S6G5-600B-G24N is powered from Pi 5 V with common ground; each open-collector A/B output has its own intentional 4.3 kΩ pull-up to Pi 3.3 V. Never pull either signal to 5 V.
+
+Unlike Pan/Tilt, physical Zoom is a position encoder, not a camera-angle axis. After **Set current position as 0**, its runtime value is `direction × (raw_count - reference_count)` in counts. It has no degree unit, angle offset, degrees-per-count conversion, or encoder-turns-per-camera-turn gearing. A service/driver restart, source change, or count-integrity loss clears only the Zoom session reference and requires the lens position to be set again. Zoom remains optional and does not participate in overall Pan/Tilt tracking validity or the current world-calibration fingerprint.
+
+This bring-up does not drive `camera.fov`: the manually configured/profile FOV remains authoritative in live poses and pose history. The existing Zoom simulator retains its earlier generic simulator behaviour until a future lens profile maps physical relative Zoom counts to a calibrated horizontal-FOV curve. Linux Rotary and Focus are not enabled for physical Zoom acquisition in this phase.
+
 ### Linux rotary-encoder ×4 production trial
 
 `linux_rotary` moves quadrature decoding into the Linux `rotary-encoder` driver while preserving every quarter-period transition. One signed `EV_REL` unit is exactly one RealLines raw count. At 600 PPR and ×4 this is 2400 counts per encoder shaft revolution; at 10 encoder revolutions per camera revolution it is 24,000 counts per camera revolution, or 0.015° per count. RealLines never decimates or rescales these kernel counts.

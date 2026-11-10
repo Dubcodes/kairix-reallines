@@ -18,6 +18,7 @@ let groundOffsetPending=null;
 if(dialog&&byId('dialogCancel'))byId('dialogCancel').onclick=()=>dialog.close('cancel');
 function showDialog({title,message='',value=null,accept='OK'}){if(!dialog)return Promise.resolve({accepted:false});byId('dialogTitle').textContent=title;byId('dialogMessage').textContent=message;byId('dialogInput').hidden=value===null;byId('dialogInput').value=value??'';byId('dialogAccept').textContent=accept;return new Promise(resolve=>{dialog.addEventListener('close',()=>resolve(dialog.returnValue==='accept'?{accepted:true,value:byId('dialogInput').value.trim()}:{accepted:false}),{once:true});dialog.showModal();if(value!==null){byId('dialogInput').focus();byId('dialogInput').select();}});}
 function format(value,digits=2){return Number.isFinite(+value)?(+value).toFixed(digits):'—';}
+function formatSignedCount(value){if(!Number.isFinite(+value))return'—';const count=Math.trunc(+value);return`${count>=0?'+':''}${count} counts`;}
 function escapeHtml(value){return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 function setError(message=''){byId('profileError').textContent=message;}
 async function safe(action){try{setError();return await action();}catch(error){setError(String(error));logFrontend('engineering','tracking_ui_error',{error:String(error)});return null;}}
@@ -29,39 +30,49 @@ function axisMarkup(axis,config){
   const gpioEncoder=config.source==='quadrature_gpio';
   const rotaryEncoder=config.source==='linux_rotary';
   const encoder=gpioEncoder||rotaryEncoder;
+  const zoomPosition=axis==='zoom'&&gpioEncoder;
   const sc=config.source_config||{};
   const mapping=config.mapping;
   const degreesPerCount=360/(Number(mapping.ppr)*Number(mapping.quadrature_multiplier)*Number(mapping.encoder_revs_per_camera_rev));
   const sourceOptions=sourceChoicesFor(axis).map(choice=>`<option value="${choice.value}"${config.source===choice.value?' selected':''}${choice.enabled?'':' disabled'}>${choice.label}</option>`).join('');
+  const gpioDraft=`<div class="gpio-draft"${gpioEncoder?'':' hidden'}>
+    <label>${zoomPosition?'GPIO device':'gpiochip device'}<input data-source-config="chip" placeholder="/dev/gpiochip0" value="${escapeHtml(sc.chip||'')}"></label>
+    <label>${zoomPosition?'A':'Line A offset'}<input data-source-config="line_a" type="number" min="0" step="1" value="${sc.line_a??''}"></label>
+    <label>${zoomPosition?'B':'Line B offset'}<input data-source-config="line_b" type="number" min="0" step="1" value="${sc.line_b??''}"></label>
+    <label>Bias<select data-source-config="bias">${[['as_is','As-is'],['pull_up','Pull-up'],['pull_down','Pull-down']].map(([value,label])=>`<option value="${value}"${(sc.bias||'as_is')===value?' selected':''}>${label}</option>`).join('')}</select></label>
+    <div class="row"><button data-apply-gpio type="button">Apply GPIO settings</button><strong data-gpio-save-state class="status-ok">SAVED</strong></div>
+  </div>`;
+  const referenceControls=zoomPosition
+    ? `<div class="reference-guidance" data-runtime="reference-guidance"></div><div class="row"><button data-reference="zero" type="button">Set current position as 0</button><button data-reference="clear" type="button">Clear position reference</button></div>`
+    : `<div class="reference-guidance" data-runtime="reference-guidance"></div><div class="row"><button data-reference="set" type="button">Set current angle…</button><button data-reference="zero" type="button" title="This tells RealLines that the camera is currently at 0° on this axis.">Set this position as 0°</button><button data-reference="clear" type="button">Clear position reference</button></div>`;
+  const encoderDiagnostics=`<div class="form-error encoder-alert" data-runtime="encoder-alert"></div><details class="technical-details"><summary>Advanced encoder diagnostics</summary><div class="small" data-runtime="encoder-diagnostics"></div></details>`;
+  const angularConfig=isAngle?`<div class="axis-config">
+    <label>Direction<select data-mapping="direction"><option value="1"${mapping.direction===1?' selected':''}>Normal</option><option value="-1"${mapping.direction===-1?' selected':''}>Reversed</option></select></label>
+    <label>Angle offset (°)<input data-mapping="offset" type="number" step="0.01" value="${mapping.offset}"></label>
+    <div class="encoder-config"${encoder?'':' hidden'}>
+      <label>Encoder pulses per revolution (PPR)<input data-mapping="ppr" type="number" min="1" step="1" value="${mapping.ppr}"></label>
+      <div class="small">For the RealLines 600 PPR encoders, enter 600.</div>
+      <label>Encoder resolution<select data-mapping="quadrature_multiplier"${rotaryEncoder?' disabled':''}>${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}${value===4?' — Full resolution':''}</option>`).join('')}</select></label>
+      <label>Gear ratio — encoder turns per full camera turn<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${mapping.encoder_revs_per_camera_rev}"></label>
+      <div class="small">Example: 10 means the encoder turns 10 times while the camera turns 360°.</div>
+      <div class="small">Tracking resolution: <strong>${format(degreesPerCount,6)}° per encoder count</strong></div>
+      ${gpioDraft}
+      <div class="small"${rotaryEncoder?'':' hidden'}>Expected wiring: A GPIO${sc.pin_a??'—'} · B GPIO${sc.pin_b??'—'}. Requires the Raspberry Pi encoder device-tree overlay and exclusive ownership of these pins. Reboot after enabling it.</div>
+      ${referenceControls}${encoderDiagnostics}
+    </div>
+  </div>`:'';
+  const zoomConfig=zoomPosition?`<div class="axis-config zoom-position-config">
+    <label>Direction<select data-mapping="direction"><option value="1"${mapping.direction===1?' selected':''}>Normal</option><option value="-1"${mapping.direction===-1?' selected':''}>Reversed</option></select></label>
+    <label>Encoder pulses per revolution (PPR)<input type="number" value="${mapping.ppr}" disabled></label>
+    <div class="property-stat"><span>Encoder resolution</span><strong>×4 — Full resolution</strong></div>
+    ${gpioDraft}${referenceControls}${encoderDiagnostics}
+  </div>`:'';
   return `<article class="axis-card" data-axis="${axis}">
     <div class="axis-heading"><h3>${axis.toUpperCase()}</h3><span class="axis-health" data-runtime="health"></span></div>
     <label>Tracking source<select data-config="source">${sourceOptions}</select></label>
     <div class="small">${sourceHelp(config.source)}</div>
-    <div class="axis-readout"><span>Encoder count <strong data-runtime="raw">—</strong></span><span>Camera angle <strong data-runtime="value">—</strong></span><span>Last update <strong data-runtime="age">—</strong></span></div>
-    ${isAngle?`<div class="axis-config">
-      <label>Direction<select data-mapping="direction"><option value="1"${mapping.direction===1?' selected':''}>Normal</option><option value="-1"${mapping.direction===-1?' selected':''}>Reversed</option></select></label>
-      <label>Angle offset (°)<input data-mapping="offset" type="number" step="0.01" value="${mapping.offset}"></label>
-      <div class="encoder-config"${encoder?'':' hidden'}>
-        <label>Encoder pulses per revolution (PPR)<input data-mapping="ppr" type="number" min="1" step="1" value="${mapping.ppr}"></label>
-        <div class="small">For the RealLines 600 PPR encoders, enter 600.</div>
-        <label>Encoder resolution<select data-mapping="quadrature_multiplier"${rotaryEncoder?' disabled':''}>${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}${value===4?' — Full resolution':''}</option>`).join('')}</select></label>
-        <label>Gear ratio — encoder turns per full camera turn<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${mapping.encoder_revs_per_camera_rev}"></label>
-        <div class="small">Example: 10 means the encoder turns 10 times while the camera turns 360°.</div>
-        <div class="small">Tracking resolution: <strong>${format(degreesPerCount,6)}° per encoder count</strong></div>
-        <div class="gpio-draft"${gpioEncoder?'':' hidden'}>
-          <label>gpiochip device<input data-source-config="chip" placeholder="/dev/gpiochip0" value="${escapeHtml(sc.chip||'')}"></label>
-          <label>Line A offset<input data-source-config="line_a" type="number" min="0" step="1" value="${sc.line_a??''}"></label>
-          <label>Line B offset<input data-source-config="line_b" type="number" min="0" step="1" value="${sc.line_b??''}"></label>
-          <label>Bias<select data-source-config="bias">${[['as_is','As-is'],['pull_up','Pull-up'],['pull_down','Pull-down']].map(([value,label])=>`<option value="${value}"${(sc.bias||'as_is')===value?' selected':''}>${label}</option>`).join('')}</select></label>
-          <div class="row"><button data-apply-gpio type="button">Apply GPIO settings</button><strong data-gpio-save-state class="status-ok">SAVED</strong></div>
-        </div>
-        <div class="small"${rotaryEncoder?'':' hidden'}>Expected wiring: A GPIO${sc.pin_a??'—'} · B GPIO${sc.pin_b??'—'}. Requires the Raspberry Pi encoder device-tree overlay and exclusive ownership of these pins. Reboot after enabling it.</div>
-        <div class="reference-guidance" data-runtime="reference-guidance"></div>
-        <div class="row"><button data-reference="set" type="button">Set current angle…</button><button data-reference="zero" type="button" title="This tells RealLines that the camera is currently at 0° on this axis.">Set this position as 0°</button><button data-reference="clear" type="button">Clear position reference</button></div>
-        <div class="form-error encoder-alert" data-runtime="encoder-alert"></div>
-        <details class="technical-details"><summary>Advanced encoder diagnostics</summary><div class="small" data-runtime="encoder-diagnostics"></div></details>
-      </div>
-    </div>`:''}
+    <div class="axis-readout"><span>${zoomPosition?'Encoder count':'Encoder count'} <strong data-runtime="raw">—</strong></span><span>${zoomPosition?'Relative lens position':axis==='zoom'?'Simulator value':'Camera angle'} <strong data-runtime="value">—</strong></span><span>Last update <strong data-runtime="age">—</strong></span></div>
+    ${angularConfig}${zoomConfig}
     <div class="form-error" data-runtime="error"></div>
   </article>`;
 }
@@ -160,25 +171,49 @@ async function updateAxis(axis,values){
     setAxisError(card,byId('profileError').textContent);
   }
 }
+function renderEncoderDiagnostics(axis,card,runtime){
+  const diagnostics=card.querySelector('[data-runtime="encoder-diagnostics"]');
+  if(!diagnostics)return;
+  const d=runtime.diagnostics||{},rotary=runtime.source==='linux_rotary',positionAxis=axis==='zoom';
+  const edgeAge=d.last_event_age_ms??d.last_edge_age_ms,lastEdge=edgeAge===null||edgeAge===undefined?'—':`${format(edgeAge,1)} ms`;
+  const referenceId=runtime.reference_id?escapeHtml(String(runtime.reference_id).slice(0,12)):'—';
+  const sourceDetails=rotary
+    ? `<div>Kernel driver</div><div>${escapeHtml(d.kernel_driver||'rotary-encoder')}</div><div>Resolution mode</div><div>×4 quarter-period</div><div>REL axis</div><div>${escapeHtml(d.rel_axis||'—')}</div><div>Device identity</div><div>${escapeHtml(d.device_identity||'—')}</div><div>Resolved device</div><div>${escapeHtml(d.resolved_event_device||'—')}</div><div>SYN_DROPPED</div><div>${d.evdev_dropped_events??0}</div>`
+    : `<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Requested GPIO event buffer</div><div>${d.kernel_event_buffer_size??'—'} (actual kernel capacity may be lower/capped)</div><div>Read batch size</div><div>${d.read_batch_size??'—'}</div><div>Confirmed global gaps</div><div>${d.confirmed_global_gaps??d.global_sequence_gaps??0}</div><div>Global-only gaps</div><div>${d.global_only_sequence_gaps??0}</div><div>Global out-of-order</div><div>${d.global_out_of_order_events??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div>`;
+  const positionDetails=positionAxis
+    ? `<div>Relative lens position</div><div>${formatSignedCount(runtime.relative_count)}</div><div>Position reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div>`
+    : `<div>Relative angle</div><div>${runtime.relative_angle===null||runtime.relative_angle===undefined?'—':`${format(runtime.relative_angle,3)}°`}</div><div>Mapped angle</div><div>${runtime.value===null?'—':`${format(runtime.value,3)}°`}</div><div>Reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div><div>Reference angle</div><div>${runtime.referenced?`${format(runtime.reference_angle,3)}°`:'—'}</div>`;
+  const angularRate=positionAxis?'':`<div>Degrees/sec</div><div>${format(d.degrees_per_second??0,2)}°</div>`;
+  diagnostics.className='kv encoder-diagnostics';
+  diagnostics.innerHTML=`${sourceDetails}<div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Reference count</div><div>${runtime.reference_count??'—'}</div>${positionDetails}<div>Reference ID</div><div title="${escapeHtml(runtime.reference_id||'')}">${referenceId}</div><div>Direction value</div><div>${state.profiles.active.axes[axis].mapping.direction>0?'+1':'-1'}</div><div>Events/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Peak events/sec</div><div>${format(d.peak_event_rate_hz??0,1)}</div><div>Total movement events</div><div>${d.events??0}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div>${angularRate}<div>Integrity warning events</div><div>${d.integrity_loss_events??0}</div><div>Integrity</div><div>${runtime.integrity||d.integrity_status||'—'}</div><div>Calibration confidence</div><div>${runtime.calibration_confidence||'—'}</div><div>Last event age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;
+  const alert=card.querySelector('[data-runtime="encoder-alert"]');
+  if(!alert)return;
+  alert.textContent=runtime.health==='ERROR'
+    ? `Encoder hardware error: ${runtime.status||'check the connection and driver.'}`
+    : positionAxis&&d.integrity_lost&&!runtime.referenced
+      ? 'Encoder data was lost. Set the lens position again.'
+      : runtime.integrity==='SUSPECT'
+        ? `${axis.toUpperCase()}: ${runtime.integrity_reason||'Possible encoder count loss'}. Tracking is still operating, but the absolute angle may be wrong. Verify and set the camera position again to restore confidence.`
+        : '';
+}
 function renderAxes(){
   const configKey=state.profiles.active_id+JSON.stringify(state.profiles.active.axes);
   if(configKey!==axesKey){axesKey=configKey;byId('trackingAxes').innerHTML=axes.map(axis=>axisMarkup(axis,state.profiles.active.axes[axis])).join('');bindAxisCards();}
   for(const axis of axes){
     const card=byId('trackingAxes').querySelector(`[data-axis="${axis}"]`),runtime=state.tracking.axes[axis];if(!card)continue;
-    const health=card.querySelector('[data-runtime="health"]');health.textContent=({VALID:'READY',SUSPECT:'TRACKING — VERIFY POSITION',REFERENCE_REQUIRED:'SET CAMERA POSITION',DISABLED:'OFF',ERROR:'HARDWARE ERROR',STALE:'HARDWARE ERROR',NOT_CONFIGURED:'SETUP NEEDED'})[runtime.health]||runtime.health.replaceAll('_',' ');health.className=`axis-health health-${runtime.health.toLowerCase().replaceAll('_','-')}`;
-    card.querySelector('[data-runtime="raw"]').textContent=format(runtime.raw,3);
-    card.querySelector('[data-runtime="value"]').textContent=runtime.value===null?'—':`${format(runtime.value,3)} ${runtime.unit==='deg'?'°':''}`;
+    const health=card.querySelector('[data-runtime="health"]'),healthLabels={VALID:'READY',SUSPECT:'TRACKING — VERIFY POSITION',REFERENCE_REQUIRED:axis==='zoom'?'SET LENS POSITION':'SET CAMERA POSITION',DISABLED:'OFF',ERROR:'HARDWARE ERROR',STALE:'HARDWARE ERROR',NOT_CONFIGURED:'SETUP NEEDED'};health.textContent=healthLabels[runtime.health]||runtime.health.replaceAll('_',' ');health.className=`axis-health health-${runtime.health.toLowerCase().replaceAll('_','-')}`;
+    card.querySelector('[data-runtime="raw"]').textContent=axis==='zoom'&&runtime.unit==='counts'?(runtime.raw_count??'—'):format(runtime.raw,3);
+    card.querySelector('[data-runtime="value"]').textContent=axis==='zoom'&&runtime.unit==='counts'?formatSignedCount(runtime.relative_count):runtime.value===null?'—':`${format(runtime.value,3)} ${runtime.unit==='deg'?'°':''}`;
     card.querySelector('[data-runtime="age"]').textContent=runtime.age_seconds===null?'—':`${format(runtime.age_seconds*1000,0)} ms`;
     for(const button of card.querySelectorAll('[data-reference]'))button.disabled=button.dataset.reference==='clear'?!runtime.referenced:!runtime.driver_alive;
     const guidance=card.querySelector('[data-runtime="reference-guidance"]');
     if(guidance){
       guidance.className=`reference-guidance ${runtime.referenced?'reference-ready':'reference-required'}`;
-      guidance.innerHTML=runtime.referenced
-        ? '<strong>POSITION SET</strong><span>RealLines knows this camera angle.</span>'
-        : '<strong>SET CAMERA POSITION</strong><span>RealLines knows the encoder is moving but does not yet know the camera’s current angle.</span>';
+      guidance.innerHTML=axis==='zoom'
+        ? runtime.referenced?'<strong>POSITION SET</strong><span>Relative lens counts are available.</span>':'<strong>SET LENS POSITION</strong><span>Set the current lens position as zero before using relative counts.</span>'
+        : runtime.referenced?'<strong>POSITION SET</strong><span>RealLines knows this camera angle.</span>':'<strong>SET CAMERA POSITION</strong><span>RealLines knows the encoder is moving but does not yet know the camera’s current angle.</span>';
     }
-    const diagnostics=card.querySelector('[data-runtime="encoder-diagnostics"]');
-    if(diagnostics){const d=runtime.diagnostics||{},rotary=runtime.source==='linux_rotary',relative=runtime.relative_angle===null||runtime.relative_angle===undefined?'—':`${format(runtime.relative_angle,3)}°`,edgeAge=d.last_event_age_ms??d.last_edge_age_ms,lastEdge=edgeAge===null||edgeAge===undefined?'—':`${format(edgeAge,1)} ms`,referenceId=runtime.reference_id?escapeHtml(String(runtime.reference_id).slice(0,12)):'—',sourceDetails=rotary?`<div>Kernel driver</div><div>${escapeHtml(d.kernel_driver||'rotary-encoder')}</div><div>Resolution mode</div><div>×4 quarter-period</div><div>REL axis</div><div>${escapeHtml(d.rel_axis||'—')}</div><div>Device identity</div><div>${escapeHtml(d.device_identity||'—')}</div><div>Resolved device</div><div>${escapeHtml(d.resolved_event_device||'—')}</div><div>SYN_DROPPED</div><div>${d.evdev_dropped_events??0}</div>`:`<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Requested GPIO event buffer</div><div>${d.kernel_event_buffer_size??'—'} (actual kernel capacity may be lower/capped)</div><div>Read batch size</div><div>${d.read_batch_size??'—'}</div><div>Confirmed global gaps</div><div>${d.confirmed_global_gaps??d.global_sequence_gaps??0}</div><div>Global-only gaps</div><div>${d.global_only_sequence_gaps??0}</div><div>Global out-of-order</div><div>${d.global_out_of_order_events??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div>`;diagnostics.className='kv encoder-diagnostics';diagnostics.innerHTML=`${sourceDetails}<div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Reference count</div><div>${runtime.reference_count??'—'}</div><div>Relative angle</div><div>${relative}</div><div>Mapped angle</div><div>${runtime.value===null?'—':`${format(runtime.value,3)}°`}</div><div>Reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div><div>Reference angle</div><div>${runtime.referenced?`${format(runtime.reference_angle,3)}°`:'—'}</div><div>Reference ID</div><div title="${escapeHtml(runtime.reference_id||'')}">${referenceId}</div><div>Direction value</div><div>${state.profiles.active.axes[axis].mapping.direction>0?'+1':'-1'}</div><div>Events/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Peak events/sec</div><div>${format(d.peak_event_rate_hz??0,1)}</div><div>Total movement events</div><div>${d.events??0}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div><div>Degrees/sec</div><div>${format(d.degrees_per_second??0,2)}°</div><div>Integrity warning events</div><div>${d.integrity_loss_events??0}</div><div>Integrity</div><div>${runtime.integrity||d.integrity_status||'—'}</div><div>Calibration confidence</div><div>${runtime.calibration_confidence||'—'}</div><div>Last event age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;const alert=card.querySelector('[data-runtime="encoder-alert"]');if(alert)alert.textContent=runtime.integrity==='SUSPECT'?`${axis.toUpperCase()}: ${runtime.integrity_reason||'Possible encoder count loss'}. Tracking is still operating, but the absolute angle may be wrong. Verify and set the camera position again to restore confidence.`:runtime.health==='ERROR'?`Encoder hardware error: ${runtime.status||'check the connection and driver.'}`:'';}
+    renderEncoderDiagnostics(axis,card,runtime);
     card.title=runtime.status||'';
   }
 }

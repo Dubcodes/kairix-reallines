@@ -19,7 +19,7 @@ from fastapi import WebSocket
 from .debug import DebugRecorder
 from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
-from .tracking import AXES, ENCODER_SOURCES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, tracking_fingerprint
+from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
@@ -455,7 +455,7 @@ class StateStore:
             "enabled": source != "disabled",
             "raw": raw,
             "value": None,
-            "unit": "deg" if axis in {"pan", "tilt"} else "normalized",
+            "unit": "deg" if axis in {"pan", "tilt"} else "counts" if axis in POSITION_ENCODER_AXES and source in ENCODER_SOURCES else "normalized",
             "valid": False,
             "health": "DISABLED" if source == "disabled" else "NOT_CONFIGURED",
             "status": "Disabled" if source == "disabled" else f"{source.replace('_', ' ').title()} is not implemented",
@@ -490,6 +490,7 @@ class StateStore:
             runtime.update({
                 "raw_count": int(previous.get("raw_count", 0)),
                 "relative_angle": previous.get("relative_angle"),
+                "relative_count": previous.get("relative_count"),
                 "referenced": bool(previous.get("referenced", False)),
                 "reference_count": previous.get("reference_count"),
                 "reference_angle": float(previous.get("reference_angle", 0.0)),
@@ -504,6 +505,11 @@ class StateStore:
                 "health": "UNCONFIGURED" if not configured else "REFERENCE_REQUIRED",
                 "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for encoder driver",
             })
+            if axis in POSITION_ENCODER_AXES:
+                runtime.pop("reference_angle", None)
+                runtime.pop("relative_angle", None)
+            else:
+                runtime.pop("relative_count", None)
         self.tracking["axes"][axis] = runtime
 
     def _refresh_tracking_health(self, now: float | None = None) -> None:
@@ -622,7 +628,13 @@ class StateStore:
                 "updated_mono": now,
                 "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "health", "status"}},
             })
-            runtime["relative_angle"] = (raw_count - int(reference_count)) * degrees_per_count(self.profile["axes"][axis]) if referenced and reference_count is not None else None
+            if axis in POSITION_ENCODER_AXES:
+                runtime["relative_count"] = relative_position_count(self.profile["axes"][axis], raw_count, int(reference_count)) if referenced and reference_count is not None else None
+                runtime.pop("relative_angle", None)
+                runtime.pop("reference_angle", None)
+            else:
+                runtime["relative_angle"] = (raw_count - int(reference_count)) * degrees_per_count(self.profile["axes"][axis]) if referenced and reference_count is not None else None
+                runtime.pop("relative_count", None)
             if sample.get("health") == "ERROR":
                 runtime.update({"valid": False, "value": None, "health": "ERROR", "status": sample.get("status", "GPIO driver error")})
             elif not configured:
@@ -632,9 +644,14 @@ class StateStore:
             elif not referenced or reference_count is None or not reference_id:
                 runtime.update({"valid": False, "value": None, "health": "REFERENCE_REQUIRED", "status": sample.get("status", "Set an encoder reference")})
             else:
+                mapped_value = (
+                    relative_position_count(self.profile["axes"][axis], raw_count, int(reference_count))
+                    if axis in POSITION_ENCODER_AXES else
+                    map_referenced_count(self.profile["axes"][axis], raw_count, int(reference_count), reference_angle)
+                )
                 runtime.update({
                     "valid": True,
-                    "value": map_referenced_count(self.profile["axes"][axis], raw_count, int(reference_count), reference_angle),
+                    "value": mapped_value,
                     "health": "SUSPECT" if runtime["integrity"] == "SUSPECT" else "VALID",
                     "status": sample.get("status", "Referenced"),
                 })
@@ -785,7 +802,7 @@ class StateStore:
         self._refresh_camera_from_tracking(sample=False)
         render_camera, sync = self._render_pose_state(now)
         compact_axes = {
-            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "diagnostics") if key in runtime}
+            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
         return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "sync": sync, "server_mono": now}

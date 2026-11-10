@@ -385,7 +385,7 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
 
 
 class DualGpioManagerCase(unittest.TestCase):
-    def test_manager_configures_and_retains_two_independent_workers(self):
+    def test_manager_configures_and_retains_pan_tilt_zoom_workers(self):
         instances = []
 
         class FakeWorker:
@@ -408,18 +408,20 @@ class DualGpioManagerCase(unittest.TestCase):
         profile = default_profile()
         profile["axes"]["pan"]["source"] = "quadrature_gpio"
         profile["axes"]["tilt"]["source"] = "quadrature_gpio"
+        profile["axes"]["zoom"]["source"] = "quadrature_gpio"
         manager = TrackingSourceManager()
 
         with patch("app.source_manager.QuadratureGpioWorker", FakeWorker):
             manager.configure("dual-rig", profile)
-            self.assertEqual(set(manager._workers), {"pan", "tilt"})
-            self.assertEqual(manager.snapshots(), {"pan": {"axis": "pan"}, "tilt": {"axis": "tilt"}})
-            self.assertEqual(len(instances), 2)
+            self.assertEqual(set(manager._workers), {"pan", "tilt", "zoom"})
+            self.assertEqual(manager.snapshots(), {"pan": {"axis": "pan"}, "tilt": {"axis": "tilt"}, "zoom": {"axis": "zoom"}})
+            self.assertEqual(len(instances), 3)
             self.assertTrue(all(worker.started for worker in instances))
             self.assertEqual(instances[0].config["source_config"]["line_a"], 17)
             self.assertEqual(instances[1].config["source_config"]["line_a"], 22)
+            self.assertEqual(instances[2].config["source_config"]["line_a"], 5)
             manager.configure("dual-rig", profile)
-            self.assertEqual(len(instances), 2, "unchanged dual workers should be reused")
+            self.assertEqual(len(instances), 3, "unchanged workers should be reused")
             manager.stop()
 
         self.assertTrue(all(worker.stopped for worker in instances))
@@ -457,6 +459,34 @@ class DualGpioManagerCase(unittest.TestCase):
         self.assertFalse(snapshots["tilt"]["integrity_lost"])
         self.assertTrue(snapshots["tilt"]["referenced"])
         self.assertEqual(snapshots["tilt"]["reference_id"], tilt_reference)
+
+    def test_zoom_counts_reference_integrity_and_restart_are_independent(self):
+        pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
+        tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
+        zoom = QuadratureGpioWorker("zoom", worker_config("zoom", 5, 6))
+        for worker in (pan, tilt, zoom):
+            worker.begin_acquisition(0, 0)
+        pan_reference = pan.set_reference(0)
+        tilt_reference = tilt.set_reference(0)
+        zoom_reference = zoom.set_reference(0)
+        self.assertEqual(len({pan_reference, tilt_reference, zoom_reference}), 3)
+
+        zoom.decoder.count = 5280
+        self.assertEqual(zoom.snapshot()["raw_count"], 5280)
+        self.assertEqual(pan.snapshot()["raw_count"], 0)
+        self.assertEqual(tilt.snapshot()["raw_count"], 0)
+        self.assertNotIn("degrees_per_second", zoom.snapshot())
+
+        zoom.process_levels(1, 1, 1_000_000_000)
+        self.assertFalse(zoom.snapshot()["referenced"])
+        self.assertIsNone(zoom.snapshot()["reference_id"])
+        self.assertTrue(zoom.snapshot()["integrity_lost"])
+        self.assertEqual(pan.snapshot()["reference_id"], pan_reference)
+        self.assertEqual(tilt.snapshot()["reference_id"], tilt_reference)
+
+        restarted_zoom = QuadratureGpioWorker("zoom", worker_config("zoom", 5, 6))
+        restarted_zoom.begin_acquisition(0, 0)
+        self.assertFalse(restarted_zoom.snapshot()["referenced"])
 
     def test_high_rate_batches_and_gap_warning_are_worker_local(self):
         pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
@@ -606,14 +636,56 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
                     "source_config": {"chip": "/dev/gpiochip0", "line_a": 6, "line_b": 7},
                 })
 
-    async def test_standard_dual_gpio_defaults_do_not_conflict(self):
+    async def test_standard_pan_tilt_zoom_gpio_defaults_do_not_conflict(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)
             profile_id = store.profile_index["active_id"]
             await store.update_axis_config(profile_id, "pan", {"source": "quadrature_gpio"})
             await store.update_axis_config(profile_id, "tilt", {"source": "quadrature_gpio"})
+            await store.update_axis_config(profile_id, "zoom", {"source": "quadrature_gpio"})
             self.assertEqual(store.profile["axes"]["pan"]["source_config"]["line_a"], 17)
             self.assertEqual(store.profile["axes"]["tilt"]["source_config"]["line_a"], 22)
+            self.assertEqual(store.profile["axes"]["zoom"]["source_config"]["line_a"], 5)
+            lines = {
+                store.profile["axes"][axis]["source_config"][key]
+                for axis in ("pan", "tilt", "zoom") for key in ("line_a", "line_b")
+            }
+            self.assertEqual(lines, {5, 6, 17, 22, 23, 27})
+            with self.assertRaises(TrackingConfigError):
+                await store.update_axis_config(profile_id, "zoom", {"source_config": {"line_a": 17, "line_b": 6}})
+
+    async def test_zoom_is_raw_optional_position_and_never_changes_fov(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            await store.set_camera({"fov": 47.5})
+            await store.update_axis_config(profile_id, "zoom", {"source": "quadrature_gpio"})
+            self.assertTrue(store.tracking["valid"], "Unreferenced optional Zoom must not invalidate Pan/Tilt")
+            self.assertFalse(store.tracking["axes"]["zoom"]["valid"])
+
+            zoom = QuadratureGpioWorker("zoom", worker_config("zoom", 5, 6))
+            zoom.begin_acquisition(0, 0)
+            zoom_reference = zoom.set_reference(0)
+            zoom.decoder.count = 5280
+            store.sample_tick({"zoom": zoom.snapshot()})
+            runtime = store.tracking["axes"]["zoom"]
+            self.assertTrue(runtime["valid"])
+            self.assertEqual(runtime["unit"], "counts")
+            self.assertEqual(runtime["raw_count"], 5280)
+            self.assertEqual(runtime["relative_count"], 5280)
+            self.assertEqual(runtime["value"], 5280)
+            self.assertEqual(runtime["reference_id"], zoom_reference)
+            self.assertNotIn("relative_angle", runtime)
+            self.assertNotIn("reference_angle", runtime)
+            self.assertEqual(store.camera["fov"], 47.5)
+            self.assertTrue(store.tracking["valid"])
+
+            zoom.process_levels(1, 1, 1_000_000_000)
+            store.sample_tick({"zoom": zoom.snapshot(1_000_000_000)})
+            self.assertFalse(store.tracking["axes"]["zoom"]["referenced"])
+            self.assertFalse(store.tracking["axes"]["zoom"]["valid"])
+            self.assertTrue(store.tracking["valid"])
+            self.assertEqual(store.camera["fov"], 47.5)
 
     async def test_dual_workers_drive_validity_identity_and_restart_safety(self):
         with tempfile.TemporaryDirectory() as directory:

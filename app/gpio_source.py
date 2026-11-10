@@ -9,7 +9,7 @@ from copy import deepcopy
 from typing import Any, Iterable
 
 from .quadrature import QuadratureDecoder
-from .tracking import degrees_per_count
+from .tracking import ANGULAR_ENCODER_AXES, POSITION_ENCODER_AXES, degrees_per_count
 
 
 KERNEL_EVENT_BUFFER_SIZE = 4096
@@ -62,7 +62,7 @@ class QuadratureGpioWorker:
             "last_edge_timestamp_ns": None, "events": 0, "event_rate_hz": 0.0,
             "peak_event_rate_hz": 0.0, "largest_read_batch": 0,
             "kernel_event_buffer_size": KERNEL_EVENT_BUFFER_SIZE, "read_batch_size": READ_BATCH_SIZE,
-            "counts_per_second": 0.0, "degrees_per_second": 0.0,
+            "counts_per_second": 0.0,
             "global_seqno": None, "line_seqno": {"a": None, "b": None},
             "global_sequence_gaps": 0, "line_sequence_gaps": 0,
             "confirmed_global_gaps": 0, "global_only_sequence_gaps": 0,
@@ -73,6 +73,8 @@ class QuadratureGpioWorker:
             "calibration_confidence": "UNREFERENCED",
             "illegal_transitions": 0, "restarts": 0,
         }
+        if axis in ANGULAR_ENCODER_AXES:
+            self._snapshot["degrees_per_second"] = 0.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -81,27 +83,31 @@ class QuadratureGpioWorker:
         self._thread = threading.Thread(target=self._run, name=f"quadrature-{self.axis}", daemon=True)
         self._thread.start()
 
+    def _reference_prompt(self) -> str:
+        return "Set the lens position reference" if self.axis in POSITION_ENCODER_AXES else "Set an encoder reference"
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2.0)
         self._release()
 
-    def _rates_locked(self, now_ns: int) -> tuple[float, float, float]:
+    def _rates_locked(self, now_ns: int) -> tuple[float, float, float | None]:
         cutoff = now_ns - self.RATE_WINDOW_NS
         while len(self._motion_buckets) > 1 and self._motion_buckets[1][2] < cutoff:
             self._motion_buckets.popleft()
         last_edge = self._snapshot["last_edge_timestamp_ns"]
         if last_edge is None or now_ns - last_edge > self.RATE_WINDOW_NS or not self._motion_buckets:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0 if self.axis in ANGULAR_ENCODER_AXES else None
         first, last = self._motion_buckets[0], self._motion_buckets[-1]
         event_count = sum(bucket[3] for bucket in self._motion_buckets)
         span = (last[2] - first[1]) / 1_000_000_000
         if span <= 0:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0 if self.axis in ANGULAR_ENCODER_AXES else None
         edge_rate = (event_count - 1) / span
         counts_rate = (last[5] - first[4]) / span
-        return edge_rate, counts_rate, counts_rate * degrees_per_count(self.config)
+        degrees_rate = counts_rate * degrees_per_count(self.config) if self.axis in ANGULAR_ENCODER_AXES else None
+        return edge_rate, counts_rate, degrees_rate
 
     def _record_motion_locked(self, timestamp_ns: int) -> None:
         timestamp_ns = int(timestamp_ns)
@@ -128,9 +134,10 @@ class QuadratureGpioWorker:
                 "event_rate_hz": round(edge_rate, 2),
                 "peak_event_rate_hz": round(self._snapshot["peak_event_rate_hz"], 2),
                 "counts_per_second": round(counts_rate, 2),
-                "degrees_per_second": round(degrees_rate, 3),
                 "last_edge_age_ms": round(max(0, now_ns - result["last_edge_timestamp_ns"]) / 1_000_000, 3) if result["last_edge_timestamp_ns"] is not None else None,
             })
+            if degrees_rate is not None:
+                result["degrees_per_second"] = round(degrees_rate, 3)
             return result
 
     def set_reference(self, angle: float) -> str:
@@ -145,7 +152,7 @@ class QuadratureGpioWorker:
                 "integrity_reason": None, "integrity_since_ns": None,
                 "calibration_confidence": "TRUSTED",
                 "health": "VALID" if self._snapshot["driver_alive"] else self._snapshot["health"],
-                "status": "Referenced" if self._snapshot["driver_alive"] else self._snapshot["status"],
+                "status": "Lens position referenced" if self.axis in POSITION_ENCODER_AXES else "Referenced",
             })
             return reference_id
 
@@ -168,6 +175,11 @@ class QuadratureGpioWorker:
                 self._snapshot["integrity_loss_events"] += 1
 
     def _mark_integrity_suspect_locked(self, reason: str, timestamp_ns: int) -> None:
+        if self.axis in POSITION_ENCODER_AXES:
+            self._snapshot["integrity_fault_events"] += 1
+            self._invalidate_reference_locked(f"{reason}; set the lens position again", integrity_loss=True)
+            self._snapshot["integrity_since_ns"] = self._snapshot["integrity_since_ns"] or int(timestamp_ns)
+            return
         already_suspect = self._snapshot["integrity"] == "SUSPECT"
         self._snapshot["integrity_fault_events"] += 1
         self._snapshot.update({
@@ -186,7 +198,7 @@ class QuadratureGpioWorker:
 
     def clear_reference(self) -> None:
         with self._lock:
-            self._invalidate_reference_locked("Set an encoder reference")
+            self._invalidate_reference_locked(self._reference_prompt())
 
     def begin_acquisition(self, a_state: int, b_state: int) -> None:
         """Initialise/reinitialise a GPIO request; never restores an old reference."""
@@ -200,9 +212,9 @@ class QuadratureGpioWorker:
                 "driver_alive": True, "configured": True,
                 "availability": "AVAILABLE", "calibration_confidence": "UNREFERENCED",
                 "a_state": int(bool(a_state)), "b_state": int(bool(b_state)),
-                "health": "REFERENCE_REQUIRED", "status": "Set an encoder reference",
+                "health": "REFERENCE_REQUIRED", "status": self._reference_prompt(),
             })
-            self._invalidate_reference_locked("Set an encoder reference")
+            self._invalidate_reference_locked(self._reference_prompt())
 
     def _process_edge_locked(self, line_offset: int, is_rising: bool, timestamp_ns: int, global_seqno: int | None, line_seqno: int | None) -> bool:
         source = self.config["source_config"]

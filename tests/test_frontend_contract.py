@@ -288,6 +288,21 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("rotaryEncoder?' disabled'", engineering)
         self.assertIn("'linux_rotary'", calibration)
 
+    def test_zoom_gpio_ui_uses_raw_position_not_camera_angle_semantics(self):
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        contract = (STATIC / "js" / "engineering_contract.js").read_text(encoding="utf-8")
+        self.assertIn("axes:['pan', 'tilt', 'zoom']", contract)
+        self.assertIn("Relative lens position", engineering)
+        self.assertIn("Set current position as 0", engineering)
+        self.assertIn("Clear position reference", engineering)
+        self.assertIn("×4 — Full resolution", engineering)
+        self.assertIn("Encoder data was lost. Set the lens position again.", engineering)
+        self.assertIn("zoomPosition?", engineering)
+        zoom_branch = engineering.split("const zoomConfig=", 1)[1].split("return `<article", 1)[0]
+        self.assertNotIn("Gear ratio", zoom_branch)
+        self.assertNotIn("Angle offset", zoom_branch)
+        self.assertNotIn("degreesPerCount", zoom_branch)
+
     def test_operator_workflow_uses_plain_language_without_breaking_control_ids(self):
         engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")

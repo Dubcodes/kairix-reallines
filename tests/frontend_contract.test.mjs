@@ -24,7 +24,7 @@ test('Engineering source choices expose only implemented paths as usable', () =>
     assert.match(choices.external.label, /Future/);
     assert.match(choices.linux_rotary.label, /Raspberry Pi Encoder — Recommended/);
     assert.match(choices.quadrature_gpio.label, /Direct GPIO Encoder — Advanced/);
-    assert.equal(choices.quadrature_gpio.enabled, axis === 'pan' || axis === 'tilt');
+    assert.equal(choices.quadrature_gpio.enabled, axis === 'pan' || axis === 'tilt' || axis === 'zoom');
     assert.equal(choices.linux_rotary.enabled, axis === 'pan' || axis === 'tilt');
   }
 });

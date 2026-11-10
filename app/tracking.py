@@ -7,6 +7,8 @@ from typing import Any
 
 
 AXES = ("pan", "tilt", "zoom", "focus")
+ANGULAR_ENCODER_AXES = ("pan", "tilt")
+POSITION_ENCODER_AXES = ("zoom",)
 SOURCE_TYPES = ("simulator", "disabled", "quadrature_gpio", "linux_rotary", "imu", "external")
 REQUIRED_AXES = ("pan", "tilt")
 ENCODER_SOURCES = ("quadrature_gpio", "linux_rotary")
@@ -14,6 +16,7 @@ ALLOWED_DECODE_MULTIPLIERS = (1, 2, 4)
 DEFAULT_GPIO_BY_AXIS = {
     "pan": {"chip": "/dev/gpiochip0", "line_a": 17, "line_b": 27},
     "tilt": {"chip": "/dev/gpiochip0", "line_a": 22, "line_b": 23},
+    "zoom": {"chip": "/dev/gpiochip0", "line_a": 5, "line_b": 6},
 }
 DEFAULT_ROTARY_BY_AXIS = {
     "pan": {"discovery": "auto", "rel_axis": "REL_X", "pin_a": 17, "pin_b": 27, "steps_per_period": 4, "device_override": ""},
@@ -111,15 +114,21 @@ def validate_axis_config(axis: str, config: dict[str, Any]) -> None:
     if source in ENCODER_SOURCES:
         try:
             ppr = float(mapping.get("ppr"))
-            ratio = float(mapping.get("encoder_revs_per_camera_rev"))
         except (TypeError, ValueError) as exc:
-            raise TrackingConfigError("PPR and gearing must be numeric") from exc
+            raise TrackingConfigError("PPR must be numeric") from exc
         if ppr <= 0:
             raise TrackingConfigError("PPR must be greater than zero")
         if mapping.get("quadrature_multiplier") not in ALLOWED_DECODE_MULTIPLIERS:
             raise TrackingConfigError("Quadrature multiplier must be 1, 2 or 4")
-        if ratio <= 0:
-            raise TrackingConfigError("Encoder-to-camera gearing must be greater than zero")
+        if axis in ANGULAR_ENCODER_AXES:
+            try:
+                ratio = float(mapping.get("encoder_revs_per_camera_rev"))
+            except (TypeError, ValueError) as exc:
+                raise TrackingConfigError("Encoder-to-camera gearing must be numeric") from exc
+            if ratio <= 0:
+                raise TrackingConfigError("Encoder-to-camera gearing must be greater than zero")
+        if axis in POSITION_ENCODER_AXES and mapping.get("quadrature_multiplier") != 4:
+            raise TrackingConfigError("Zoom encoder requires quadrature multiplier ×4")
         if source == "linux_rotary" and mapping.get("quadrature_multiplier") != 4:
             raise TrackingConfigError("Linux rotary encoder requires quadrature multiplier ×4")
     if source == "quadrature_gpio":
@@ -171,6 +180,8 @@ def merge_axis_update(axis: str, current: dict[str, Any], updates: dict[str, Any
             candidate.setdefault(section, {}).update(updates[section] or {})
     if current.get("source") != "linux_rotary" and candidate.get("source") == "linux_rotary":
         candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
+    if axis in POSITION_ENCODER_AXES and current.get("source") != "quadrature_gpio" and candidate.get("source") == "quadrature_gpio":
+        candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
     validate_axis_config(axis, candidate)
     return candidate
 
@@ -190,6 +201,8 @@ def map_raw_value(axis: str, raw: float, config: dict[str, Any]) -> float:
     direction = int(mapping["direction"])
     offset = float(mapping.get("offset", 0.0))
     if config["source"] in ENCODER_SOURCES:
+        if axis in POSITION_ENCODER_AXES:
+            return direction * float(raw)
         return offset + direction * float(raw) * degrees_per_count(config)
     return offset + direction * float(raw)
 
@@ -201,6 +214,11 @@ def map_referenced_count(config: dict[str, Any], raw_count: int, reference_count
         + float(mapping.get("offset", 0.0))
         + int(mapping["direction"]) * (int(raw_count) - int(reference_count)) * degrees_per_count(config)
     )
+
+
+def relative_position_count(config: dict[str, Any], raw_count: int, reference_count: int) -> int:
+    """Signed raw displacement for incremental position encoders such as Zoom."""
+    return int(config["mapping"]["direction"]) * (int(raw_count) - int(reference_count))
 
 
 def tracking_fingerprint(profile: dict[str, Any]) -> str:

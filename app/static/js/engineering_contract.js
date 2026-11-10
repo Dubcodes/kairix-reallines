@@ -8,7 +8,7 @@ export const ENGINEERING_STATE_FIELDS = Object.freeze([
 export const SOURCE_CHOICES = Object.freeze([
   Object.freeze({value:'simulator', label:'Simulator (no hardware)', implemented:true}),
   Object.freeze({value:'disabled', label:'Off', implemented:true}),
-  Object.freeze({value:'quadrature_gpio', label:'Direct GPIO Encoder — Advanced', implemented:true, axes:['pan', 'tilt']}),
+  Object.freeze({value:'quadrature_gpio', label:'Direct GPIO Encoder — Advanced', implemented:true, axes:['pan', 'tilt', 'zoom']}),
   Object.freeze({value:'linux_rotary', label:'Raspberry Pi Encoder — Recommended', implemented:true, axes:['pan', 'tilt']}),
   Object.freeze({value:'imu', label:'IMU — Future', implemented:false}),
   Object.freeze({value:'external', label:'External Tracker — Future', implemented:false}),
@@ -19,7 +19,7 @@ export const GPIO_BIASES = Object.freeze(['as_is', 'pull_up', 'pull_down']);
 export function sourceChoicesFor(axis) {
   return SOURCE_CHOICES.map(choice => ({
     ...choice,
-    label: choice.axes && !choice.axes.includes(axis) ? `${choice.label} (Pan/Tilt only)` : choice.label,
+    label: choice.axes && !choice.axes.includes(axis) ? `${choice.label} (${choice.axes.map(name=>name[0].toUpperCase()+name.slice(1)).join('/')} only)` : choice.label,
     enabled: choice.implemented && (!choice.axes || choice.axes.includes(axis)),
   }));
 }
