@@ -15,6 +15,10 @@
   <label>GFX marker size<select id="dotOverlayScale"><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option><option value="3">3×</option></select></label>
   <label class="tool-check"><input id="dotOverlayLabels" type="checkbox" checked> Labels</label>
   <label class="tool-check"><input id="dotOverlayVectors" type="checkbox" checked> Error arrows</label>
+  <label class="tool-check"><input id="dotGroundGridHere" type="checkbox"> Ground grid here</label>
+  <label class="tool-check calibration-gfx-toggle"><input id="dotGroundGridGfx" type="checkbox"> Ground grid on GFX</label>
+  <label>Grid spacing (m)<select id="dotGroundGridSpacing"><option value="0.25">0.25</option><option value="0.5">0.5</option><option value="1" selected>1</option><option value="2">2</option><option value="5">5</option></select></label>
+  <label>Grid extent (m)<select id="dotGroundGridExtent"><option value="10">10</option><option value="20" selected>20</option><option value="40">40</option><option value="80">80</option></select></label>
 </div>
 <div id="dotTargetFields" class="compact-fields">
   <label>Name<input id="dotTargetName" type="text" maxlength="80"></label>
@@ -44,7 +48,8 @@
   <div><h3>Saved observations</h3><div id="dotObservationList" class="observation-list"></div></div>
   <div><h3>Refinement</h3><div id="dotSolution" class="kv"></div><div class="row"><button id="solveDotCalibration" type="button">Calculate refinement</button><button id="applyDotCalibration" type="button" class="primary" disabled>Apply refinement</button></div></div>
 </div>
-<p class="small">A changed encoder reference invalidates the affected stored observations. The overlay uses the same delayed <code>render_camera</code> as normal graphics. Calibration overlay to GFX is session-only and defaults OFF after a service restart. A measured rectangle can also define the local venue/world frame: its centre becomes X=0/Y=0, its plane is vertical, and the entered bottom-edge height defines ground Z=0.</p>
+<p class="small"><strong>Saved gold observations are measurements and never move when a refinement is applied.</strong> When the camera is still at a saved pose, the blue prediction is drawn against those fixed gold points so any residual error remains visible instead of being hidden. A changed encoder reference invalidates the affected stored observations. The overlay uses the same delayed <code>render_camera</code> as normal graphics. Calibration and ground-grid overlays to GFX are session-only and default OFF after a service restart. A measured rectangle can also define the local venue/world frame: its centre becomes X=0/Y=0, its plane is vertical, and the entered bottom-edge height defines ground Z=0.</p>
+<p class="small form-error"><strong>Current model limits:</strong> RealLines still uses a pinhole lens model with no radial/tangential distortion correction, and the current rig model assumes intersecting Pan/Tilt axes with one optical-centre offset. These are the next precision terms to calibrate for near-pixel-perfect lock.</p>
 </section>
 <section class="panel span-all section-intro"><h2>1. Calibrate camera movement</h2><p class="small">Verify live counts, calibrate gear ratio and direction, then set a fresh camera position in Setup &amp; System. This does not require venue calibration.</p></section>
 <section class="panel span-all"><h2>Live tracking axes</h2><div id="calibrationAxes" class="axis-grid"></div></section>

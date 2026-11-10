@@ -138,7 +138,7 @@ export function drawGfxCalibrationOverlay(canvas,state){
   const ctx=canvas.getContext('2d'),width=canvas.width,height=canvas.height;
   const predicted=projectModelPoints(target.model_points||{},state.render_camera||state.camera,width,height);
   drawDotCalibrationOverlay(ctx,width,height,{
-    predicted,observed:overlay.editing?(overlay.draft_points||{}):{},selected:overlay.selected_marker,
+    predicted,observed:overlay.editing?(overlay.draft_points||{}):(overlay.reference_points||{}),selected:overlay.selected_marker,
     showConnections:target.type==='rectangle',markers:target.markers||[],markerScale:overlay.marker_scale??2,
     showLabels:overlay.show_labels!==false,showVectors:overlay.show_vectors!==false,
   });

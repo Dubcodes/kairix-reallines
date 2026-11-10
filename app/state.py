@@ -160,8 +160,11 @@ class StateStore:
         # calibration markers cannot accidentally survive a service restart.
         self.calibration_overlay: dict[str, Any] = {
             "enabled": False, "target_id": None, "editing": False,
-            "draft_points": {}, "selected_marker": None,
+            "draft_points": {}, "reference_points": {}, "reference_observation_id": None,
+            "selected_marker": None,
             "marker_scale": 2.0, "show_labels": True, "show_vectors": True,
+            "ground_grid_calibration": False, "ground_grid_gfx": False,
+            "grid_spacing_m": 1.0, "grid_extent_m": 20.0, "grid_major_every": 5,
         }
         self._refresh_tracking_from_profile(initial=True)
         self.clients: set[WebSocket] = set()
@@ -1027,7 +1030,11 @@ class StateStore:
         return result
 
     async def update_calibration_overlay(self, values: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(values) - {"enabled", "target_id", "editing", "draft_points", "selected_marker", "marker_scale", "show_labels", "show_vectors"}
+        unknown = set(values) - {
+            "enabled", "target_id", "editing", "draft_points", "reference_points", "reference_observation_id",
+            "selected_marker", "marker_scale", "show_labels", "show_vectors",
+            "ground_grid_calibration", "ground_grid_gfx", "grid_spacing_m", "grid_extent_m", "grid_major_every",
+        }
         if unknown:
             raise ValueError(f"Unknown calibration overlay setting: {sorted(unknown)[0]}")
         candidate = deepcopy(self.calibration_overlay)
@@ -1048,6 +1055,26 @@ class StateStore:
             candidate["show_labels"] = bool(values["show_labels"])
         if "show_vectors" in values:
             candidate["show_vectors"] = bool(values["show_vectors"])
+        for field in ("ground_grid_calibration", "ground_grid_gfx"):
+            if field in values:
+                candidate[field] = bool(values[field])
+        if "grid_spacing_m" in values:
+            spacing = float(values["grid_spacing_m"])
+            if not math.isfinite(spacing) or not 0.1 <= spacing <= 10.0:
+                raise ValueError("Calibration grid spacing must be between 0.1 and 10 m")
+            candidate["grid_spacing_m"] = spacing
+        if "grid_extent_m" in values:
+            extent = float(values["grid_extent_m"])
+            if not math.isfinite(extent) or not 2.0 <= extent <= 100.0:
+                raise ValueError("Calibration grid extent must be between 2 and 100 m")
+            candidate["grid_extent_m"] = extent
+        if "grid_major_every" in values:
+            major = int(values["grid_major_every"])
+            if not 2 <= major <= 20:
+                raise ValueError("Calibration grid major interval must be between 2 and 20")
+            candidate["grid_major_every"] = major
+        if "reference_observation_id" in values:
+            candidate["reference_observation_id"] = None if values["reference_observation_id"] is None else str(values["reference_observation_id"])
         if "draft_points" in values:
             raw = values["draft_points"] or {}
             if not isinstance(raw, dict) or len(raw) > 20:
@@ -1061,6 +1088,19 @@ class StateStore:
                     raise ValueError("Calibration overlay point is outside the supported viewport")
                 points[str(marker_id)] = {"x": x, "y": y}
             candidate["draft_points"] = points
+        if "reference_points" in values:
+            raw = values["reference_points"] or {}
+            if not isinstance(raw, dict) or len(raw) > 20:
+                raise ValueError("Calibration overlay supports at most 20 reference points")
+            points = {}
+            for marker_id, point in raw.items():
+                if not isinstance(point, dict):
+                    continue
+                x, y = float(point.get("x")), float(point.get("y"))
+                if not math.isfinite(x) or not math.isfinite(y) or not -0.25 <= x <= 1.25 or not -0.25 <= y <= 1.25:
+                    raise ValueError("Calibration overlay reference point is outside the supported viewport")
+                points[str(marker_id)] = {"x": x, "y": y}
+            candidate["reference_points"] = points
         async with self.lock:
             self.calibration_overlay = candidate
             result = deepcopy(candidate)

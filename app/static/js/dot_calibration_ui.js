@@ -1,4 +1,5 @@
 import {api,logFrontend} from './common.js?v=world-media1';
+import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
   rectangleTemplatePoints,rmsOverlayError,
@@ -16,6 +17,8 @@ export class DotCalibrationUi {
     this.state=null;
     this.data={targets:[],active_target_id:null,last_solution:null};
     this.editor={editing:false,draft:{},enabled:new Set(),selected:null,dragging:false,adding:false,capture:null};
+    this.anchorObservationId=null;
+    this.lastOverlayAnchorId=undefined;
     this.overlayTimer=null;
     this.controlsBound=false;
   }
@@ -52,14 +55,48 @@ export class DotCalibrationUi {
     return this.data;
   }
 
+  currentAxisCounts(){
+    if(!this.state)return{};
+    const axes=this.state.tracking?.axes||{};
+    return{
+      pan:axes.pan?.raw_count??null,
+      tilt:axes.tilt?.raw_count??null,
+      zoom:axes.zoom?.relative_count??null,
+    };
+  }
+
+  observationMatchesCurrentPose(observation){
+    if(!observation||!this.state)return false;
+    const refs=this.referenceIds(),stored=observation.references||{};
+    if((stored.pan??null)!==(refs.pan??null)||(stored.tilt??null)!==(refs.tilt??null))return false;
+    if((stored.zoom??null)!==(refs.zoom??null))return false;
+    const current=this.currentAxisCounts(),axes=observation.axes||{};
+    const pan=axes.pan?.raw_count,tilt=axes.tilt?.raw_count,zoom=axes.zoom?.relative_count;
+    if(pan!==null&&pan!==undefined&&current.pan!==null&&Math.abs(Number(current.pan)-Number(pan))>3)return false;
+    if(tilt!==null&&tilt!==undefined&&current.tilt!==null&&Math.abs(Number(current.tilt)-Number(tilt))>3)return false;
+    if(zoom!==null&&zoom!==undefined&&current.zoom!==null&&Math.abs(Number(current.zoom)-Number(zoom))>8)return false;
+    return true;
+  }
+
+  anchorObservation(){
+    const target=this.activeTarget();if(!target||this.editor.editing)return null;
+    const observations=target.observations||[];
+    const preferred=observations.find(obs=>obs.id===this.anchorObservationId);
+    if(preferred&&this.observationMatchesCurrentPose(preferred))return preferred;
+    return observations.find(obs=>this.observationMatchesCurrentPose(obs))||null;
+  }
+
   async updateOverlay(immediate=false){
     if(this.overlayTimer){clearTimeout(this.overlayTimer);this.overlayTimer=null;}
     const send=async()=>{
       try{
+        const anchor=this.anchorObservation();
         await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{
           target_id:this.data.active_target_id,
           editing:this.editor.editing,
           draft_points:this.editor.editing?this.editor.draft:{},
+          reference_points:anchor?.points||{},
+          reference_observation_id:anchor?.id??null,
           selected_marker:this.editor.selected,
         }})});
       }catch(error){logFrontend('calibration','dot_overlay_update_failed',{error:String(error)});}
@@ -99,6 +136,18 @@ export class DotCalibrationUi {
     id('dotOverlayVectors').onchange=async event=>{
       await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_vectors:event.target.checked}})});
     };
+    id('dotGroundGridHere').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{ground_grid_calibration:event.target.checked}})});
+    };
+    id('dotGroundGridGfx').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{ground_grid_gfx:event.target.checked}})});
+    };
+    id('dotGroundGridSpacing').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{grid_spacing_m:Number(event.target.value)}})});
+    };
+    id('dotGroundGridExtent').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{grid_extent_m:Number(event.target.value)}})});
+    };
     for(const field of ['dotTargetName','dotLockDistance','dotTargetWidth','dotTargetHeight','dotTargetBottomHeight'])id(field).addEventListener('change',()=>this.commitTargetFields());
     id('solveDotWorldReference').onclick=()=>this.solveWorldReference();
     id('dotEdgeMidpoints').addEventListener('change',()=>this.toggleEdgeMidpoints());
@@ -115,7 +164,7 @@ export class DotCalibrationUi {
       approx_distance_m:10,width_m:null,height_m:null,bottom_height_m:0,edge_midpoints:false,
       markers:[],observations:[],model_points:{},
     };
-    this.data.targets.push(target);this.data.active_target_id=target.id;this.data.last_solution=null;
+    this.data.targets.push(target);this.data.active_target_id=target.id;this.data.last_solution=null;this.anchorObservationId=null;
     this.editor={editing:true,draft:{},enabled:new Set(),selected:null,dragging:false,adding:type==='free',capture:this.captureContext()};
     if(type==='rectangle')this.installRectangleMarkers(target,false);
     await this.persist();await this.updateOverlay(true);this.render();
@@ -141,7 +190,7 @@ export class DotCalibrationUi {
   async deleteTarget(){
     const target=this.activeTarget();if(!target)return;
     this.data.targets=this.data.targets.filter(item=>item.id!==target.id);
-    this.data.active_target_id=this.data.targets[0]?.id??null;this.data.last_solution=null;this.cancelEdit(false);await this.persist();await this.updateOverlay(true);this.render();
+    this.data.active_target_id=this.data.targets[0]?.id??null;this.data.last_solution=null;this.anchorObservationId=null;this.cancelEdit(false);await this.persist();await this.updateOverlay(true);this.render();
   }
 
   async commitTargetFields(){
@@ -234,7 +283,7 @@ export class DotCalibrationUi {
     if(baseline&&count<4){this.setStatus('THE BASELINE VIEW NEEDS AT LEAST FOUR MARKERS','bad');return;}
     if(!baseline&&count<1){this.setStatus('ALIGN AT LEAST ONE VISIBLE MARKER','bad');return;}
     const observation={id:uid('obs'),...clone(this.editor.capture),points};
-    target.observations.push(observation);
+    target.observations.push(observation);this.anchorObservationId=observation.id;
     if(baseline){
       const size=this.canvasSize();
       target.model_points=modelPointsFromObservation({camera:observation.camera,points:Object.entries(points).map(([id,p])=>({id,...p})),targetDistance:target.approx_distance_m,width:size.width,height:size.height});
@@ -258,7 +307,9 @@ export class DotCalibrationUi {
     if(!this.data.last_solution?.solved)return;
     try{
       const result=await api('/api/world-calibration/dot-calibration/apply',{method:'POST'});
-      this.setStatus(`REFINEMENT APPLIED — PAN ${fmt(result.pan_ratio,6)} · TILT ${fmt(result.tilt_ratio,6)} · FOV ${fmt(result.horizontal_fov,2)}° · ZOOM CURVE ${fmt(result.zoom_curvature,4)}`,'ok');
+      await this.updateOverlay(true);
+      this.setStatus(`REFINEMENT APPLIED — SAVED GOLD POINTS STAY FIXED; BLUE PREDICTIONS SHOW THE RESIDUAL · PAN ${fmt(result.pan_ratio,6)} · TILT ${fmt(result.tilt_ratio,6)} · FOV ${fmt(result.horizontal_fov,2)}°`,'ok');
+      this.render();
     }catch(error){this.setStatus(String(error),'bad');}
   }
 
@@ -286,7 +337,7 @@ export class DotCalibrationUi {
 
   async clearObservations(){
     const target=this.activeTarget();if(!target)return;
-    target.observations=[];target.model_points={};this.data.last_solution=null;
+    target.observations=[];target.model_points={};this.data.last_solution=null;this.anchorObservationId=null;
     await this.persist();this.cancelEdit(false);await this.updateOverlay(true);this.render();
     this.setStatus('OBSERVATIONS CLEARED — 0 SAVED · TARGET MEASUREMENTS AND MARKER LAYOUT RETAINED','warn');
   }
@@ -312,6 +363,10 @@ export class DotCalibrationUi {
     id('dotOverlayScale').value=String(overlay.marker_scale??2);
     id('dotOverlayLabels').checked=overlay.show_labels!==false;
     id('dotOverlayVectors').checked=overlay.show_vectors!==false;
+    id('dotGroundGridHere').checked=!!overlay.ground_grid_calibration;
+    id('dotGroundGridGfx').checked=!!overlay.ground_grid_gfx;
+    id('dotGroundGridSpacing').value=String(overlay.grid_spacing_m??1);
+    id('dotGroundGridExtent').value=String(overlay.grid_extent_m??20);
   }
 
   renderMarkerList(){
@@ -374,9 +429,15 @@ export class DotCalibrationUi {
   draw(){
     if(!this.state)return;const target=this.activeTarget(),{canvas,width,height}=this.canvasSize(),ctx=canvas.getContext('2d');ctx.clearRect(0,0,width,height);
     if(!target)return;
+    const overlay=this.state.calibration_overlay||{};
+    if(overlay.ground_grid_calibration){
+      drawGroundGrid(ctx,this.state.render_camera,width,height,{spacingM:overlay.grid_spacing_m??1,extentM:overlay.grid_extent_m??20,majorEvery:overlay.grid_major_every??5,z:groundOffsetMetres(this.state)});
+    }
     const predicted=projectModelPoints(target.model_points||{},this.state.render_camera,width,height);
-    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed:this.editor.editing?this.editor.draft:{},selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers});
-    if(this.editor.editing){const error=rmsOverlayError(predicted,this.observationPoints(),1920,1080);if(error!==null){ctx.save();ctx.fillStyle='rgba(7,16,24,.8)';ctx.fillRect(10,10,180,30);ctx.fillStyle='#ffce67';ctx.font='700 14px system-ui';ctx.fillText(`Current error ${fmt(error,1)} px RMS`,20,30);ctx.restore();}}
+    const anchor=this.anchorObservation(),observed=this.editor.editing?this.editor.draft:(anchor?.points||{});
+    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers,markerScale:overlay.marker_scale??1,showLabels:overlay.show_labels!==false,showVectors:overlay.show_vectors!==false});
+    const error=rmsOverlayError(predicted,this.editor.editing?this.observationPoints():observed,1920,1080);
+    if(error!==null){ctx.save();ctx.fillStyle='rgba(7,16,24,.84)';ctx.fillRect(10,10,260,34);ctx.fillStyle=this.editor.editing?'#ffce67':'#9fe6ff';ctx.font='700 14px system-ui';ctx.fillText(`${this.editor.editing?'Current':'Saved-view'} error ${fmt(error,1)} px RMS`,20,32);ctx.restore();}
   }
 
   render(){
@@ -391,6 +452,8 @@ export class DotCalibrationUi {
     this.state=state;const incoming=state.world_calibrations?.active?.dot_calibration;
     if(incoming&&!this.editor.editing)this.data=clone(incoming);
     if(!this.controlsBound)this.bind();
+    const anchorId=this.anchorObservation()?.id??null;
+    if(!this.editor.editing&&anchorId!==this.lastOverlayAnchorId){this.lastOverlayAnchorId=anchorId;this.updateOverlay(false);}
     this.render();
   }
 }

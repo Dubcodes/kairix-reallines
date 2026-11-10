@@ -337,12 +337,27 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             store = self.make_store(directory)
             target = target_with([])
             await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
-            await store.update_calibration_overlay({"enabled": True, "target_id": target["id"], "editing": True, "draft_points": {"M1": {"x": 0.4, "y": 0.4}}, "marker_scale": 3.0, "show_labels": False, "show_vectors": False})
+            await store.update_calibration_overlay({
+                "enabled": True, "target_id": target["id"], "editing": True,
+                "draft_points": {"M1": {"x": 0.4, "y": 0.4}},
+                "reference_points": {"M1": {"x": 0.41, "y": 0.42}},
+                "reference_observation_id": "O1",
+                "marker_scale": 3.0, "show_labels": False, "show_vectors": False,
+                "ground_grid_calibration": True, "ground_grid_gfx": True,
+                "grid_spacing_m": 0.5, "grid_extent_m": 40.0, "grid_major_every": 4,
+            })
             overlay = store.snapshot()["calibration_overlay"]
             self.assertTrue(overlay["enabled"])
             self.assertEqual(overlay["marker_scale"], 3.0)
             self.assertFalse(overlay["show_labels"])
             self.assertFalse(overlay["show_vectors"])
+            self.assertEqual(overlay["reference_points"]["M1"], {"x": 0.41, "y": 0.42})
+            self.assertEqual(overlay["reference_observation_id"], "O1")
+            self.assertTrue(overlay["ground_grid_calibration"])
+            self.assertTrue(overlay["ground_grid_gfx"])
+            self.assertEqual(overlay["grid_spacing_m"], 0.5)
+            self.assertEqual(overlay["grid_extent_m"], 40.0)
+            self.assertEqual(overlay["grid_major_every"], 4)
             reloaded = self.make_store(directory)
             self.assertFalse(reloaded.snapshot()["calibration_overlay"]["enabled"])
             self.assertEqual(reloaded.world_calibration["dot_calibration"]["targets"][0]["name"], "Measured sign")
