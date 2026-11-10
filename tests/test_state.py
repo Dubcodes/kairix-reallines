@@ -46,6 +46,32 @@ class StoreCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "http"):
                 await store.update_engineering_settings({"preview_url": "file:///secret"})
 
+    async def test_ground_offset_is_calibration_scoped_persistent_and_non_destructive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            self.assertEqual(store.world_calibration["ground_offset_mm"], 0.0)
+            layout_path = store._layout_path(store.layout_index["active_id"])
+            layout_before = layout_path.read_text(encoding="utf-8")
+            coordinates_before = [
+                {key: value for key, value in item.items() if key in {"x", "y", "z", "x1", "y1", "z1", "x2", "y2", "z2"}}
+                for item in store.scene["items"]
+            ]
+            await store.generate_synthetic_world_calibration({"camera": {"x": 0, "y": 0, "z": 1.8}})
+            self.assertTrue(store.camera["world_valid"])
+            await store.update_world_calibration({"ground_offset_mm": 75})
+            self.assertEqual(store.world_calibration["ground_offset_mm"], 75.0)
+            self.assertTrue(store.camera["world_valid"])
+            self.assertEqual(layout_path.read_text(encoding="utf-8"), layout_before)
+            self.assertEqual([
+                {key: value for key, value in item.items() if key in {"x", "y", "z", "x1", "y1", "z1", "x2", "y2", "z2"}}
+                for item in store.scene["items"]
+            ], coordinates_before)
+            self.assertEqual(self.make_store(directory).world_calibration["ground_offset_mm"], 75.0)
+            await store.update_world_calibration({"ground_offset_mm": 0})
+            self.assertEqual(store.world_calibration["ground_offset_mm"], 0.0)
+            with self.assertRaisesRegex(ValueError, "-500"):
+                await store.update_world_calibration({"ground_offset_mm": 501})
+
     async def test_png_asset_is_validated_stored_and_attached_to_image(self):
         png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
         with tempfile.TemporaryDirectory() as directory:
@@ -70,6 +96,7 @@ class StoreCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(item['text'], 'LEGACY')
             self.assertEqual(item['orientation_mode'], 'billboard')
             self.assertEqual(item['world_height_m'], 1.0)
+            self.assertFalse(item['ground_attached'])
 
     async def test_transient_item_update_broadcasts_without_layout_save(self):
         with tempfile.TemporaryDirectory() as directory:

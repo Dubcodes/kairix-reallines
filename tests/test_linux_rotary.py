@@ -87,9 +87,9 @@ class LinuxRotaryWorkerCase(unittest.TestCase):
         self.assertFalse(snapshot["referenced"])
         self.assertEqual(snapshot["health"], "ERROR")
 
-    def test_syn_dropped_loses_reference_and_ignores_through_syn_report(self):
+    def test_syn_dropped_retains_reference_as_suspect_and_ignores_through_syn_report(self):
         worker = live_worker()
-        worker.set_reference(0)
+        reference_id = worker.set_reference(0)
         worker.process_input_events([
             (1, EV_REL, REL_CODES["REL_X"], 5),
             (2, EV_SYN, SYN_DROPPED, 0),
@@ -99,7 +99,10 @@ class LinuxRotaryWorkerCase(unittest.TestCase):
         ])
         snapshot = worker.snapshot(5)
         self.assertEqual(snapshot["raw_count"], 7)
-        self.assertFalse(snapshot["referenced"])
+        self.assertTrue(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
+        self.assertEqual(snapshot["calibration_confidence"], "SUSPECT")
         self.assertTrue(snapshot["integrity_lost"])
         self.assertEqual(snapshot["integrity_loss_events"], 1)
         self.assertEqual(snapshot["evdev_dropped_events"], 1)
@@ -182,9 +185,11 @@ class LinuxRotaryIntegrationCase(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(store.camera["world_valid"])
             pan.process_input_events([(1, EV_SYN, SYN_DROPPED, 0)])
             store.sample_tick({"pan": pan.snapshot(), "tilt": tilt.snapshot()})
-            self.assertFalse(store.tracking["valid"])
-            self.assertFalse(store.camera["world_valid"])
-            self.assertFalse(store.tracking["axes"]["pan"]["referenced"])
+            self.assertTrue(store.tracking["valid"])
+            self.assertTrue(store.camera["world_valid"])
+            self.assertTrue(store.tracking["axes"]["pan"]["referenced"])
+            self.assertEqual(store.tracking["axes"]["pan"]["integrity"], "SUSPECT")
+            self.assertEqual(store.tracking["integrity"], "SUSPECT")
             self.assertTrue(store.tracking["axes"]["tilt"]["referenced"])
 
     async def test_fingerprint_covers_stable_rotary_identity_not_event_number(self):

@@ -27,8 +27,11 @@ export function planeBasis(item){
   return{right,up,normal};
 }
 
-export function planeWorldCorners(item,aspect=1){
-  const center={x:+item.x||0,y:+item.y||0,z:+item.z||0},basis=planeBasis(item);
+export function groundOffsetMetres(state){const value=+(state?.world_calibrations?.active?.ground_offset_mm??0);return Number.isFinite(value)?value/1000:0;}
+const adjustedZ=(item,z,groundOffsetM)=>+z+(item.ground_attached===true?groundOffsetM:0);
+
+export function planeWorldCorners(item,aspect=1,groundOffsetM=0){
+  const center={x:+item.x||0,y:+item.y||0,z:adjustedZ(item,item.z||0,groundOffsetM)},basis=planeBasis(item);
   const height=item.type==='text'?Math.max(.001,+item.world_height_m||1):Math.max(.001,+item.height_m||1);
   const width=item.type==='text'?height*Math.max(.01,aspect):Math.max(.001,+item.width_m||1);
   const r=scale(basis.right,width/2),u=scale(basis.up,height/2);
@@ -46,16 +49,16 @@ function billboardQuad(item,p){
   return[{x:p.x-width/2,y:p.y-height/2},{x:p.x+width/2,y:p.y-height/2},{x:p.x+width/2,y:p.y+height/2},{x:p.x-width/2,y:p.y+height/2}];
 }
 
-export function projectItemGeometry(item,camera,width,height,allowProvisional=false,aspect=1){
+export function projectItemGeometry(item,camera,width,height,allowProvisional=false,aspect=1,groundOffsetM=0){
   if(!projectionMode(camera,allowProvisional).allowed)return null;
   if(item.type==='line'){
-    const a=projectPoint({x:+item.x1,y:+item.y1,z:+item.z1},camera,width,height),b=projectPoint({x:+item.x2,y:+item.y2,z:+item.z2},camera,width,height);
+    const a=projectPoint({x:+item.x1,y:+item.y1,z:adjustedZ(item,item.z1,groundOffsetM)},camera,width,height),b=projectPoint({x:+item.x2,y:+item.y2,z:adjustedZ(item,item.z2,groundOffsetM)},camera,width,height);
     return a&&b?{type:'line',a,b}:null;
   }
-  const p=projectPoint({x:+item.x,y:+item.y,z:+item.z},camera,width,height);
+  const p=projectPoint({x:+item.x,y:+item.y,z:adjustedZ(item,item.z,groundOffsetM)},camera,width,height);
   if(!p)return null;
   if((item.type==='text'||item.type==='image')&&item.orientation_mode==='world'){
-    const quad=planeWorldCorners(item,aspect).map(corner=>projectPoint(corner,camera,width,height));
+    const quad=planeWorldCorners(item,aspect,groundOffsetM).map(corner=>projectPoint(corner,camera,width,height));
     return quad.every(Boolean)?{type:'plane',kind:item.type,p,quad}:null;
   }
   if(item.type==='text'||item.type==='image')return{type:item.type,p,quad:billboardQuad(item,p)};
@@ -85,8 +88,8 @@ export function drawTexturedQuad(ctx,image,quad,steps=8){
 export function renderScene(canvas,state,options={}){
   const ctx=canvas.getContext('2d'),rect=canvas.getBoundingClientRect(),dpr=Math.min(globalThis.devicePixelRatio||1,2),w=Math.max(320,Math.round(rect.width*dpr)),h=Math.max(180,Math.round(rect.height*dpr));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
   ctx.clearRect(0,0,w,h);if(!options.transparent){ctx.fillStyle=state.scene.background||'#00ff00';ctx.fillRect(0,0,w,h);}
-  const camera=options.camera||state.render_camera||state.camera,projection=projectionMode(camera,options.allowProvisional===true);let projectedItems=0;
-  if(projection.allowed)for(const item of state.scene.items||[]){if(!isItemEffectivelyVisible(item,state.scene))continue;const texture=item.type==='text'&&item.orientation_mode==='world'?textTexture(item):null,geometry=projectItemGeometry(item,camera,w,h,options.allowProvisional===true,texture?.aspect||1);if(!geometry)continue;
+  const camera=options.camera||state.render_camera||state.camera,projection=projectionMode(camera,options.allowProvisional===true),groundOffsetM=groundOffsetMetres(state);let projectedItems=0;
+  if(projection.allowed)for(const item of state.scene.items||[]){if(!isItemEffectivelyVisible(item,state.scene))continue;const texture=item.type==='text'&&item.orientation_mode==='world'?textTexture(item):null,geometry=projectItemGeometry(item,camera,w,h,options.allowProvisional===true,texture?.aspect||1,groundOffsetM);if(!geometry)continue;
     if(item.type==='line'){ctx.strokeStyle=item.color||'#fff';ctx.lineWidth=(+item.width||4)*dpr;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(geometry.a.x,geometry.a.y);ctx.lineTo(geometry.b.x,geometry.b.y);ctx.stroke();projectedItems++;}
     else if(item.type==='text'&&item.orientation_mode==='world'){if(texture){drawTexturedQuad(ctx,texture.image,geometry.quad);projectedItems++;}}
     else if(item.type==='text'){const p=geometry.p,size=Math.max(8,Math.min(200,(+item.size||42)*p.scale*.08));ctx.fillStyle=item.color||'#fff';ctx.font=`700 ${size}px system-ui, sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(item.text||'',p.x,p.y);projectedItems++;}

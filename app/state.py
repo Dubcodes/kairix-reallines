@@ -116,7 +116,11 @@ class StateStore:
         self._last_history_debug_mono = 0.0
         self._last_render_debug_mono = 0.0
         self._last_sync_status: str | None = None
-        self.tracking: dict[str, Any] = {"axes": {}, "valid": False, "required_axes": list(REQUIRED_AXES)}
+        self.tracking: dict[str, Any] = {
+            "axes": {}, "valid": False, "available": False, "integrity": "UNKNOWN",
+            "calibration_confidence": "UNAVAILABLE", "warnings": [],
+            "required_axes": list(REQUIRED_AXES),
+        }
         self._refresh_tracking_from_profile(initial=True)
         self.clients: set[WebSocket] = set()
         self.lock = asyncio.Lock()
@@ -124,6 +128,7 @@ class StateStore:
         self.layout_save_error: str | None = None
         self.layout_index = self._load_or_migrate_layouts()
         self.scene = self._read_layout(self.layout_index["active_id"])
+        self.imu_service: Any = None
 
     def _atomic_write_path(self, path: Path, data: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +363,14 @@ class StateStore:
         result["camera_hint"] = {**{"x": 0.0, "y": 0.0, "z": 1.8}, **deepcopy(calibration.get("camera_hint") or {})}
         result["orientation_hint"] = {**{"pan_offset": 0.0, "tilt_offset": 0.0}, **deepcopy(calibration.get("orientation_hint") or {})}
         result["observations"] = deepcopy(calibration.get("observations") or {})
+        try:
+            ground_offset = float(calibration.get("ground_offset_mm", 0.0))
+            if not math.isfinite(ground_offset) or not -500.0 <= ground_offset <= 500.0:
+                raise ValueError
+        except (TypeError, ValueError):
+            self.debug.error("ground_offset_invalid", value=repr(calibration.get("ground_offset_mm")))
+            ground_offset = 0.0
+        result["ground_offset_mm"] = ground_offset
         if not calibration.get("tracking_fingerprint"):
             result.update({"valid": False, "status": "TRACKING FINGERPRINT MISSING — SOLVE REQUIRED"})
         if not calibration.get("rig_geometry_fingerprint"):
@@ -449,11 +462,19 @@ class StateStore:
             "updated_mono": previous.get("updated_mono", 0.0),
             "update_hz": previous.get("update_hz"),
             "expects_periodic_samples": source not in {"simulator", "disabled", *ENCODER_SOURCES},
+            "availability": "DISABLED" if source == "disabled" else "UNAVAILABLE",
+            "integrity": "UNKNOWN",
+            "integrity_reason": None,
+            "calibration_confidence": "UNAVAILABLE",
         }
         if source == "simulator":
             try:
                 runtime["value"] = map_raw_value(axis, float(raw), config)
-                runtime.update({"valid": True, "health": "VALID", "status": "Simulator", "updated_mono": now})
+                runtime.update({
+                    "valid": True, "health": "VALID", "status": "Simulator", "updated_mono": now,
+                    "availability": "AVAILABLE", "integrity": "TRUSTED",
+                    "calibration_confidence": "TRUSTED",
+                })
                 previous_time = previous.get("updated_mono", 0.0)
                 if previous_time and not initial and now > previous_time:
                     runtime["update_hz"] = round(1.0 / (now - previous_time), 2)
@@ -476,6 +497,10 @@ class StateStore:
                 "driver_alive": bool(previous.get("driver_alive", False)),
                 "configured": configured,
                 "diagnostics": deepcopy(previous.get("diagnostics", {})),
+                "availability": previous.get("availability", "UNAVAILABLE"),
+                "integrity": previous.get("integrity", "UNKNOWN"),
+                "integrity_reason": previous.get("integrity_reason"),
+                "calibration_confidence": previous.get("calibration_confidence", "UNREFERENCED"),
                 "health": "UNCONFIGURED" if not configured else "REFERENCE_REQUIRED",
                 "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for encoder driver",
             })
@@ -490,6 +515,25 @@ class StateStore:
             if runtime.get("valid") and runtime.get("expects_periodic_samples") and timeout > 0 and runtime["age_seconds"] is not None and runtime["age_seconds"] > timeout:
                 runtime.update({"valid": False, "health": "STALE", "status": f"No sample for {runtime['age_seconds']:.3f} seconds"})
         self.tracking["valid"] = all(self.tracking["axes"][axis]["valid"] for axis in REQUIRED_AXES)
+        required = [self.tracking["axes"][axis] for axis in REQUIRED_AXES]
+        self.tracking["available"] = all(runtime.get("availability") == "AVAILABLE" for runtime in required)
+        integrities = {runtime.get("integrity", "UNKNOWN") for runtime in required}
+        self.tracking["integrity"] = "SUSPECT" if "SUSPECT" in integrities else "UNKNOWN" if "UNKNOWN" in integrities else "TRUSTED"
+        confidences = {runtime.get("calibration_confidence", "UNAVAILABLE") for runtime in required}
+        self.tracking["calibration_confidence"] = (
+            "UNAVAILABLE" if "UNAVAILABLE" in confidences else
+            "UNREFERENCED" if "UNREFERENCED" in confidences else
+            "SUSPECT" if "SUSPECT" in confidences else "TRUSTED"
+        )
+        self.tracking["warnings"] = [
+            {
+                "axis": axis,
+                "reason": self.tracking["axes"][axis].get("integrity_reason") or "Possible encoder count loss",
+                "tracking_operating": bool(self.tracking["axes"][axis].get("valid")),
+            }
+            for axis in REQUIRED_AXES
+            if self.tracking["axes"][axis].get("integrity") == "SUSPECT"
+        ]
 
     def _refresh_camera_from_tracking(self, sample: bool = True) -> None:
         tracked: dict[str, float | None] = {}
@@ -528,6 +572,8 @@ class StateStore:
         self.camera["source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
         self.camera["valid"] = self.tracking["valid"]
         self.camera["world_valid"] = self.tracking["valid"] and calibration_valid
+        self.camera["tracking_integrity"] = self.tracking["integrity"]
+        self.camera["calibration_confidence"] = self.tracking["calibration_confidence"]
         self.camera["world_calibration_id"] = self.world_calibration_index["active_id"]
         self.camera["calibration_profile_match"] = profile_match
         self.camera["calibration_fingerprint_match"] = fingerprint_match
@@ -552,6 +598,7 @@ class StateStore:
             if axis not in AXES or self.profile["axes"][axis]["source"] not in ENCODER_SOURCES:
                 continue
             runtime = self.tracking["axes"][axis]
+            previous_integrity = runtime.get("integrity")
             raw_count = int(sample.get("raw_count", runtime.get("raw_count", 0)))
             referenced = bool(sample.get("referenced", False))
             reference_count = sample.get("reference_count")
@@ -568,8 +615,12 @@ class StateStore:
                 "reference_id": reference_id,
                 "configured": configured,
                 "driver_alive": driver_alive,
+                "availability": sample.get("availability", "AVAILABLE" if driver_alive else "UNAVAILABLE"),
+                "integrity": sample.get("integrity", "TRUSTED"),
+                "integrity_reason": sample.get("integrity_reason"),
+                "calibration_confidence": sample.get("calibration_confidence", "UNREFERENCED"),
                 "updated_mono": now,
-                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "health", "status"}},
+                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "health", "status"}},
             })
             runtime["relative_angle"] = (raw_count - int(reference_count)) * degrees_per_count(self.profile["axes"][axis]) if referenced and reference_count is not None else None
             if sample.get("health") == "ERROR":
@@ -584,9 +635,15 @@ class StateStore:
                 runtime.update({
                     "valid": True,
                     "value": map_referenced_count(self.profile["axes"][axis], raw_count, int(reference_count), reference_angle),
-                    "health": "VALID",
-                    "status": "Referenced",
+                    "health": "SUSPECT" if runtime["integrity"] == "SUSPECT" else "VALID",
+                    "status": sample.get("status", "Referenced"),
                 })
+            if runtime.get("integrity") != previous_integrity:
+                self.debug.tracking(
+                    "axis_integrity_changed", axis=axis, before=previous_integrity,
+                    after=runtime.get("integrity"), reason=runtime.get("integrity_reason"),
+                    tracking_operating=runtime.get("valid"),
+                )
         self._refresh_tracking_health(now)
         self._refresh_camera_from_tracking(sample=True)
 
@@ -608,6 +665,15 @@ class StateStore:
         result.setdefault("groups", [])
         result.setdefault("items", [])
         for item in result["items"]:
+            if "ground_attached" not in item:
+                if item.get("type") == "line":
+                    item["ground_attached"] = abs(float(item.get("z1", 0.0))) <= 0.1 and abs(float(item.get("z2", 0.0))) <= 0.1
+                elif item.get("type") == "marker":
+                    item["ground_attached"] = abs(float(item.get("z", 0.0))) <= 0.1
+                else:
+                    item["ground_attached"] = item.get("orientation_preset") == "floor" and abs(float(item.get("z", 0.0))) <= 0.1
+            else:
+                item["ground_attached"] = item["ground_attached"] is True
             if item.get("type") in {"text", "image"}:
                 item.setdefault("orientation_mode", "billboard")
                 item.setdefault("orientation_preset", "face_camera" if item["orientation_mode"] == "billboard" else "vertical")
@@ -711,7 +777,7 @@ class StateStore:
         else:
             world["effective_status"] = world.get("status")
         world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
-        return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
+        return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -719,10 +785,10 @@ class StateStore:
         self._refresh_camera_from_tracking(sample=False)
         render_camera, sync = self._render_pose_state(now)
         compact_axes = {
-            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "driver_alive", "diagnostics") if key in runtime}
+            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
-        return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "axes": compact_axes}, "sync": sync, "server_mono": now}
+        return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "sync": sync, "server_mono": now}
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         dead: list[WebSocket] = []
@@ -1016,6 +1082,11 @@ class StateStore:
         for key in ("name", "horizontal_fov", "fixed_roll"):
             if key in values:
                 candidate[key] = values[key]
+        if "ground_offset_mm" in values:
+            ground_offset = float(values["ground_offset_mm"])
+            if not math.isfinite(ground_offset) or not -500.0 <= ground_offset <= 500.0:
+                raise CalibrationError("Ground Plane Adjustment must be between -500 and +500 mm")
+            candidate["ground_offset_mm"] = ground_offset
         for section in ("camera_hint", "orientation_hint"):
             if section in values:
                 candidate.setdefault(section, {}).update(values[section] or {})
@@ -1045,7 +1116,10 @@ class StateStore:
             self.world_calibration = candidate
             self._write_active_world_calibration_locked()
             self._refresh_camera_from_tracking()
-        self.debug.app("calibration_target_updated", calibration_id=candidate["id"], target=candidate["target"], camera_hint=candidate["camera_hint"])
+        if "ground_offset_mm" in values:
+            self.debug.app("ground_offset_updated", calibration_id=candidate["id"], millimetres=candidate["ground_offset_mm"])
+        else:
+            self.debug.app("calibration_target_updated", calibration_id=candidate["id"], target=candidate["target"], camera_hint=candidate["camera_hint"])
         await self.broadcast_state(); return deepcopy(candidate)
 
     async def select_world_target(self, target: str) -> str:
@@ -1220,7 +1294,7 @@ class StateStore:
         return deepcopy(item)
 
     def _new_item(self, item_type: str) -> dict[str, Any]:
-        common = {"id": _new_id(), "type": item_type, "visible": True, "color": "#ffffff"}
+        common = {"id": _new_id(), "type": item_type, "visible": True, "color": "#ffffff", "ground_attached": item_type in {"line", "marker"}}
         if item_type == "text":
             return {**common, "name": "Text", "text": "TEXT", "size": 42, "x": 0.0, "y": 10.0, "z": 0.1, "orientation_mode": "billboard", "orientation_preset": "face_camera", "yaw_deg": 0.0, "pitch_deg": 0.0, "roll_deg": 0.0, "world_height_m": 1.0}
         if item_type == "image":

@@ -157,18 +157,20 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(snapshot["health"], "REFERENCE_REQUIRED")
         self.assertEqual(snapshot["last_error"], "request lost")
 
-    def test_illegal_transition_latches_integrity_and_loses_reference(self):
-        worker, _ = self.referenced_worker()
+    def test_illegal_transition_latches_suspect_integrity_and_retains_reference(self):
+        worker, reference_id = self.referenced_worker()
         worker.process_levels(1, 1, 1_000_000_000)
         snapshot = worker.snapshot(1_000_000_000)
         self.assertEqual(snapshot["illegal_transitions"], 1)
         self.assertTrue(snapshot["integrity_lost"])
         self.assertEqual(snapshot["integrity_loss_events"], 1)
-        self.assertFalse(snapshot["referenced"])
-        self.assertIsNone(snapshot["reference_id"])
+        self.assertTrue(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
+        self.assertEqual(snapshot["calibration_confidence"], "SUSPECT")
 
-    def test_sequence_gap_is_separate_and_loses_reference_once(self):
-        worker, _ = self.referenced_worker()
+    def test_sequence_gap_is_separate_and_latches_suspect_once(self):
+        worker, reference_id = self.referenced_worker()
         worker.process_edge(6, True, 1_000_000_000, global_seqno=1, line_seqno=1)
         worker.process_edge(5, True, 1_100_000_000, global_seqno=3, line_seqno=1)
         snapshot = worker.snapshot(1_100_000_000)
@@ -177,17 +179,19 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(snapshot["global_only_sequence_gaps"], 1)
         self.assertEqual(snapshot["line_sequence_gaps"], 0)
         self.assertEqual(snapshot["integrity_loss_events"], 1)
-        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
 
     def test_line_sequence_gap_is_counted_independently(self):
-        worker, _ = self.referenced_worker()
+        worker, reference_id = self.referenced_worker()
         worker.process_edge(6, True, 1_000_000_000, global_seqno=1, line_seqno=1)
         worker.process_edge(6, False, 1_100_000_000, global_seqno=2, line_seqno=3)
         snapshot = worker.snapshot(1_100_000_000)
         self.assertEqual(snapshot["global_sequence_gaps"], 0)
         self.assertEqual(snapshot["line_sequence_gaps"], 1)
         self.assertEqual(snapshot["integrity_loss_events"], 1)
-        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
 
     def test_global_and_line_sequence_wraparound_are_contiguous(self):
         worker, reference_id = self.referenced_worker()
@@ -200,12 +204,13 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(snapshot["reference_id"], reference_id)
 
     def test_sequence_regression_is_not_treated_as_legitimate_reordering(self):
-        worker, _ = self.referenced_worker()
+        worker, reference_id = self.referenced_worker()
         worker.process_edge(6, True, 1, global_seqno=100, line_seqno=100)
         worker.process_edge(5, True, 2, global_seqno=102, line_seqno=100)
         worker.process_edge(6, False, 3, global_seqno=101, line_seqno=101)
         snapshot = worker.snapshot(3)
-        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
         self.assertGreaterEqual(snapshot["confirmed_global_gaps"], 1)
         self.assertEqual(snapshot["global_out_of_order_events"], 1)
 
@@ -270,19 +275,20 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertEqual(snapshot["line_sequence_gaps"], 0)
         self.assertEqual(snapshot["reference_id"], reference_id)
 
-    def test_global_gap_inside_batch_invalidates_reference(self):
-        worker, _ = self.referenced_worker()
+    def test_global_gap_inside_batch_retains_reference_as_suspect(self):
+        worker, reference_id = self.referenced_worker()
         records = edge_records(20)
         records = [record if index < 10 else (*record[:3], record[3] + 1, record[4]) for index, record in enumerate(records)]
         worker.process_edge_batch(records)
         snapshot = worker.snapshot(records[-1][2])
         self.assertEqual(snapshot["global_sequence_gaps"], 1)
         self.assertEqual(snapshot["line_sequence_gaps"], 0)
-        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
         self.assertEqual(snapshot["integrity_loss_events"], 1)
 
-    def test_line_gap_inside_batch_invalidates_reference(self):
-        worker, _ = self.referenced_worker()
+    def test_line_gap_inside_batch_retains_reference_as_suspect(self):
+        worker, reference_id = self.referenced_worker()
         records = edge_records(20)
         gap_line = records[10][0]
         records = [
@@ -293,7 +299,8 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         snapshot = worker.snapshot(records[-1][2])
         self.assertEqual(snapshot["global_sequence_gaps"], 0)
         self.assertEqual(snapshot["line_sequence_gaps"], 1)
-        self.assertFalse(snapshot["referenced"])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "SUSPECT")
         self.assertEqual(snapshot["integrity_loss_events"], 1)
 
     def test_batch_diagnostics_report_capacity_rate_peak_and_size(self):
@@ -444,12 +451,14 @@ class DualGpioManagerCase(unittest.TestCase):
         pan.process_levels(1, 1, 1_000_000_000)
         snapshots = manager.snapshots()
         self.assertTrue(snapshots["pan"]["integrity_lost"])
-        self.assertFalse(snapshots["pan"]["referenced"])
+        self.assertTrue(snapshots["pan"]["referenced"])
+        self.assertEqual(snapshots["pan"]["reference_id"], pan_reference)
+        self.assertEqual(snapshots["pan"]["integrity"], "SUSPECT")
         self.assertFalse(snapshots["tilt"]["integrity_lost"])
         self.assertTrue(snapshots["tilt"]["referenced"])
         self.assertEqual(snapshots["tilt"]["reference_id"], tilt_reference)
 
-    def test_high_rate_batches_and_gap_invalidation_are_worker_local(self):
+    def test_high_rate_batches_and_gap_warning_are_worker_local(self):
         pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
         tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
         pan.begin_acquisition(0, 0)
@@ -474,7 +483,9 @@ class DualGpioManagerCase(unittest.TestCase):
 
         pan_gap = edge_records(8, 17, 27, start_global=20_002, start_timestamp=pan_records[-1][2] + 50_000)
         pan.process_edge_batch(pan_gap)
-        self.assertFalse(pan.snapshot()["referenced"])
+        self.assertTrue(pan.snapshot()["referenced"])
+        self.assertEqual(pan.snapshot()["reference_id"], pan_reference)
+        self.assertEqual(pan.snapshot()["integrity"], "SUSPECT")
         self.assertTrue(tilt.snapshot()["referenced"])
         self.assertEqual(tilt.snapshot()["reference_id"], tilt_reference)
 
@@ -654,11 +665,12 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             tilt.set_reference(0)
             pan.process_levels(1, 1, 1_000_000_000)
             await sample_tracking_once(store, sources)
-            self.assertFalse(store.tracking["axes"]["pan"]["referenced"])
-            self.assertFalse(store.tracking["axes"]["pan"]["valid"])
+            self.assertTrue(store.tracking["axes"]["pan"]["referenced"])
+            self.assertTrue(store.tracking["axes"]["pan"]["valid"])
+            self.assertEqual(store.tracking["axes"]["pan"]["integrity"], "SUSPECT")
             self.assertTrue(store.tracking["axes"]["tilt"]["referenced"])
             self.assertTrue(store.tracking["axes"]["tilt"]["valid"])
-            self.assertFalse(store.tracking["valid"])
+            self.assertTrue(store.tracking["valid"])
 
             restarted_pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
             restarted_tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
@@ -732,7 +744,7 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(snapshot["world_calibrations"]["reference_match"])
             self.assertEqual(snapshot["world_calibrations"]["active"]["effective_status"], "REFERENCE MISMATCH — RECALIBRATE")
 
-    async def test_encoder_reference_loss_invalidates_world_and_pose_history(self):
+    async def test_hard_restart_invalidates_but_recoverable_faults_preserve_world_and_history(self):
         for failure in ("driver_restart", "illegal_transition", "sequence_gap"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 store = self.make_store(directory)
@@ -743,6 +755,8 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
                 store.sample_tick({"pan": worker.snapshot()})
                 await store.generate_synthetic_world_calibration({"camera": {"x": 0, "y": 0, "z": 1.8}})
                 self.assertTrue(store.camera["world_valid"])
+                reference_id = worker.snapshot()["reference_id"]
+                generation = store.pose_history.generation
 
                 if failure == "driver_restart":
                     worker._set_error("request lost")
@@ -755,10 +769,24 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
                 store.sample_tick({"pan": worker.snapshot(1_100_000_000)})
 
                 snapshot = store.snapshot()
-                self.assertEqual(snapshot["tracking"]["axes"]["pan"]["health"], "REFERENCE_REQUIRED")
-                self.assertFalse(snapshot["camera"]["valid"])
-                self.assertFalse(snapshot["camera"]["world_valid"])
-                self.assertFalse(store.pose_history.samples[-1].valid)
+                if failure == "driver_restart":
+                    self.assertEqual(snapshot["tracking"]["axes"]["pan"]["health"], "REFERENCE_REQUIRED")
+                    self.assertFalse(snapshot["camera"]["valid"])
+                    self.assertFalse(snapshot["camera"]["world_valid"])
+                    self.assertFalse(store.pose_history.samples[-1].valid)
+                    self.assertGreater(store.pose_history.generation, generation)
+                else:
+                    axis = snapshot["tracking"]["axes"]["pan"]
+                    self.assertEqual(axis["health"], "SUSPECT")
+                    self.assertEqual(axis["reference_id"], reference_id)
+                    self.assertTrue(snapshot["tracking"]["valid"])
+                    self.assertTrue(snapshot["camera"]["world_valid"])
+                    self.assertEqual(store.pose_history.generation, generation)
+                    self.assertEqual(snapshot["tracking"]["warnings"][0]["axis"], "pan")
+                    replacement = worker.set_reference(0)
+                    self.assertNotEqual(replacement, reference_id)
+                    store.sample_tick({"pan": worker.snapshot()})
+                    self.assertEqual(store.tracking["axes"]["pan"]["integrity"], "TRUSTED")
 
     async def test_mixed_and_dual_quadrature_reference_identity(self):
         cases = (("pan",), ("tilt",), ("pan", "tilt"))

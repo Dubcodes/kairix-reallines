@@ -121,6 +121,9 @@ class LinuxRotaryWorker:
             "last_event_timestamp": None, "last_event_timestamp_ns": None,
             "events": 0, "event_rate_hz": 0.0, "peak_event_rate_hz": 0.0,
             "integrity_lost": False, "integrity_status": "TRUSTED", "integrity_loss_events": 0,
+            "integrity": "TRUSTED", "integrity_reason": None, "integrity_since_ns": None,
+            "integrity_fault_events": 0, "availability": "UNAVAILABLE",
+            "calibration_confidence": "UNREFERENCED",
             "restarts": 0, "device_identity": None, "resolved_event_device": None,
             "rel_axis": self._rel_axis, "rel_code": self._rel_code, "kernel_driver": "rotary-encoder",
             "steps_per_period": 4, "evdev_dropped_events": 0, "read_event_count": READ_EVENT_COUNT,
@@ -146,6 +149,7 @@ class LinuxRotaryWorker:
             self._motion_buckets.clear()
             self._snapshot.update({
                 "driver_alive": True, "configured": True, "health": "REFERENCE_REQUIRED",
+                "availability": "AVAILABLE", "calibration_confidence": "UNREFERENCED",
                 "status": "Set an encoder reference", "last_error": None,
                 "device_identity": identity, "resolved_event_device": device,
             })
@@ -159,7 +163,9 @@ class LinuxRotaryWorker:
             self._snapshot.update({
                 "referenced": True, "reference_count": self._snapshot["raw_count"],
                 "reference_angle": float(angle), "reference_id": reference_id,
-                "integrity_lost": False, "integrity_status": "TRUSTED",
+                "integrity_lost": False, "integrity_status": "TRUSTED", "integrity": "TRUSTED",
+                "integrity_reason": None, "integrity_since_ns": None,
+                "calibration_confidence": "TRUSTED",
                 "health": "VALID", "status": "Referenced",
             })
             return reference_id
@@ -172,13 +178,36 @@ class LinuxRotaryWorker:
         already_lost = self._snapshot["integrity_lost"]
         self._snapshot.update({
             "referenced": False, "reference_count": None, "reference_angle": 0.0, "reference_id": None,
+            "calibration_confidence": "UNREFERENCED" if self._snapshot["driver_alive"] else "UNAVAILABLE",
             "health": "REFERENCE_REQUIRED" if self._snapshot["driver_alive"] else self._snapshot["health"],
             "status": status,
         })
         if integrity_loss:
-            self._snapshot.update({"integrity_lost": True, "integrity_status": "LOST — REFERENCE REQUIRED"})
+            self._snapshot.update({
+                "integrity_lost": True, "integrity_status": "UNKNOWN — REFERENCE REQUIRED",
+                "integrity": "UNKNOWN", "integrity_reason": status,
+                "integrity_since_ns": time.monotonic_ns(),
+                "calibration_confidence": "UNAVAILABLE" if not self._snapshot["driver_alive"] else "UNREFERENCED",
+            })
             if not already_lost:
                 self._snapshot["integrity_loss_events"] += 1
+
+    def _mark_integrity_suspect_locked(self, reason: str, timestamp_ns: int) -> None:
+        already_suspect = self._snapshot["integrity"] == "SUSPECT"
+        self._snapshot["integrity_fault_events"] += 1
+        self._snapshot.update({
+            "integrity_lost": True,
+            "integrity": "SUSPECT",
+            "integrity_status": "SUSPECT — TRACKING CONTINUES",
+            "integrity_reason": reason,
+            "integrity_since_ns": self._snapshot["integrity_since_ns"] or int(timestamp_ns),
+            "calibration_confidence": "SUSPECT" if self._snapshot["referenced"] else "UNREFERENCED",
+            "health": "SUSPECT" if self._snapshot["referenced"] else "REFERENCE_REQUIRED",
+            "status": f"{reason}; tracking continues but absolute angle may be wrong"
+            if self._snapshot["referenced"] else f"{reason}; set an encoder reference",
+        })
+        if not already_suspect:
+            self._snapshot["integrity_loss_events"] += 1
 
     def _record_motion_locked(self, timestamp_ns: int) -> None:
         bucket_id = timestamp_ns // self.RATE_BUCKET_NS
@@ -237,9 +266,7 @@ class LinuxRotaryWorker:
                     self._dropping = True
                     self._snapshot["last_event_timestamp"] = timestamp_ns
                     self._snapshot["last_event_timestamp_ns"] = timestamp_ns
-                    self._invalidate_reference_locked(
-                        "Evdev queue overrun (SYN_DROPPED); set a new reference", integrity_loss=True,
-                    )
+                    self._mark_integrity_suspect_locked("Possible count loss (evdev queue overrun / SYN_DROPPED)", timestamp_ns)
                     continue
                 if self._dropping:
                     if event_type == EV_SYN and code == SYN_REPORT:
@@ -272,10 +299,10 @@ class LinuxRotaryWorker:
     def _set_error(self, message: str) -> None:
         with self._lock:
             self._snapshot.update({
-                "driver_alive": False, "health": "ERROR", "status": message, "last_error": message,
+                "driver_alive": False, "availability": "UNAVAILABLE", "health": "ERROR", "status": message, "last_error": message,
                 "resolved_event_device": None,
             })
-            self._invalidate_reference_locked(message)
+            self._invalidate_reference_locked(message, integrity_loss=True)
 
     def _close(self) -> None:
         fd, self._fd = self._fd, None

@@ -42,6 +42,7 @@ def default_world_calibration(name: str, profile_id: str) -> dict[str, Any]:
         "orientation_hint": {"pan_offset": 0.0, "tilt_offset": 0.0},
         "horizontal_fov": 60.0,
         "fixed_roll": 0.0,
+        "ground_offset_mm": 0.0,
         "current_target": TARGET_POINTS[0],
         "observations": {},
         "solution": None,

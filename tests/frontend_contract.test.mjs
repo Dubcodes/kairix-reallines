@@ -10,7 +10,7 @@ import {
   validateEncoderDraft,
   validateEngineeringState,
 } from '../app/static/js/engineering_contract.js';
-import {planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
+import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
 
 test('Engineering source choices expose only implemented paths as usable', () => {
@@ -130,6 +130,22 @@ test('camera pan changes floor-text projection without mutating its world transf
   assert.ok(first&&second);
   assert.notDeepEqual(first.quad,second.quad);
   assert.deepEqual(item,before);
+});
+
+test('Ground Nudge offsets only ground-attached projection without mutating layout geometry', () => {
+  const camera={valid:true,world_valid:true,x:0,y:0,z:1.7,pan:0,tilt:0,roll:0,fov:60};
+  const ground={type:'marker',x:0,y:10,z:0,ground_attached:true};
+  const elevated={type:'marker',x:0,y:10,z:2,ground_attached:false};
+  const groundBefore=structuredClone(ground),elevatedBefore=structuredClone(elevated);
+  const base=projectItemGeometry(ground,camera,1280,720,false,1,0);
+  const nudged=projectItemGeometry(ground,camera,1280,720,false,1,.05);
+  const elevatedBase=projectItemGeometry(elevated,camera,1280,720,false,1,0);
+  const elevatedNudged=projectItemGeometry(elevated,camera,1280,720,false,1,.05);
+  assert.ok(nudged.p.y<base.p.y);
+  assert.deepEqual(elevatedNudged,elevatedBase);
+  assert.deepEqual(ground,groundBefore);
+  assert.deepEqual(elevated,elevatedBefore);
+  assert.equal(groundOffsetMetres({world_calibrations:{active:{ground_offset_mm:50}}}),.05);
 });
 
 test('known-angle movement calibration computes gearing and direction', () => {

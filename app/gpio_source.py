@@ -68,6 +68,9 @@ class QuadratureGpioWorker:
             "confirmed_global_gaps": 0, "global_only_sequence_gaps": 0,
             "global_out_of_order_events": 0, "line_out_of_order_events": 0,
             "integrity_loss_events": 0, "integrity_lost": False, "integrity_status": "TRUSTED",
+            "integrity": "TRUSTED", "integrity_reason": None, "integrity_since_ns": None,
+            "integrity_fault_events": 0, "availability": "UNAVAILABLE",
+            "calibration_confidence": "UNREFERENCED",
             "illegal_transitions": 0, "restarts": 0,
         }
 
@@ -138,7 +141,9 @@ class QuadratureGpioWorker:
             self._snapshot.update({
                 "referenced": True, "reference_count": self.decoder.count,
                 "reference_angle": float(angle), "reference_id": reference_id,
-                "integrity_lost": False, "integrity_status": "TRUSTED",
+                "integrity_lost": False, "integrity_status": "TRUSTED", "integrity": "TRUSTED",
+                "integrity_reason": None, "integrity_since_ns": None,
+                "calibration_confidence": "TRUSTED",
                 "health": "VALID" if self._snapshot["driver_alive"] else self._snapshot["health"],
                 "status": "Referenced" if self._snapshot["driver_alive"] else self._snapshot["status"],
             })
@@ -148,13 +153,36 @@ class QuadratureGpioWorker:
         already_lost = self._snapshot["integrity_lost"]
         self._snapshot.update({
             "referenced": False, "reference_count": None, "reference_angle": 0.0, "reference_id": None,
+            "calibration_confidence": "UNREFERENCED" if self._snapshot["driver_alive"] else "UNAVAILABLE",
             "health": "REFERENCE_REQUIRED" if self._snapshot["driver_alive"] else self._snapshot["health"],
             "status": status,
         })
         if integrity_loss:
-            self._snapshot.update({"integrity_lost": True, "integrity_status": "LOST — REFERENCE REQUIRED"})
+            self._snapshot.update({
+                "integrity_lost": True, "integrity_status": "UNKNOWN — REFERENCE REQUIRED",
+                "integrity": "UNKNOWN", "integrity_reason": status,
+                "integrity_since_ns": time.monotonic_ns(),
+                "calibration_confidence": "UNAVAILABLE" if not self._snapshot["driver_alive"] else "UNREFERENCED",
+            })
             if not already_lost:
                 self._snapshot["integrity_loss_events"] += 1
+
+    def _mark_integrity_suspect_locked(self, reason: str, timestamp_ns: int) -> None:
+        already_suspect = self._snapshot["integrity"] == "SUSPECT"
+        self._snapshot["integrity_fault_events"] += 1
+        self._snapshot.update({
+            "integrity_lost": True,
+            "integrity": "SUSPECT",
+            "integrity_status": "SUSPECT — TRACKING CONTINUES",
+            "integrity_reason": reason,
+            "integrity_since_ns": self._snapshot["integrity_since_ns"] or int(timestamp_ns),
+            "calibration_confidence": "SUSPECT" if self._snapshot["referenced"] else "UNREFERENCED",
+            "health": "SUSPECT" if self._snapshot["referenced"] else "REFERENCE_REQUIRED",
+            "status": f"{reason}; tracking continues but absolute angle may be wrong"
+            if self._snapshot["referenced"] else f"{reason}; set an encoder reference",
+        })
+        if not already_suspect:
+            self._snapshot["integrity_loss_events"] += 1
 
     def clear_reference(self) -> None:
         with self._lock:
@@ -170,6 +198,7 @@ class QuadratureGpioWorker:
             self._motion_buckets.clear()
             self._snapshot.update({
                 "driver_alive": True, "configured": True,
+                "availability": "AVAILABLE", "calibration_confidence": "UNREFERENCED",
                 "a_state": int(bool(a_state)), "b_state": int(bool(b_state)),
                 "health": "REFERENCE_REQUIRED", "status": "Set an encoder reference",
             })
@@ -209,7 +238,7 @@ class QuadratureGpioWorker:
             self._snapshot["line_out_of_order_events"] += 1
         if illegal or global_gap or line_gap or global_backward or line_backward:
             causes = (["illegal transition"] if illegal else []) + (["global sequence gap"] if global_gap else []) + (["line sequence gap"] if line_gap else []) + (["global sequence regression"] if global_backward else []) + (["line sequence regression"] if line_backward else [])
-            self._invalidate_reference_locked(f"Count integrity lost ({', '.join(causes)}); set a new reference", integrity_loss=True)
+            self._mark_integrity_suspect_locked(f"Possible count loss ({', '.join(causes)})", timestamp_ns)
         self._last_global_seqno = global_seqno if global_seqno is not None else self._last_global_seqno
         if line_seqno is not None:
             self._last_line_seqno[line_offset] = line_seqno
@@ -261,7 +290,7 @@ class QuadratureGpioWorker:
             self.decoder.update(a_state, b_state)
             illegal = self.decoder.diagnostics.illegal_transitions > before_illegal
             if illegal:
-                self._invalidate_reference_locked("Count integrity lost (illegal transition); set a new reference", integrity_loss=True)
+                self._mark_integrity_suspect_locked("Possible count loss (illegal transition)", timestamp_ns)
             self._record_motion_locked(timestamp_ns)
             self._snapshot.update({
                 "raw_count": self.decoder.count, "last_edge_timestamp_ns": int(timestamp_ns),
@@ -279,8 +308,8 @@ class QuadratureGpioWorker:
 
     def _set_error(self, message: str) -> None:
         with self._lock:
-            self._snapshot.update({"driver_alive": False, "configured": False, "health": "ERROR", "status": message, "last_error": message})
-            self._invalidate_reference_locked(message)
+            self._snapshot.update({"driver_alive": False, "configured": False, "availability": "UNAVAILABLE", "health": "ERROR", "status": message, "last_error": message})
+            self._invalidate_reference_locked(message, integrity_loss=True)
 
     def _run(self) -> None:
         backoff = 0.25

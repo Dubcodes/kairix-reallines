@@ -37,3 +37,15 @@ async def pose_publication_loop(store: Any, frequency_hz: float = 50.0) -> None:
         if next_tick < time.monotonic() - interval:
             next_tick = time.monotonic()
         await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+
+
+async def imu_status_publication_loop(store: Any, imu_service: Any, interval_seconds: float = 0.5) -> None:
+    """Publish infrequent full state only when optional sensor connectivity changes."""
+    previous: tuple[Any, ...] | None = None
+    while True:
+        snapshot = imu_service.snapshot()
+        current = (snapshot.get("enabled"), snapshot.get("source"), snapshot.get("health"), snapshot.get("last_error"))
+        if previous is not None and current != previous:
+            await store.broadcast_state()
+        previous = current
+        await asyncio.sleep(interval_seconds)

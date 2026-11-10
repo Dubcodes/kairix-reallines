@@ -254,9 +254,27 @@ class FrontendContractCase(unittest.TestCase):
         for label in (
             "Requested GPIO event buffer", "Read batch size", "Events/sec", "Peak events/sec",
             "Total movement events", "Confirmed global gaps", "Line sequence gaps",
-            "Integrity-loss events", "Integrity", "Counts/sec", "Degrees/sec", "Last event age",
+            "Integrity warning events", "Integrity", "Counts/sec", "Degrees/sec", "Last event age",
         ):
             self.assertIn(label, engineering)
+
+    def test_integrity_ground_and_optional_imu_ui_stay_on_operator_pages(self):
+        engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        calibration_html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        control_html = (STATIC / "control.html").read_text(encoding="utf-8")
+        control = (STATIC / "js" / "control.js").read_text(encoding="utf-8")
+        gfx = (STATIC / "gfx.html").read_text(encoding="utf-8")
+        self.assertIn('id="trackingIntegrityWarning"', control_html)
+        self.assertIn("tracking?.warnings", control)
+        self.assertIn("Tracking is still operating", control)
+        self.assertNotIn("trackingIntegrityWarning", gfx)
+        self.assertIn("Ground Plane Adjustment", engineering_html)
+        self.assertIn('id="groundOffset"', engineering_html)
+        self.assertIn("ground_offset_mm", engineering)
+        self.assertIn("Optional IMU Assistance", engineering_html)
+        self.assertIn("IMU-assisted movement calibration", calibration_html)
+        self.assertIn("Manual calibration above always remains available", calibration_html)
 
     def test_linux_rotary_ui_is_distinct_fixed_x4_and_overlay_explicit(self):
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
@@ -326,7 +344,7 @@ class FrontendContractCase(unittest.TestCase):
             snapshot = StateStore(Path(directory), SilentDebug()).snapshot()
         expected_state = {
             "profiles", "tracking", "camera", "render_camera", "sync",
-            "world_calibrations", "engineering", "clients",
+            "world_calibrations", "engineering", "imu", "clients",
         }
         self.assertTrue(expected_state <= snapshot.keys())
 

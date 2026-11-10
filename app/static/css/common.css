@@ -39,6 +39,8 @@ details[open] > summary { color:var(--accent); }
 .status-ok { color:var(--ok); }
 .status-bad { color:var(--danger); }
 .status-warn { color:#ffd166; }
+.integrity-warning { margin:8px 14px 0; padding:9px 12px; border:1px solid #8a6824; border-radius:7px; background:#2b2415; color:#ffd166; font-size:.82rem; }
+.integrity-warning[hidden] { display:none; }
 .header-status { display:flex; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }
 .kv { display:grid; grid-template-columns:150px 1fr; gap:5px 10px; font-size:13px; }
 .kv div:nth-child(odd) { color:var(--muted); }
@@ -134,6 +136,7 @@ canvas.editor-canvas:focus { border-color:#4c6578; }
 .axis-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .axis-heading h3 { margin:0; }
 .axis-health { font-size:.72rem; font-weight:800; letter-spacing:.04em; padding:3px 7px; border-radius:999px; background:#29333c; color:#b8c7d3; }
+.health-suspect { background:#4a3917; color:#ffd166; }
 .health-valid { background:#123923; color:#73e6a2; }
 .health-disabled { background:#31343a; color:#b9c0c8; }
 .health-not-configured { background:#493c18; color:#ffda78; }

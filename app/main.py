@@ -15,9 +15,10 @@ from pydantic import BaseModel
 
 from .debug import DebugRecorder
 from .kinematics import RigGeometryError
+from .imu import ImuAssistanceService, ImuCalibrationError
 from .state import StateStore
 from .source_manager import TrackingSourceManager
-from .runtime import pose_publication_loop, tracking_loop
+from .runtime import imu_status_publication_loop, pose_publication_loop, tracking_loop
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
 
@@ -29,11 +30,14 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 debug = DebugRecorder(DATA_DIR)
 store = StateStore(DATA_DIR, debug)
+imu_service = ImuAssistanceService(DATA_DIR, debug)
+store.imu_service = imu_service
 
 app = FastAPI(title="Kairix RealLines", version=VERSION)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 acquisition_task: asyncio.Task | None = None
 publication_task: asyncio.Task | None = None
+imu_status_task: asyncio.Task | None = None
 source_manager = TrackingSourceManager()
 
 
@@ -90,6 +94,10 @@ class EngineeringUpdate(BaseModel):
     values: dict
 
 
+class ImuUpdate(BaseModel):
+    values: dict
+
+
 class GroupTranslate(BaseModel):
     dx: float
     dy: float
@@ -136,23 +144,26 @@ async def request_logging(request: Request, call_next):
 
 @app.on_event("startup")
 async def start_acquisition():
-    global acquisition_task, publication_task
+    global acquisition_task, publication_task, imu_status_task
     source_manager.configure(store.profile_index["active_id"], store.profile)
+    imu_service.start()
     acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
     publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
+    imu_status_task = asyncio.create_task(imu_status_publication_loop(store, imu_service), name="optional-imu-status")
 
 
 @app.on_event("shutdown")
 async def stop_acquisition():
-    global acquisition_task, publication_task
-    tasks = [task for task in (acquisition_task, publication_task) if task]
+    global acquisition_task, publication_task, imu_status_task
+    tasks = [task for task in (acquisition_task, publication_task, imu_status_task) if task]
     for task in tasks:
         task.cancel()
     if tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.gather(*tasks)
-    acquisition_task = publication_task = None
+    acquisition_task = publication_task = imu_status_task = None
     source_manager.stop()
+    imu_service.stop()
 
 
 @app.get("/")
@@ -249,6 +260,69 @@ async def update_engineering_settings(body: EngineeringUpdate):
         return await store.update_engineering_settings(body.values)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/imu")
+async def update_imu(body: ImuUpdate):
+    try:
+        result = imu_service.configure(body.values)
+    except (ImuCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await store.broadcast_state()
+    return result
+
+
+@app.post("/api/imu/bias")
+async def calibrate_imu_bias():
+    try:
+        result = imu_service.calibrate_bias()
+    except ImuCalibrationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await store.broadcast_state()
+    return result
+
+
+def _imu_axis_state(axis: str) -> tuple[dict, dict]:
+    if axis not in {"pan", "tilt"}:
+        raise HTTPException(404, "Unknown IMU calibration axis")
+    runtime = store.tracking["axes"][axis]
+    config = store.profile["axes"][axis]
+    if config["source"] not in {"quadrature_gpio", "linux_rotary"} or not runtime.get("driver_alive"):
+        raise HTTPException(400, f"{axis.title()} encoder must be connected for IMU-assisted calibration")
+    return runtime, config
+
+
+@app.post("/api/imu/{kind}/{axis}/start")
+async def start_imu_measurement(kind: str, axis: str):
+    runtime, _ = _imu_axis_state(axis)
+    try:
+        imu_service.begin_measurement(kind, axis, int(runtime["raw_count"]))
+    except ImuCalibrationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await store.broadcast_state()
+    return imu_service.snapshot()
+
+
+@app.post("/api/imu/{kind}/{axis}/stop")
+async def stop_imu_measurement(kind: str, axis: str):
+    runtime, config = _imu_axis_state(axis)
+    active = imu_service.snapshot().get("active") or {}
+    if active.get("kind") != kind or active.get("axis") != axis:
+        raise HTTPException(400, "The requested IMU measurement is not active")
+    mapping = config["mapping"]
+    try:
+        result = imu_service.finish_measurement(int(runtime["raw_count"]), float(mapping["ppr"]), int(mapping["quadrature_multiplier"]))
+    except ImuCalibrationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await store.broadcast_state()
+    return result
+
+
+@app.delete("/api/imu/calibration")
+async def reset_imu_calibration():
+    imu_service.reset_calibration()
+    await store.broadcast_state()
+    return {"ok": True}
 
 
 @app.post("/api/profiles")
@@ -598,7 +672,7 @@ async def debug_toggle(enabled: bool):
 
 @app.get("/api/diagnostics/bundle")
 async def diagnostic_bundle():
-    files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "sync.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
+    files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "sync.json", DATA_DIR / "imu.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
     bundle = debug.create_bundle(files)
     return FileResponse(bundle, filename=bundle.name, media_type="application/zip")
 

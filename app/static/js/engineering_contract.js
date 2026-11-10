@@ -2,7 +2,7 @@ export const ENGINEERING_AXES = Object.freeze(['pan', 'tilt', 'zoom', 'focus']);
 
 export const ENGINEERING_STATE_FIELDS = Object.freeze([
   'profiles', 'tracking', 'camera', 'render_camera', 'sync',
-  'world_calibrations', 'engineering', 'clients',
+  'world_calibrations', 'engineering', 'imu', 'clients',
 ]);
 
 export const SOURCE_CHOICES = Object.freeze([
