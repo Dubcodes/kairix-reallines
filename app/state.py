@@ -1116,6 +1116,17 @@ class StateStore:
                 candidate = merge_axis_update(axis, previous, {"mapping": {"encoder_revs_per_camera_rev": round(float(proposed[key]), 9)}})
                 self.profile["axes"][axis] = candidate
                 self._remap_axis_runtime(axis)
+            if "horizontal_fov" in (solution.get("parameters") or []):
+                horizontal_fov = max(5.0, min(160.0, float(proposed["horizontal_fov"])))
+                self.profile.setdefault("camera", {})["fov"] = round(horizontal_fov, 6)
+                self.world_calibration["horizontal_fov"] = round(horizontal_fov, 6)
+                anchor = solution.get("fov_anchor") or {}
+                point_name = anchor.get("point")
+                if point_name in {"wide", "tight"} and self.zoom_fov_mapping.get(point_name):
+                    # Preserve the encoder count/reference captured for the endpoint;
+                    # only correct the FOV attached to it when the observation set
+                    # was made close enough to that endpoint for the solver to bind it.
+                    self.zoom_fov_mapping[point_name]["fov"] = round(horizontal_fov, 6)
             if "zoom_curvature" in (solution.get("parameters") or []):
                 self.zoom_fov_mapping["curvature"] = max(-1.0, min(4.0, float(proposed.get("zoom_curvature", 0.0))))
             models = solution.get("target_models") or {}
@@ -1134,6 +1145,7 @@ class StateStore:
             result = {
                 "pan_ratio": self.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"],
                 "tilt_ratio": self.profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"],
+                "horizontal_fov": self.profile.get("camera", {}).get("fov"),
                 "zoom_curvature": self.zoom_fov_mapping.get("curvature", 0.0),
             }
         self.debug.app("dot_calibration_applied", **result)

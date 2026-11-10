@@ -256,7 +256,7 @@ export class DotCalibrationUi {
     if(!this.data.last_solution?.solved)return;
     try{
       const result=await api('/api/world-calibration/dot-calibration/apply',{method:'POST'});
-      this.setStatus(`REFINEMENT APPLIED — PAN ${fmt(result.pan_ratio,6)} · TILT ${fmt(result.tilt_ratio,6)} · ZOOM CURVE ${fmt(result.zoom_curvature,4)}`,'ok');
+      this.setStatus(`REFINEMENT APPLIED — PAN ${fmt(result.pan_ratio,6)} · TILT ${fmt(result.tilt_ratio,6)} · FOV ${fmt(result.horizontal_fov,2)}° · ZOOM CURVE ${fmt(result.zoom_curvature,4)}`,'ok');
     }catch(error){this.setStatus(String(error),'bad');}
   }
 
@@ -327,11 +327,16 @@ export class DotCalibrationUi {
     const solution=this.data.last_solution,root=this.byId('dotSolution'),apply=this.byId('applyDotCalibration');
     if(!solution?.solved){root.innerHTML='<div>Status</div><div>No refinement calculated</div>';apply.disabled=true;return;}
     const p=solution.proposed||{},c=solution.current||{},coverage=solution.coverage||{};
+    const parameters=new Set(solution.parameters||[]);
     const rows=[
       ['Error',`${fmt(solution.rms_before_px,1)} → ${fmt(solution.rms_after_px,1)} px RMS`],
+      ['Horizontal error',`${fmt(solution.rms_x_before_px,1)} → ${fmt(solution.rms_x_after_px,1)} px RMS`],
+      ['Vertical error',`${fmt(solution.rms_y_before_px,1)} → ${fmt(solution.rms_y_after_px,1)} px RMS`],
       ['Matched placements',solution.matched_points??'—'],['Observation sets',solution.observation_sets??'—'],
-      ['Pan ratio',`${fmt(c.pan_ratio,6)} → ${fmt(p.pan_ratio,6)}`],['Tilt ratio',`${fmt(c.tilt_ratio,6)} → ${fmt(p.tilt_ratio,6)}`],
-      ['Zoom curve',solution.zoom_saturated?'MODEL LIMIT — NOT APPLIED':`${fmt(c.zoom_curvature,4)} → ${fmt(p.zoom_curvature,4)}`],
+      ['Pan ratio',parameters.has('pan_ratio')?`${fmt(c.pan_ratio,6)} → ${fmt(p.pan_ratio,6)}`:`${fmt(c.pan_ratio,6)} · not enough Pan movement`],
+      ['Tilt ratio',parameters.has('tilt_ratio')?`${fmt(c.tilt_ratio,6)} → ${fmt(p.tilt_ratio,6)}`:`${fmt(c.tilt_ratio,6)} · not enough Tilt movement`],
+      ['Horizontal FOV',parameters.has('horizontal_fov')?`${fmt(c.horizontal_fov,2)}° → ${fmt(p.horizontal_fov,2)}°`:`${fmt(c.horizontal_fov,2)}° · held`],
+      ['Zoom curve',solution.zoom_saturated?'MODEL LIMIT — NOT APPLIED':parameters.has('zoom_curvature')?`${fmt(c.zoom_curvature,4)} → ${fmt(p.zoom_curvature,4)}`:`${fmt(c.zoom_curvature,4)} · held`],
       ['Coverage',`Pan ${coverage.pan??0} counts · Tilt ${coverage.tilt??0} · Zoom ${coverage.zoom??0}`],
     ];
     root.innerHTML=rows.map(([a,b])=>`<div>${a}</div><div>${b}</div>`).join('');

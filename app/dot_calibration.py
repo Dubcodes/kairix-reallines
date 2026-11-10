@@ -175,7 +175,7 @@ def _axis_angle(observation: dict[str, Any], axis: str, config: dict[str, Any], 
 
 def _camera_for_observation(
     observation: dict[str, Any], profile: dict[str, Any], pan_ratio: float, tilt_ratio: float,
-    zoom_mapping: dict[str, Any], curvature: float,
+    zoom_mapping: dict[str, Any], curvature: float, horizontal_fov: float | None = None,
 ) -> dict[str, float]:
     captured = observation.get("camera") or {}
     camera = {
@@ -189,9 +189,9 @@ def _camera_for_observation(
     }
     zoom_axis = (observation.get("axes") or {}).get("zoom") or {}
     zoom_count = zoom_axis.get("relative_count")
-    fov = zoom_fov_for_count(zoom_count, zoom_mapping, curvature)
+    fov = None if horizontal_fov is not None else zoom_fov_for_count(zoom_count, zoom_mapping, curvature)
     if fov is None:
-        fov = float(captured.get("fov", profile.get("camera", {}).get("fov", 60.0)))
+        fov = float(horizontal_fov if horizontal_fov is not None else captured.get("fov", profile.get("camera", {}).get("fov", 60.0)))
     camera["fov"] = fov
     return camera
 
@@ -284,43 +284,35 @@ def _project(point: dict[str, float], camera: dict[str, float]) -> dict[str, flo
     }
 
 
-def _parameter_model(profile: dict[str, Any], zoom_mapping: dict[str, Any], dot_calibration: dict[str, Any]) -> tuple[list[str], list[float]]:
-    names: list[str] = []
-    values: list[float] = []
-    pan_counts, tilt_counts, zoom_counts = [], [], []
+def _coverage_counts(dot_calibration: dict[str, Any]) -> tuple[dict[str, int], dict[str, list[int]]]:
+    counts: dict[str, list[int]] = {axis: [] for axis in ("pan", "tilt", "zoom")}
     for target in dot_calibration.get("targets") or []:
-        for obs in target.get("observations") or []:
-            axes = obs.get("axes") or {}
-            for name, bucket in (("pan", pan_counts), ("tilt", tilt_counts)):
+        for observation in target.get("observations") or []:
+            axes = observation.get("axes") or {}
+            for axis in ("pan", "tilt"):
+                value = (axes.get(axis) or {}).get("raw_count")
+                if value is not None:
+                    try:
+                        counts[axis].append(int(value))
+                    except (TypeError, ValueError):
+                        pass
+            value = (axes.get("zoom") or {}).get("relative_count")
+            if value is not None:
                 try:
-                    bucket.append(int((axes.get(name) or {})["raw_count"]))
-                except (KeyError, TypeError, ValueError):
+                    counts["zoom"].append(int(value))
+                except (TypeError, ValueError):
                     pass
-            try:
-                zoom_counts.append(int((axes.get("zoom") or {})["relative_count"]))
-            except (KeyError, TypeError, ValueError):
-                pass
-    current_pan = float(profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"])
-    current_tilt = float(profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"])
-    if pan_counts and max(pan_counts) - min(pan_counts) >= 8:
-        names.append("pan_ratio"); values.append(current_pan)
-    if tilt_counts and max(tilt_counts) - min(tilt_counts) >= 8:
-        names.append("tilt_ratio"); values.append(current_tilt)
-    if len(zoom_counts) >= 2 and max(zoom_counts) - min(zoom_counts) >= 10 and zoom_mapping.get("wide") and zoom_mapping.get("tight"):
-        names.append("zoom_curvature"); values.append(float(zoom_mapping.get("curvature", 0.0)))
-    if not names:
-        raise DotCalibrationError("Need more camera movement before Dot calibration can refine the model")
-    return names, values
+    coverage = {axis: (max(values) - min(values) if values else 0) for axis, values in counts.items()}
+    return coverage, counts
 
 
-def _values_dict(names: list[str], values: list[float], profile: dict[str, Any], zoom_mapping: dict[str, Any]) -> dict[str, float]:
-    result = {
+def _base_parameters(profile: dict[str, Any], zoom_mapping: dict[str, Any]) -> dict[str, float]:
+    return {
         "pan_ratio": float(profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]),
         "tilt_ratio": float(profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"]),
+        "horizontal_fov": float(profile.get("camera", {}).get("fov", 60.0)),
         "zoom_curvature": float(zoom_mapping.get("curvature", 0.0)),
     }
-    result.update(dict(zip(names, values)))
-    return result
 
 
 def _project_direction(direction: dict[str, float], camera: dict[str, float]) -> dict[str, float] | None:
@@ -387,21 +379,61 @@ def _model_points_from_bearings(
     return points_at(max(0.05, min(5000.0, distance)))
 
 
-def _residuals(
-    names: list[str], values: list[float], profile: dict[str, Any], zoom_mapping: dict[str, Any],
-    dot_calibration: dict[str, Any], include_models: bool = False,
-):
-    """Return symmetric image-space residuals for repeated marker observations.
+def _camera_for_parameters(
+    observation: dict[str, Any], profile: dict[str, Any], zoom_mapping: dict[str, Any],
+    params: dict[str, float], use_profile_fov: bool,
+) -> dict[str, float]:
+    """Build the candidate camera for one saved observation.
 
-    No observation is treated as hidden ground truth. For each physical marker,
-    every saved screen position is converted to a world-space bearing using the
-    candidate Pan/Tilt/Zoom model. The common marker bearing is the normalised
-    mean of those bearings, and every observation is then reprojected against
-    that same bearing. This makes the operator's dragged dots the measurements
-    that drive the fit instead of forcing later observations to compromise with
-    a 3D plane manufactured from Observation 1.
+    When Zoom is not fully calibrated, ``horizontal_fov`` is the candidate lens
+    FOV and is solved jointly with encoder gearing. Once both Zoom endpoints are
+    available, the physical Zoom mapping owns FOV and only its curvature may be
+    refined by repeated observations.
     """
-    params = _values_dict(names, values, profile, zoom_mapping)
+    horizontal_fov = params["horizontal_fov"] if use_profile_fov else None
+    return _camera_for_observation(
+        observation,
+        profile,
+        params["pan_ratio"],
+        params["tilt_ratio"],
+        zoom_mapping,
+        params["zoom_curvature"],
+        horizontal_fov=horizontal_fov,
+    )
+
+
+def _wrap_degrees(value: float) -> float:
+    return (float(value) + 180.0) % 360.0 - 180.0
+
+
+def _direction_angles(direction: dict[str, float]) -> tuple[float, float]:
+    horizontal = math.hypot(direction["x"], direction["y"])
+    return (
+        math.degrees(math.atan2(direction["x"], direction["y"])),
+        math.degrees(math.atan2(direction["z"], horizontal)),
+    )
+
+
+def _residuals_for_parameters(
+    params: dict[str, float], profile: dict[str, Any], zoom_mapping: dict[str, Any],
+    dot_calibration: dict[str, Any], *, axes: str = "both", include_models: bool = False,
+    use_profile_fov: bool = True, metric: str = "bearing",
+):
+    """Return symmetric residuals for repeated marker observations.
+
+    ``metric='bearing'`` is used for optimisation. Every dragged image point is
+    converted into a world-space ray using the candidate camera model. All rays
+    for the same physical marker must agree on one common azimuth/elevation.
+    This is unbiased for pure camera rotation and cleanly separates Pan/FOV
+    fitting from absolute target depth.
+
+    ``metric='pixels'`` is used only for operator-facing RMS diagnostics and
+    target-model generation. It reprojects the common ray into each view.
+    """
+    if axes not in {"x", "y", "both"}:
+        raise DotCalibrationError("Dot calibration residual axis must be x, y or both")
+    if metric not in {"bearing", "pixels"}:
+        raise DotCalibrationError("Dot calibration residual metric must be bearing or pixels")
     result: list[float] = []
     models: dict[str, dict[str, dict[str, float]]] = {}
     used_points = 0
@@ -419,10 +451,7 @@ def _residuals(
             if not points:
                 continue
             try:
-                camera = _camera_for_observation(
-                    observation, profile, params["pan_ratio"], params["tilt_ratio"],
-                    zoom_mapping, params["zoom_curvature"],
-                )
+                camera = _camera_for_parameters(observation, profile, zoom_mapping, params, use_profile_fov)
             except DotCalibrationError:
                 continue
             if reference_camera is None:
@@ -443,14 +472,22 @@ def _residuals(
             if common is None:
                 continue
             marker_directions[marker_id] = common
-            for observation, camera, observed, _direction in entries:
-                projected = _project_direction(common, camera)
-                if not projected:
-                    continue
-                result.extend((
-                    (projected["x"] - float(observed["x"])) * REFERENCE_WIDTH,
-                    (projected["y"] - float(observed["y"])) * REFERENCE_HEIGHT,
-                ))
+            common_pan, common_tilt = _direction_angles(common)
+            for observation, camera, observed, direction in entries:
+                if metric == "bearing":
+                    ray_pan, ray_tilt = _direction_angles(direction)
+                    if axes in {"x", "both"}:
+                        result.append(_wrap_degrees(ray_pan - common_pan))
+                    if axes in {"y", "both"}:
+                        result.append(ray_tilt - common_tilt)
+                else:
+                    projected = _project_direction(common, camera)
+                    if not projected:
+                        continue
+                    if axes in {"x", "both"}:
+                        result.append((projected["x"] - float(observed["x"])) * REFERENCE_WIDTH)
+                    if axes in {"y", "both"}:
+                        result.append((projected["y"] - float(observed["y"])) * REFERENCE_HEIGHT)
                 used_points += 1
                 used_observation_ids.add(str(observation.get("id") or id(observation)))
 
@@ -485,144 +522,315 @@ def _solve_linear(matrix: list[list[float]], vector: list[float]) -> list[float]
 
 def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, Any], zoom_mapping: dict[str, Any]) -> dict[str, Any]:
     dot_calibration = normalise_dot_calibration(dot_calibration)
-    all_names, all_initial = _parameter_model(profile, zoom_mapping, dot_calibration)
+    coverage, counts = _coverage_counts(dot_calibration)
+    base_params = _base_parameters(profile, zoom_mapping)
+    params = dict(base_params)
 
-    def optimise(names: list[str], initial_values: list[float]) -> tuple[list[float], list[float], list[float], bool]:
-        initial_residual = _residuals(names, initial_values, profile, zoom_mapping, dot_calibration)
-        if len(initial_residual) < 8:
-            raise DotCalibrationError("Need at least four repeated marker placements across two or more views")
-        params = initial_values[:]
+    wide, tight = zoom_mapping.get("wide"), zoom_mapping.get("tight")
+    zoom_complete = bool(
+        wide and tight
+        and wide.get("reference_id")
+        and wide.get("reference_id") == tight.get("reference_id")
+        and int(wide.get("relative_count")) != int(tight.get("relative_count"))
+    )
+    # With an incomplete Zoom mapping the profile FOV is the only lens model
+    # available. Repeated fixed-Zoom observations can therefore solve that FOV
+    # jointly with Pan/Tilt gearing. Once both Zoom endpoints exist, their
+    # physical mapping owns FOV and the dot solver only refines curve shape.
+    use_profile_fov = not zoom_complete
+
+    initial_bearing = _residuals_for_parameters(
+        base_params, profile, zoom_mapping, dot_calibration,
+        axes="both", use_profile_fov=use_profile_fov, metric="bearing",
+    )
+    if len(initial_bearing) < 8:
+        raise DotCalibrationError("Need more camera movement: at least four repeated marker placements across two or more views")
+    initial_full = _residuals_for_parameters(
+        base_params, profile, zoom_mapping, dot_calibration,
+        axes="both", use_profile_fov=use_profile_fov, metric="pixels",
+    )
+
+    parameters: list[str] = []
+    converged_all = True
+
+    def bounded(candidate: dict[str, float], stage_names: list[str]) -> dict[str, float]:
+        result = dict(candidate)
+        for name in stage_names:
+            if name == "pan_ratio":
+                base = base_params["pan_ratio"]
+                result[name] = max(base * 0.25, min(base * 4.0, float(result[name])))
+            elif name == "tilt_ratio":
+                base = base_params["tilt_ratio"]
+                result[name] = max(base * 0.25, min(base * 4.0, float(result[name])))
+            elif name == "horizontal_fov":
+                result[name] = max(5.0, min(160.0, float(result[name])))
+            elif name == "zoom_curvature":
+                result[name] = max(-1.0, min(4.0, float(result[name])))
+        return result
+
+    def optimise(stage_names: list[str], axes: str) -> tuple[dict[str, float], bool]:
+        if not stage_names:
+            return dict(params), True
+        start_params = dict(params)
+        stage_initial = {name: start_params[name] for name in stage_names}
+        initial_residual = _residuals_for_parameters(
+            start_params, profile, zoom_mapping, dot_calibration,
+            axes=axes, use_profile_fov=use_profile_fov,
+        )
+        if len(initial_residual) < 4:
+            raise DotCalibrationError("Need more repeated marker placements for this calibration axis")
+        current = dict(start_params)
         damping = 1e-2
+        converged = False
 
-        def bounded(values: list[float]) -> list[float]:
-            result = values[:]
-            for index, name in enumerate(names):
-                if name == "pan_ratio":
-                    base = float(profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"])
-                    result[index] = max(base * 0.25, min(base * 4.0, result[index]))
-                elif name == "tilt_ratio":
-                    base = float(profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"])
-                    result[index] = max(base * 0.25, min(base * 4.0, result[index]))
-                elif name == "zoom_curvature":
-                    result[index] = max(-1.0, min(4.0, result[index]))
-            return result
-
-        def objective(values: list[float]) -> tuple[float, list[float]]:
-            residual = _residuals(names, values, profile, zoom_mapping, dot_calibration)
+        def objective(values: dict[str, float]) -> tuple[float, list[float]]:
+            residual = _residuals_for_parameters(
+                values, profile, zoom_mapping, dot_calibration,
+                axes=axes, use_profile_fov=use_profile_fov,
+            )
             if len(residual) != len(initial_residual):
                 return float("inf"), residual
             cost = _cost(residual)
-            # Guard rails only. Image correspondences dominate these tiny priors.
-            for name, value, initial in zip(names, values, initial_values):
+            # These are guard rails, not competing measurements. The dragged
+            # marker correspondences should dominate the fitted camera model.
+            for name in stage_names:
+                value, initial = values[name], stage_initial[name]
                 if name.endswith("ratio"):
-                    scale = max(abs(initial) * 0.20, 0.05)
-                    cost += 0.05 * ((value - initial) / scale) ** 2
+                    scale = max(abs(initial) * 0.25, 0.05)
+                    cost += 1e-8 * ((value - initial) / scale) ** 2
+                elif name == "horizontal_fov":
+                    cost += 1e-8 * ((value - initial) / 25.0) ** 2
                 else:
-                    cost += 0.01 * ((value - initial) / 2.0) ** 2
+                    cost += 1e-7 * ((value - initial) / 2.0) ** 2
             return cost, residual
 
-        converged = False
-        for _ in range(100):
-            base_cost, residual = objective(params)
+        # One-dimensional stages are common and can be solved much more
+        # deterministically than by repeated damped Newton steps. A coarse
+        # scan followed by golden-section refinement prevents tiny solve/apply
+        # cycles from walking the result.
+        if len(stage_names) == 1:
+            name = stage_names[0]
+            if name == "pan_ratio":
+                lo, hi = base_params["pan_ratio"] * 0.25, base_params["pan_ratio"] * 4.0
+            elif name == "tilt_ratio":
+                lo, hi = base_params["tilt_ratio"] * 0.25, base_params["tilt_ratio"] * 4.0
+            elif name == "horizontal_fov":
+                lo, hi = 5.0, 160.0
+            else:
+                lo, hi = -1.0, 4.0
+
+            samples = 81
+            grid = [lo + (hi - lo) * index / (samples - 1) for index in range(samples)]
+            costs = []
+            for value in grid:
+                trial = dict(current)
+                trial[name] = value
+                costs.append(objective(trial)[0])
+            best_index = min(range(samples), key=lambda index: costs[index])
+            left = grid[max(0, best_index - 1)]
+            right = grid[min(samples - 1, best_index + 1)]
+            if right <= left:
+                result = dict(current)
+                result[name] = grid[best_index]
+                return bounded(result, stage_names), True
+
+            phi = (math.sqrt(5.0) - 1.0) / 2.0
+            x1 = right - phi * (right - left)
+            x2 = left + phi * (right - left)
+
+            def scalar_cost(value: float) -> float:
+                trial = dict(current)
+                trial[name] = value
+                return objective(trial)[0]
+
+            f1, f2 = scalar_cost(x1), scalar_cost(x2)
+            for _ in range(100):
+                if f1 <= f2:
+                    right, x2, f2 = x2, x1, f1
+                    x1 = right - phi * (right - left)
+                    f1 = scalar_cost(x1)
+                else:
+                    left, x1, f1 = x1, x2, f2
+                    x2 = left + phi * (right - left)
+                    f2 = scalar_cost(x2)
+                if abs(right - left) < 1e-11 * max(1.0, abs((right + left) / 2.0)):
+                    break
+            result = dict(current)
+            result[name] = (left + right) / 2.0
+            return bounded(result, stage_names), True
+
+        for _ in range(120):
+            base_cost, residual = objective(current)
             if not math.isfinite(base_cost):
                 raise DotCalibrationError("Dot calibration objective is invalid")
-            jacobian = [[0.0] * len(params) for _ in residual]
-            for column, name in enumerate(names):
-                step = 1e-5 * max(1.0, abs(params[column])) if name.endswith("ratio") else 1e-4
-                trial = params[:]
-                trial[column] += step
-                _, shifted = objective(bounded(trial))
+            jacobian = [[0.0] * len(stage_names) for _ in residual]
+            for column, name in enumerate(stage_names):
+                if name.endswith("ratio"):
+                    step = 1e-5 * max(1.0, abs(current[name]))
+                elif name == "horizontal_fov":
+                    step = 1e-3
+                else:
+                    step = 1e-4
+                trial = dict(current)
+                trial[name] += step
+                trial = bounded(trial, stage_names)
+                _, shifted = objective(trial)
                 if len(shifted) != len(residual):
                     continue
+                actual_step = trial[name] - current[name]
+                if abs(actual_step) < 1e-12:
+                    continue
                 for row in range(len(residual)):
-                    jacobian[row][column] = (shifted[row] - residual[row]) / step
-            normal = [[sum(jacobian[k][i] * jacobian[k][j] for k in range(len(residual))) for j in range(len(params))] for i in range(len(params))]
-            gradient = [sum(jacobian[k][i] * residual[k] for k in range(len(residual))) for i in range(len(params))]
-            for index in range(len(params)):
+                    jacobian[row][column] = (shifted[row] - residual[row]) / actual_step
+            normal = [
+                [sum(jacobian[k][i] * jacobian[k][j] for k in range(len(residual))) for j in range(len(stage_names))]
+                for i in range(len(stage_names))
+            ]
+            gradient = [sum(jacobian[k][i] * residual[k] for k in range(len(residual))) for i in range(len(stage_names))]
+            for index in range(len(stage_names)):
                 normal[index][index] += damping
             try:
                 delta = _solve_linear(normal, [-value for value in gradient])
             except DotCalibrationError:
                 damping *= 10.0
                 continue
-            candidate = bounded([value + change for value, change in zip(params, delta)])
+            candidate = dict(current)
+            for name, change in zip(stage_names, delta):
+                candidate[name] += change
+            candidate = bounded(candidate, stage_names)
             candidate_cost, _ = objective(candidate)
             if candidate_cost < base_cost:
-                params = candidate
-                damping = max(1e-8, damping / 3.0)
+                current = candidate
+                damping = max(1e-9, damping / 3.0)
                 if max(abs(change) for change in delta) < 1e-7:
                     converged = True
                     break
             else:
                 damping *= 10.0
-        final_residual = _residuals(names, params, profile, zoom_mapping, dot_calibration)
-        return params, initial_residual, final_residual, converged
+        return current, converged
 
-    names = all_names[:]
-    initial_values = all_initial[:]
-    params, initial_residual, final_residual, converged = optimise(names, initial_values)
+    # Pan/FOV are strongly coupled in image space. Estimate FOV only when one
+    # camera axis clearly dominates the session; with substantial simultaneous
+    # Pan and Tilt movement the same sparse correspondences can trade FOV against
+    # both gear ratios and become weakly conditioned. The common start-of-day
+    # workflow (Pan sweep with Tilt nearly fixed) is therefore ideal and remains
+    # fully free-form rather than requiring prescribed angles.
+    pan_dominant = coverage["pan"] >= 8 and coverage["tilt"] < max(8, int(coverage["pan"] * 0.15))
+    tilt_dominant = coverage["tilt"] >= 8 and coverage["pan"] < max(8, int(coverage["tilt"] * 0.15))
+    pan_stage: list[str] = []
+    tilt_stage: list[str] = []
+    if coverage["pan"] >= 8:
+        pan_stage = ["pan_ratio"]
+        if use_profile_fov and pan_dominant:
+            pan_stage.append("horizontal_fov")
+    if coverage["tilt"] >= 8:
+        tilt_stage = ["tilt_ratio"]
+        if not pan_stage and use_profile_fov and tilt_dominant:
+            tilt_stage.append("horizontal_fov")
+
+    for name in pan_stage + tilt_stage:
+        if name not in parameters:
+            parameters.append(name)
+
+    # Pan and Tilt rays are weakly coupled through the camera rotation. When
+    # both axes have useful coverage, alternate the independent horizontal and
+    # vertical fits a few times so applying the result and solving again does
+    # not cause the ratios to walk.
+    cycles = 3 if pan_stage and tilt_stage else 1
+    for _ in range(cycles):
+        if pan_stage:
+            params, converged = optimise(pan_stage, "x")
+            converged_all = converged_all and converged
+        if tilt_stage:
+            params, converged = optimise(tilt_stage, "y")
+            converged_all = converged_all and converged
 
     zoom_saturated = False
-    if "zoom_curvature" in names:
-        zoom_index = names.index("zoom_curvature")
-        zoom_value = params[zoom_index]
+    if zoom_complete and coverage["zoom"] >= 10:
+        before_zoom = params["zoom_curvature"]
+        candidate, converged = optimise(["zoom_curvature"], "both")
+        zoom_value = candidate["zoom_curvature"]
         zoom_saturated = zoom_value <= -0.9995 or zoom_value >= 3.9995
-        # A boundary hit means this one-number lens model cannot explain the data.
-        # Do not let a bad Zoom parameter drag the otherwise useful Pan/Tilt fit.
-        if zoom_saturated and len(names) > 1:
-            names = [name for name in all_names if name != "zoom_curvature"]
-            initial_values = [value for name, value in zip(all_names, all_initial) if name != "zoom_curvature"]
-            params, initial_residual, final_residual, converged = optimise(names, initial_values)
+        if not zoom_saturated:
+            params = candidate
+            converged_all = converged_all and converged
+            parameters.append("zoom_curvature")
+        else:
+            params["zoom_curvature"] = before_zoom
 
-    final_residual, models, used_points, used_observations = _residuals(
-        names, params, profile, zoom_mapping, dot_calibration, include_models=True,
+    if not parameters:
+        raise DotCalibrationError("Need more camera movement before Dot calibration can refine the model")
+
+    final_full, models, used_points, used_observations = _residuals_for_parameters(
+        params, profile, zoom_mapping, dot_calibration,
+        axes="both", include_models=True, use_profile_fov=use_profile_fov, metric="pixels",
     )
-    if not final_residual:
+    if not final_full:
         raise DotCalibrationError("Dot calibration has no usable repeated marker correspondences")
 
-    initial_rms = math.sqrt(_cost(initial_residual) / len(initial_residual))
-    final_rms = math.sqrt(_cost(final_residual) / len(final_residual))
-    current = _values_dict(names, initial_values, profile, zoom_mapping)
-    proposed = _values_dict(names, params, profile, zoom_mapping)
-    counts = {axis: [] for axis in ("pan", "tilt", "zoom")}
-    for target in dot_calibration.get("targets") or []:
-        for observation in target.get("observations") or []:
-            axes = observation.get("axes") or {}
-            for axis in ("pan", "tilt"):
-                value = (axes.get(axis) or {}).get("raw_count")
-                if value is not None:
-                    counts[axis].append(int(value))
-            value = (axes.get("zoom") or {}).get("relative_count")
-            if value is not None:
-                counts["zoom"].append(int(value))
-    coverage = {axis: (max(values) - min(values) if values else 0) for axis, values in counts.items()}
+    initial_x = _residuals_for_parameters(base_params, profile, zoom_mapping, dot_calibration, axes="x", use_profile_fov=use_profile_fov, metric="pixels")
+    final_x = _residuals_for_parameters(params, profile, zoom_mapping, dot_calibration, axes="x", use_profile_fov=use_profile_fov, metric="pixels")
+    initial_y = _residuals_for_parameters(base_params, profile, zoom_mapping, dot_calibration, axes="y", use_profile_fov=use_profile_fov, metric="pixels")
+    final_y = _residuals_for_parameters(params, profile, zoom_mapping, dot_calibration, axes="y", use_profile_fov=use_profile_fov, metric="pixels")
+
+    def rms(values: list[float]) -> float | None:
+        return math.sqrt(_cost(values) / len(values)) if values else None
+
+    initial_rms = rms(initial_full) or 0.0
+    final_rms = rms(final_full) or 0.0
+
+    # If a single Zoom endpoint already exists and all observations were made
+    # very close to that endpoint, bind the newly solved constant FOV to that
+    # endpoint as well as the profile. This prevents a future second endpoint
+    # capture from resurrecting the old incorrect FOV value.
+    fov_anchor = None
+    if "horizontal_fov" in parameters and counts["zoom"]:
+        sorted_zoom = sorted(counts["zoom"])
+        median_zoom = sorted_zoom[len(sorted_zoom) // 2]
+        existing = [(name, zoom_mapping.get(name)) for name in ("wide", "tight") if zoom_mapping.get(name)]
+        if len(existing) == 1:
+            point_name, point = existing[0]
+            endpoint_count = int(point["relative_count"])
+            if abs(median_zoom - endpoint_count) <= 50:
+                fov_anchor = {"point": point_name, "observation_count": median_zoom, "endpoint_count": endpoint_count}
 
     warnings: list[str] = []
+    if use_profile_fov and "horizontal_fov" not in parameters and coverage["pan"] >= 8 and coverage["tilt"] >= 8:
+        warnings.append("Horizontal FOV was held because this observation set contains substantial Pan and Tilt movement. A mostly-Pan or mostly-Tilt sweep can solve FOV cleanly without coupling it to both gear ratios.")
     if zoom_saturated:
-        warnings.append("Zoom fit hit the limit of the current one-curve lens model. Zoom correction was excluded from this proposal; Pan/Tilt still use the marker observations.")
+        warnings.append("Zoom fit hit the limit of the current one-curve lens model. Zoom correction was excluded from this proposal; Pan/Tilt/FOV still use the marker observations.")
+    if "horizontal_fov" in parameters and abs(params["horizontal_fov"] - base_params["horizontal_fov"]) >= 10.0:
+        warnings.append("The marker data indicates the current horizontal FOV is substantially wrong. This is expected to cause large Pan drift until the proposed FOV and Pan ratio are applied together.")
     if final_rms > 12.0:
         warnings.append("Residual image error is still high. Add more well-spread observations or review marker identity/placement before trusting the refinement.")
 
     return {
         "solved": True,
-        "converged": converged,
-        "parameters": names,
-        "current": current,
-        "proposed": proposed,
+        "converged": converged_all,
+        "parameters": parameters,
+        "current": dict(base_params),
+        "proposed": dict(params),
         "rms_before_px": initial_rms,
         "rms_after_px": final_rms,
+        "rms_x_before_px": rms(initial_x),
+        "rms_x_after_px": rms(final_x),
+        "rms_y_before_px": rms(initial_y),
+        "rms_y_after_px": rms(final_y),
         "improvement_percent": 0.0 if initial_rms <= 1e-9 else max(-999.0, min(100.0, (initial_rms - final_rms) * 100.0 / initial_rms)),
         "matched_points": used_points,
         "observation_sets": used_observations,
         "coverage": coverage,
         "target_models": models,
         "zoom_saturated": zoom_saturated,
+        "fov_anchor": fov_anchor,
         "warnings": warnings,
         "notes": [
-            "Repeated marker placements are equal-authority image measurements; Observation 1 is no longer hidden 3D truth.",
-            "Approximate target distance is used only to give solved bearings a finite display depth; measured rectangle dimensions can provide metric scale.",
-            "V2 refines Pan/Tilt encoder gearing and, when the current lens model can support it, Zoom curve shape.",
-            "Rig-offset and lens-distortion solving remain separate future refinements.",
+            "Repeated marker placements are equal-authority image measurements; Observation 1 is not hidden 3D truth.",
+            "Pan encoder ratio and horizontal FOV are solved together from horizontal marker motion when Zoom is not fully calibrated.",
+            "Tilt ratio is solved only when the observation set contains meaningful Tilt movement.",
+            "Approximate target distance supplies display scale only; it does not drive Pan/Tilt/FOV fitting.",
+            "Absolute Pan/Tilt world-zero offsets are not observable from repeated image correspondences alone and are deliberately not invented.",
+            "Rig-offset, absolute venue/world pose, and lens-distortion solving remain separate refinements.",
         ],
     }
 

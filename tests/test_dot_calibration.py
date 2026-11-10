@@ -171,6 +171,49 @@ class DotCalibrationMathCase(unittest.TestCase):
         self.assertAlmostEqual(second["proposed"]["tilt_ratio"], first["proposed"]["tilt_ratio"], places=5)
         self.assertLess(second["rms_after_px"], 0.01)
 
+
+    def test_solver_jointly_recovers_pan_ratio_and_horizontal_fov_when_tilt_is_static(self):
+        # Regression for the real failure mode where a wrong fixed FOV was
+        # being absorbed into the Pan gear ratio. Tilt barely moves, so it must
+        # not be changed by this session.
+        profile = profile_fixture(3.28, 2.21, 77.6)
+        zoom = {
+            "wide": {"relative_count": 0, "fov": 77.6, "reference_id": "Z1"},
+            "tight": None,
+            "curvature": 0.0,
+        }
+        true_pan, true_fov = 4.72, 56.0
+        baseline = observation(
+            "O1", pan_raw=60, tilt_raw=0, zoom_count=-20, points=BASE_POINTS,
+            refs={"pan": "P1", "tilt": "T1", "zoom": "Z1"}, fov=77.6,
+        )
+        baseline_camera = _camera_for_observation(
+            baseline, profile, true_pan, 2.21, zoom, 0.0, horizontal_fov=true_fov,
+        )
+        world = _world_points_for_baseline({"type": "free", "approx_distance_m": 12.0}, baseline, baseline_camera)
+        observations = [baseline]
+        for index, pan_raw in enumerate((310, -580, -5), 2):
+            obs = observation(
+                f"O{index}", pan_raw=pan_raw, tilt_raw=1, zoom_count=-20,
+                refs={"pan": "P1", "tilt": "T1", "zoom": "Z1"}, fov=77.6,
+            )
+            camera = _camera_for_observation(
+                obs, profile, true_pan, 2.21, zoom, 0.0, horizontal_fov=true_fov,
+            )
+            obs["points"] = {marker_id: _project(point, camera) for marker_id, point in world.items()}
+            observations.append(obs)
+        solved = solve_dot_calibration(
+            profile, {"targets": [target_with(observations)], "active_target_id": "target-1"}, zoom,
+        )
+        self.assertIn("pan_ratio", solved["parameters"])
+        self.assertIn("horizontal_fov", solved["parameters"])
+        self.assertNotIn("tilt_ratio", solved["parameters"])
+        self.assertAlmostEqual(solved["proposed"]["pan_ratio"], true_pan, places=2)
+        self.assertAlmostEqual(solved["proposed"]["horizontal_fov"], true_fov, places=1)
+        self.assertAlmostEqual(solved["proposed"]["tilt_ratio"], 2.21, places=6)
+        self.assertLess(solved["rms_x_after_px"], 0.1)
+        self.assertEqual(solved["fov_anchor"]["point"], "wide")
+
     def test_solver_recovers_nonlinear_zoom_curve_without_moving_endpoints(self):
         profile = profile_fixture(3.6, 2.5)
         zoom = {
@@ -249,9 +292,12 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)
             await self.configure_angle_axes(store)
+            profile_id = store.profile_index["active_id"]
+            await store.update_axis_config(profile_id, "zoom", {"source": "quadrature_gpio", "source_config": {"line_a": 5, "line_b": 6}})
             store.sample_tick({
                 "pan": self.axis_sample("PAN-REF", raw_count=500, reference_count=100),
                 "tilt": self.axis_sample("TILT-REF", raw_count=250, reference_count=50),
+                "zoom": self.axis_sample("ZOOM-REF", raw_count=-20, reference_count=0),
             })
             before = {axis: deepcopy(store.tracking["axes"][axis]) for axis in ("pan", "tilt")}
             target = target_with([])
@@ -260,16 +306,26 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             data = {
                 "targets": [target], "active_target_id": target["id"],
                 "last_solution": {
-                    "solved": True, "parameters": ["pan_ratio", "tilt_ratio"],
-                    "proposed": {"pan_ratio": 3.6, "tilt_ratio": 2.5, "zoom_curvature": 0.0},
+                    "solved": True, "parameters": ["pan_ratio", "tilt_ratio", "horizontal_fov"],
+                    "proposed": {"pan_ratio": 3.6, "tilt_ratio": 2.5, "horizontal_fov": 56.0, "zoom_curvature": 0.0},
+                    "fov_anchor": {"point": "wide", "observation_count": -20, "endpoint_count": 0},
                     "target_models": {target["id"]: refined_model},
                 },
             }
+            store.zoom_fov_mapping.update({
+                "wide": {"relative_count": 0, "fov": 77.6, "reference_id": "ZOOM-REF"},
+                "tight": None, "curvature": 0.0,
+            })
             await store.update_dot_calibration(data)
             self.assertEqual(store.world_calibration["dot_calibration"]["targets"][0]["model_points"]["M1"]["y"], 10.0)
             result = await store.apply_dot_calibration_solution()
             self.assertAlmostEqual(result["pan_ratio"], 3.6)
             self.assertAlmostEqual(result["tilt_ratio"], 2.5)
+            self.assertAlmostEqual(result["horizontal_fov"], 56.0)
+            self.assertAlmostEqual(store.profile["camera"]["fov"], 56.0)
+            self.assertAlmostEqual(store.zoom_fov_mapping["wide"]["fov"], 56.0)
+            self.assertEqual(store.zoom_fov_mapping["wide"]["relative_count"], 0)
+            self.assertEqual(store.zoom_fov_mapping["wide"]["reference_id"], "ZOOM-REF")
             for axis in ("pan", "tilt"):
                 for key in ("raw_count", "reference_count", "reference_id", "driver_alive"):
                     self.assertEqual(store.tracking["axes"][axis][key], before[axis][key])
