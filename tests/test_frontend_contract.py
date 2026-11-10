@@ -283,6 +283,8 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn('data-integrity-policy', engineering)
         self.assertIn('Prototype wiring mode — keep tracking through encoder warnings', engineering)
         self.assertIn('PROTOTYPE TOLERANCE ON', engineering)
+        self.assertIn('Lens position is still being tracked, but may be inaccurate', engineering)
+        self.assertRegex(engineering, r"positionAxis&&runtime\.referenced&&runtime\.integrity==='SUSPECT'")
         self.assertIn("supportsPrototypePolicy(axis,config.source)&&sc.integrity_policy==='prototype'", engineering)
         self.assertIn("source==='quadrature_gpio'&&runtime.integrity_policy==='prototype'", engineering)
         self.assertIn('prototypeCalibrationWarning', calibration)

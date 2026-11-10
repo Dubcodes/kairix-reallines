@@ -206,6 +206,8 @@ function renderEncoderDiagnostics(axis,card,runtime){
       ? 'Encoder data was lost. Set the lens position again.'
       : prototype&&runtime.integrity==='SUSPECT'
         ? 'Prototype wiring mode is enabled. Encoder warnings were detected. Position is still being tracked, but may not be accurate.'
+        : positionAxis&&runtime.referenced&&runtime.integrity==='SUSPECT'
+          ? 'Encoder warnings detected. Lens position is still being tracked, but may be inaccurate. Verify the lens position when practical.'
         : runtime.integrity==='SUSPECT'
           ? `${axis.toUpperCase()}: ${runtime.integrity_reason||'Possible encoder count loss'}. Tracking is still operating, but the absolute angle may be wrong. Verify and set the camera position again to restore confidence.`
           : prototype?'PROTOTYPE TOLERANCE ON — tracking continues through encoder warnings; verify position before final calibration.':'';

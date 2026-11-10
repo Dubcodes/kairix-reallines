@@ -200,6 +200,58 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
                 self.assertGreater(snapshot["integrity_fault_events"], 0)
                 self.assertGreater(snapshot["warnings_tolerated_since_reference"], 0)
 
+    def test_strict_zoom_retains_reference_for_all_soft_integrity_warning_classes(self):
+        cases = (
+            lambda worker: (
+                worker.process_edge(6, True, 1, global_seqno=1, line_seqno=1),
+                worker.process_edge(5, True, 2, global_seqno=3, line_seqno=1),
+            ),
+            lambda worker: (
+                worker.process_edge(6, True, 1, global_seqno=1, line_seqno=1),
+                worker.process_edge(6, False, 2, global_seqno=2, line_seqno=3),
+            ),
+            lambda worker: worker.process_levels(1, 1, 1),
+        )
+        for exercise in cases:
+            worker = QuadratureGpioWorker("zoom", worker_config("zoom", 5, 6))
+            worker.begin_acquisition(0, 0)
+            reference_id = worker.set_reference(0)
+            reference_count = worker.snapshot()["reference_count"]
+            exercise(worker)
+            snapshot = worker.snapshot(2)
+            self.assertTrue(snapshot["referenced"])
+            self.assertEqual(snapshot["reference_id"], reference_id)
+            self.assertEqual(snapshot["reference_count"], reference_count)
+            self.assertEqual(snapshot["integrity"], "SUSPECT")
+            self.assertEqual(snapshot["calibration_confidence"], "SUSPECT")
+            self.assertEqual(snapshot["warnings_tolerated_since_reference"], 0)
+
+    def test_strict_pan_and_tilt_retain_reference_on_soft_warning(self):
+        for axis, line_a, line_b in (("pan", 17, 27), ("tilt", 22, 23)):
+            worker = QuadratureGpioWorker(axis, worker_config(axis, line_a, line_b))
+            worker.begin_acquisition(0, 0)
+            reference_id = worker.set_reference(0)
+            worker.process_levels(1, 1, 1)
+            self.assertEqual(worker.snapshot(1)["reference_id"], reference_id)
+            self.assertEqual(worker.snapshot(1)["integrity"], "SUSPECT")
+
+    def test_hard_failure_clears_strict_and_prototype_zoom_references(self):
+        for config in (worker_config("zoom", 5, 6), prototype_worker_config("zoom", 5, 6)):
+            worker = QuadratureGpioWorker("zoom", config)
+            worker.begin_acquisition(0, 0)
+            worker.set_reference(0)
+            worker.clear_reference()
+            self.assertFalse(worker.snapshot()["referenced"])
+            worker.set_reference(0)
+            worker.begin_acquisition(0, 0)
+            self.assertFalse(worker.snapshot()["referenced"])
+            worker.set_reference(0)
+            worker._set_error("GPIO request failed")
+            snapshot = worker.snapshot()
+            self.assertFalse(snapshot["referenced"])
+            self.assertIsNone(snapshot["reference_id"])
+            self.assertIsNone(snapshot["reference_count"])
+
     def test_prototype_pan_and_tilt_keep_reference_but_lifecycle_faults_clear_it(self):
         for axis, line_a, line_b in (("pan", 17, 27), ("tilt", 22, 23)):
             with self.subTest(axis=axis):
@@ -550,8 +602,8 @@ class DualGpioManagerCase(unittest.TestCase):
         self.assertNotIn("degrees_per_second", zoom.snapshot())
 
         zoom.process_levels(1, 1, 1_000_000_000)
-        self.assertFalse(zoom.snapshot()["referenced"])
-        self.assertIsNone(zoom.snapshot()["reference_id"])
+        self.assertTrue(zoom.snapshot()["referenced"])
+        self.assertEqual(zoom.snapshot()["reference_id"], zoom_reference)
         self.assertTrue(zoom.snapshot()["integrity_lost"])
         self.assertEqual(pan.snapshot()["reference_id"], pan_reference)
         self.assertEqual(tilt.snapshot()["reference_id"], tilt_reference)
@@ -753,9 +805,13 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(store.tracking["valid"])
 
             zoom.process_levels(1, 1, 1_000_000_000)
+            zoom.decoder.count = 5808
             store.sample_tick({"zoom": zoom.snapshot(1_000_000_000)})
-            self.assertFalse(store.tracking["axes"]["zoom"]["referenced"])
-            self.assertFalse(store.tracking["axes"]["zoom"]["valid"])
+            self.assertTrue(store.tracking["axes"]["zoom"]["referenced"])
+            self.assertTrue(store.tracking["axes"]["zoom"]["valid"])
+            self.assertEqual(store.tracking["axes"]["zoom"]["relative_count"], 5808)
+            self.assertEqual(store.tracking["axes"]["zoom"]["health"], "SUSPECT")
+            self.assertEqual(store.tracking["axes"]["zoom"]["calibration_confidence"], "SUSPECT")
             self.assertTrue(store.tracking["valid"])
             self.assertEqual(store.camera["fov"], 47.5)
 

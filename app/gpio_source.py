@@ -180,11 +180,6 @@ class QuadratureGpioWorker:
 
     def _mark_integrity_suspect_locked(self, reason: str, timestamp_ns: int) -> None:
         prototype = self.integrity_policy == "prototype"
-        if self.axis in POSITION_ENCODER_AXES and not prototype:
-            self._snapshot["integrity_fault_events"] += 1
-            self._invalidate_reference_locked(f"{reason}; set the lens position again", integrity_loss=True)
-            self._snapshot["integrity_since_ns"] = self._snapshot["integrity_since_ns"] or int(timestamp_ns)
-            return
         already_suspect = self._snapshot["integrity"] == "SUSPECT"
         self._snapshot["integrity_fault_events"] += 1
         if prototype and self._snapshot["referenced"]:
