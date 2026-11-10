@@ -47,6 +47,17 @@ class TemporaryZoomMathCase(unittest.TestCase):
         reverse = temporary_zoom_fov(750, 1000, 64.6, 0, 10.0)
         self.assertAlmostEqual(forward, reverse)
 
+    def test_curvature_preserves_endpoints_and_changes_only_the_interior_curve(self):
+        linear_mid = temporary_zoom_fov(500, 0, 52.17, 1000, 12.77)
+        curved_mid = temporary_zoom_fov(500, 0, 52.17, 1000, 12.77, 0.8)
+        self.assertNotAlmostEqual(linear_mid, curved_mid)
+        self.assertAlmostEqual(temporary_zoom_fov(0, 0, 52.17, 1000, 12.77, 0.8), 52.17)
+        self.assertAlmostEqual(temporary_zoom_fov(1000, 0, 52.17, 1000, 12.77, 0.8), 12.77)
+        with self.assertRaisesRegex(ValueError, r"between -1 and \+4"):
+            temporary_zoom_fov(500, 0, 52.17, 1000, 12.77, -1.01)
+        with self.assertRaisesRegex(ValueError, r"between -1 and \+4"):
+            temporary_zoom_fov(500, 0, 52.17, 1000, 12.77, 4.01)
+
     def test_invalid_calibration_points_are_rejected(self):
         cases = (
             (0, 0, 64.6, 0, 10.0, "different counts"),
@@ -149,9 +160,11 @@ class TemporaryZoomStateCase(unittest.IsolatedAsyncioTestCase):
 
             second_reference = zoom.set_reference(0)
             self.assertNotEqual(first_reference, second_reference)
+            store.zoom_fov_mapping["curvature"] = 0.8
             store.sample_tick({"zoom": zoom.snapshot()})
             self.assertIsNone(store.zoom_fov_mapping["wide"])
             self.assertIsNone(store.zoom_fov_mapping["tight"])
+            self.assertEqual(store.zoom_fov_mapping["curvature"], 0.0)
             self.assertFalse(store.zoom_fov_mapping["active"])
             self.assertIn("REFERENCE CHANGED", store.zoom_fov_mapping["status"])
             self.assertAlmostEqual(store.camera["fov"], 64.6)

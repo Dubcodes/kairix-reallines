@@ -48,6 +48,7 @@ def default_world_calibration(name: str, profile_id: str) -> dict[str, Any]:
         "solution": None,
         "valid": False,
         "status": "NOT CALIBRATED",
+        "dot_calibration": {"targets": [], "active_target_id": None, "last_solution": None},
     }
 
 

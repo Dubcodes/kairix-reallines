@@ -3,7 +3,44 @@
 <div class="grid calibration-grid">
 <section class="panel"><h2>Active setup</h2><strong id="activeProfile">—</strong><p id="profileMatch" class="small"></p></section>
 <section id="prototypeCalibrationWarning" class="panel span-all form-error" hidden><strong>Prototype encoder tolerance is active.</strong> Camera/venue calibration can be used for development, but results should not be treated as final until encoder integrity is restored.</section>
-<section class="panel span-all dot-lock-panel"><h2>Dot Lock — Visual Calibration</h2><p class="small">Session-only development aid. Place dots on recognisable features, capture this view, then Pan/Tilt/Zoom and tune the model while the predicted dots use the delayed render camera. This is not an automatic solver.</p><div class="row"><label>Approximate target distance (m)<input id="dotLockDistance" type="number" min="0.1" step="0.1" value="10"></label><button id="newDotLock">Start new Dot Lock session</button><button id="addDotLock">Add dot</button><button id="captureDotLock" class="primary">Capture/reference current view</button><button id="deleteDotLock">Delete selected dot</button><button id="clearDotLock" class="danger subtle">Clear dots</button></div><strong id="dotLockStatus" class="status-warn">START A NEW SESSION</strong><div id="dotLockViewport" class="calibration-overlay media-stage dot-lock-viewport"><img data-preview-image class="preview-media" alt="Camera preview" hidden><video data-preview-video class="preview-media" muted autoplay playsinline loop hidden></video><div data-preview-status class="media-status">NO CAMERA PREVIEW SOURCE</div><canvas id="dotLockCanvas" aria-label="Dot Lock calibration viewport"></canvas></div><p class="small">Click the viewport to place 4–12 normalized dots. A changed Pan, Tilt, or active Zoom reference requires recapture. Dot Lock never modifies the scene and is never shown on clean GFX.</p></section>
+<section class="panel span-all dot-lock-panel">
+<h2>Dot Calibration — Repeated Observations</h2>
+<p class="small">Use the same physical markers across as many Pan/Tilt/Zoom positions as useful. Blue <strong>+</strong> marks are RealLines predictions; gold <strong>●</strong> marks are the positions you drag onto the real feature. Save each stopped-camera view as another observation.</p>
+<div class="dot-lock-toolbar">
+  <label>Target<select id="dotTargetSelect"></select></label>
+  <button id="newFreeDotTarget" type="button">New free target</button>
+  <button id="newRectangleDotTarget" type="button" class="primary">New rectangle target</button>
+  <button id="deleteDotTarget" type="button" class="danger subtle">Delete target</button>
+  <label class="tool-check calibration-gfx-toggle"><input id="dotOverlayGfx" type="checkbox"> Show calibration overlay on GFX</label>
+</div>
+<div id="dotTargetFields" class="compact-fields">
+  <label>Name<input id="dotTargetName" type="text" maxlength="80"></label>
+  <label>Approx. distance (m)<input id="dotLockDistance" type="number" min="0.05" step="0.1" value="10"></label>
+  <label>Measured width (m)<input id="dotTargetWidth" type="number" min="0.001" step="0.001" placeholder="optional"></label>
+  <label>Measured height (m)<input id="dotTargetHeight" type="number" min="0.001" step="0.001" placeholder="optional"></label>
+  <label class="tool-check"><input id="dotEdgeMidpoints" type="checkbox"> Rectangle edge midpoints (8 markers)</label>
+</div>
+<div class="row dot-lock-actions">
+  <button id="addDotLock" type="button">Add marker</button>
+  <button id="deleteDotLock" type="button">Delete selected marker</button>
+  <button id="prepareDotObservation" type="button" class="primary">Adjust this view</button>
+  <button id="saveDotObservation" type="button" class="primary">Save observation &amp; refine</button>
+  <button id="clearDotDraft" type="button" class="danger subtle">Cancel adjustment</button>
+</div>
+<strong id="dotLockStatus" class="status-warn">CREATE OR SELECT A TARGET</strong>
+<div id="dotLockViewport" class="calibration-overlay media-stage dot-lock-viewport">
+  <img data-preview-image class="preview-media" alt="Camera preview" hidden>
+  <video data-preview-video class="preview-media" muted autoplay playsinline loop hidden></video>
+  <div data-preview-status class="media-status">NO CAMERA PREVIEW SOURCE</div>
+  <canvas id="dotLockCanvas" aria-label="Dot calibration viewport"></canvas>
+</div>
+<div class="dot-calibration-details">
+  <div><h3>Markers</h3><div id="dotMarkerList" class="marker-list"></div><p class="small">Select a marker, then drag it. At extreme zoom it is fine if only one marker remains visible; save only the markers you can confidently align.</p></div>
+  <div><h3>Saved observations</h3><div id="dotObservationList" class="observation-list"></div></div>
+  <div><h3>Refinement</h3><div id="dotSolution" class="kv"></div><div class="row"><button id="solveDotCalibration" type="button">Calculate refinement</button><button id="applyDotCalibration" type="button" class="primary" disabled>Apply refinement</button></div></div>
+</div>
+<p class="small">A changed encoder reference invalidates the affected stored observations. The overlay uses the same delayed <code>render_camera</code> as normal graphics. Calibration overlay to GFX is session-only and defaults OFF after a service restart.</p>
+</section>
 <section class="panel span-all section-intro"><h2>1. Calibrate camera movement</h2><p class="small">Verify live counts, calibrate gear ratio and direction, then set a fresh camera position in Setup &amp; System. This does not require venue calibration.</p></section>
 <section class="panel span-all"><h2>Live tracking axes</h2><div id="calibrationAxes" class="axis-grid"></div></section>
 <section class="panel span-all"><h2>Calibrate gear ratio and direction</h2><ol class="workflow-steps"><li>Put the camera at a known starting position.</li><li>Click “Mark start”.</li><li>Rotate the camera by a known amount, for example 90°.</li><li>Enter the signed movement.</li><li>Click “Calculate gear ratio”.</li><li>Review and apply the result.</li><li>Continue testing with the same encoder reference.</li></ol><p class="status-warn">Applying mapping changes preserves the live encoder count and position reference, but an existing venue calibration must be verified or recalculated.</p><div id="movementCalibration" class="axis-grid"></div></section>

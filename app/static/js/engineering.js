@@ -24,6 +24,9 @@ let groundOffsetPending=null;
 if(dialog&&byId('dialogCancel'))byId('dialogCancel').onclick=()=>dialog.close('cancel');
 function showDialog({title,message='',value=null,accept='OK'}){if(!dialog)return Promise.resolve({accepted:false});byId('dialogTitle').textContent=title;byId('dialogMessage').textContent=message;byId('dialogInput').hidden=value===null;byId('dialogInput').value=value??'';byId('dialogAccept').textContent=accept;return new Promise(resolve=>{dialog.addEventListener('close',()=>resolve(dialog.returnValue==='accept'?{accepted:true,value:byId('dialogInput').value.trim()}:{accepted:false}),{once:true});dialog.showModal();if(value!==null){byId('dialogInput').focus();byId('dialogInput').select();}});}
 function format(value,digits=2){return Number.isFinite(+value)?(+value).toFixed(digits):'—';}
+function cleanNumber(value,digits=9){if(!Number.isFinite(Number(value)))return value;const factor=10**digits;return Math.round(Number(value)*factor)/factor;}
+function cleanStepLabel(step){const n=Number(step);return `${n>0?'+':''}${String(n)}`;}
+function parseDecimal(value){const number=Number(String(value).trim().replace(',','.'));return Number.isFinite(number)?number:null;}
 function formatSignedCount(value){if(!Number.isFinite(+value))return'—';const count=Math.trunc(+value);return`${count>=0?'+':''}${count} counts`;}
 function escapeHtml(value){return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 function setError(message=''){byId('profileError').textContent=message;}
@@ -61,14 +64,14 @@ function axisMarkup(axis,config){
   const encoderDiagnostics=`<div class="form-error encoder-alert" data-runtime="encoder-alert"></div><details class="technical-details"><summary>Advanced encoder diagnostics</summary><div class="small" data-runtime="encoder-diagnostics"></div></details>`;
   const angularConfig=isAngle?`<div class="axis-config">
     <label>Direction<select data-mapping="direction"><option value="1"${mapping.direction===1?' selected':''}>Normal</option><option value="-1"${mapping.direction===-1?' selected':''}>Reversed</option></select></label>
-    <label>Angle offset / live trim (°)<input data-mapping="offset" type="number" step="0.01" value="${mapping.offset}"></label>
-    <div class="row compact-actions">${[-1,-.1,-.01,.01,.1,1].map(step=>`<button data-mapping-step="offset" data-step="${step}" type="button">${step>0?'+':''}${step}°</button>`).join('')}</div>
+    <label>Angle offset / live trim (°)<input data-mapping="offset" type="number" step="0.01" value="${cleanNumber(mapping.offset,6)}"></label>
+    <div class="row compact-actions">${[-1,-.1,-.01,.01,.1,1].map(step=>`<button data-mapping-step="offset" data-step="${step}" type="button">${cleanStepLabel(step)}°</button>`).join('')}</div>
     <div class="encoder-config"${encoder?'':' hidden'}>
       <label>Encoder pulses per revolution (PPR)<input data-mapping="ppr" type="number" min="1" step="1" value="${mapping.ppr}"></label>
       <div class="small">For the RealLines 600 PPR encoders, enter 600.</div>
       <label>Encoder resolution<select data-mapping="quadrature_multiplier"${rotaryEncoder?' disabled':''}>${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}${value===4?' — Full resolution':''}</option>`).join('')}</select></label>
-      <label>Gear ratio — encoder turns per full camera turn<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${mapping.encoder_revs_per_camera_rev}"></label>
-      <div class="row compact-actions">${[-.1,-.01,-.001,.001,.01,.1].map(step=>`<button data-mapping-step="encoder_revs_per_camera_rev" data-step="${step}" type="button">${step>0?'+':''}${step.toFixed(3)}</button>`).join('')}</div>
+      <label>Gear ratio — encoder turns per full camera turn<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${cleanNumber(mapping.encoder_revs_per_camera_rev,9)}"></label>
+      <div class="row compact-actions">${[-.1,-.01,-.001,.001,.01,.1].map(step=>`<button data-mapping-step="encoder_revs_per_camera_rev" data-step="${step}" type="button">${cleanStepLabel(step)}</button>`).join('')}</div>
       <div class="small">Example: 10 means the encoder turns 10 times while the camera turns 360°.</div>
       <div class="small">Tracking resolution: <strong>${format(degreesPerCount,6)}° per encoder count</strong></div>
       ${gpioDraft}
@@ -82,11 +85,11 @@ function axisMarkup(axis,config){
     <div class="property-stat"><span>Encoder resolution</span><strong>×4 — Full resolution</strong></div>
     ${gpioDraft}${referenceControls}
     <section class="zoom-fov-development"><h4>Temporary live FOV mapping — Development</h4>
-      <div class="kv"><div>Current relative count</div><div data-runtime="zoom-fov-count">—</div><div>Current live FOV</div><div data-runtime="zoom-live-fov">—</div><div>FOV source</div><div data-runtime="zoom-fov-source">Manual / Profile</div><div>Wide captured</div><div data-runtime="zoom-wide-point">—</div><div>Tight captured</div><div data-runtime="zoom-tight-point">—</div></div>
-      <label>Wide FOV — temporary test value (°)<input data-zoom-fov-input="wide" type="number" min="0.1" max="179" step="0.1" value="${wideFov}"></label>
+      <div class="kv"><div>Current relative count</div><div data-runtime="zoom-fov-count">—</div><div>Current live FOV</div><div data-runtime="zoom-live-fov">—</div><div>FOV source</div><div data-runtime="zoom-fov-source">Manual / Profile</div><div>Wide captured</div><div data-runtime="zoom-wide-point">—</div><div>Tight captured</div><div data-runtime="zoom-tight-point">—</div><div>Curve correction</div><div data-runtime="zoom-curve">0.000</div></div>
+      <label>Wide FOV — temporary test value (°)<input data-zoom-fov-input="wide" type="text" inputmode="decimal" autocomplete="off" value="${wideFov}"></label>
       <div class="row compact-actions">${[-1,-.1,.1,1].map(step=>`<button data-zoom-fov-step="wide" data-step="${step}" type="button"${zoomFov.wide?'':' disabled'}>${step>0?'+':''}${step.toFixed(1)}</button>`).join('')}</div>
       <button data-zoom-fov-capture="wide" type="button">Capture current Zoom position as WIDE</button>
-      <label>Tight FOV — temporary test value, not measured lens truth (°)<input data-zoom-fov-input="tight" type="number" min="0.1" max="179" step="0.1" value="${tightFov}"></label>
+      <label>Tight FOV — temporary test value, not measured lens truth (°)<input data-zoom-fov-input="tight" type="text" inputmode="decimal" autocomplete="off" value="${tightFov}"></label>
       <div class="row compact-actions">${[-1,-.1,.1,1].map(step=>`<button data-zoom-fov-step="tight" data-step="${step}" type="button"${zoomFov.tight?'':' disabled'}>${step>0?'+':''}${step.toFixed(1)}</button>`).join('')}</div>
       <button data-zoom-fov-capture="tight" type="button">Capture current Zoom position as TIGHT</button>
       <strong data-runtime="zoom-fov-status" class="status-warn">NOT CALIBRATED</strong>
@@ -152,7 +155,7 @@ function bindAxisCards(){
     });
     card.querySelectorAll('[data-mapping-step]').forEach(button=>button.onclick=async()=>{
       const key=button.dataset.mappingStep,current=Number(state.profiles.active.axes[axis].mapping[key]);
-      await updateAxis(axis,{mapping:{[key]:current+Number(button.dataset.step)}});
+      await updateAxis(axis,{mapping:{[key]:cleanNumber(current+Number(button.dataset.step),9)}});
     });
 
     const saveState=card.querySelector('[data-gpio-save-state]');
@@ -189,16 +192,22 @@ function bindAxisCards(){
         }));
       };
     });
-    card.querySelectorAll('[data-zoom-fov-input]').forEach(input=>input.addEventListener('input',()=>setZoomFovDraft(zoomFovDrafts,input.dataset.zoomFovInput,input.value)));
+    card.querySelectorAll('[data-zoom-fov-input]').forEach(input=>{
+      input.addEventListener('input',()=>setZoomFovDraft(zoomFovDrafts,input.dataset.zoomFovInput,input.value));
+      input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();input.blur();}});
+    });
     card.querySelectorAll('[data-zoom-fov-capture]').forEach(button=>button.onclick=async()=>{
       const point=button.dataset.zoomFovCapture;
-      const input=card.querySelector(`[data-zoom-fov-input="${point}"]`);
-      const result=await safe(()=>api(`/api/tracking/zoom/fov-points/${point}`,{method:'POST',body:JSON.stringify({fov:Number(input.value)})}));
+      const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),fov=parseDecimal(input.value);
+      if(fov===null||fov<=0||fov>=180){setAxisError(card,'Zoom FOV must be a number between 0 and 180°');return;}
+      const result=await safe(()=>api(`/api/tracking/zoom/fov-points/${point}`,{method:'POST',body:JSON.stringify({fov})}));
       if(result){state.zoom_fov=result;acceptZoomFovDraft(zoomFovDrafts,point,result[point].fov);axesKey='';renderAxes();}
     });
     card.querySelectorAll('[data-zoom-fov-step]').forEach(button=>button.onclick=async()=>{
-      const point=button.dataset.zoomFovStep,input=card.querySelector(`[data-zoom-fov-input="${point}"]`);
-      const result=await safe(()=>api(`/api/tracking/zoom/fov-points/${point}`,{method:'PATCH',body:JSON.stringify({fov:Number(input.value)+Number(button.dataset.step)})}));
+      const point=button.dataset.zoomFovStep,input=card.querySelector(`[data-zoom-fov-input="${point}"]`),current=parseDecimal(input.value);
+      if(current===null){setAxisError(card,'Enter a valid Zoom FOV before nudging');return;}
+      const fov=cleanNumber(current+Number(button.dataset.step),4);
+      const result=await safe(()=>api(`/api/tracking/zoom/fov-points/${point}`,{method:'PATCH',body:JSON.stringify({fov})}));
       if(result){state.zoom_fov=result;acceptZoomFovDraft(zoomFovDrafts,point,result[point].fov);axesKey='';renderAxes();}
     });
   });
@@ -273,7 +282,11 @@ function renderAxes(){
       card.querySelector('[data-runtime="zoom-fov-source"]').textContent=zoomFov.fov_source||'Manual / Profile';
       for(const point of ['wide','tight']){const saved=zoomFov[point],readout=card.querySelector(`[data-runtime="zoom-${point}-point"]`);readout.textContent=saved?`${formatSignedCount(saved.relative_count)} · ${format(saved.fov,2)}°`:'Not captured';}
       const status=card.querySelector('[data-runtime="zoom-fov-status"]');status.textContent=zoomFov.status||'NOT CALIBRATED';status.className=zoomFov.active?'status-ok':'status-warn';
-      for(const point of ['wide','tight']){const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),server=zoomFov[point]?.fov??(point==='wide'?state.profiles.active.camera.fov:10);input.value=zoomFovDraftValue(zoomFovDrafts,point,server);}
+      const curve=card.querySelector('[data-runtime="zoom-curve"]');if(curve)curve.textContent=format(zoomFov.curvature??0,4);
+      for(const point of ['wide','tight']){
+        const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),server=zoomFov[point]?.fov??(point==='wide'?state.profiles.active.camera.fov:10),draft=zoomFovDrafts[point];
+        if(!draft?.dirty&&input!==document.activeElement)input.value=zoomFovDraftValue(zoomFovDrafts,point,server);
+      }
     }
     card.title=runtime.status||'';
   }

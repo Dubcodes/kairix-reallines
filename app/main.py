@@ -21,6 +21,7 @@ from .source_manager import TrackingSourceManager
 from .runtime import imu_status_publication_loop, pose_publication_loop, tracking_loop
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
+from .dot_calibration import DotCalibrationError
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
@@ -119,6 +120,14 @@ class EncoderReference(BaseModel):
 
 class ZoomFovCapture(BaseModel):
     fov: float
+
+
+class CalibrationOverlayUpdate(BaseModel):
+    values: dict
+
+
+class DotCalibrationUpdate(BaseModel):
+    values: dict
 
 
 class FrontendLog(BaseModel):
@@ -435,6 +444,38 @@ async def update_zoom_fov_point(point: str, body: ZoomFovCapture):
     try:
         return await store.update_zoom_fov_point(point, body.fov)
     except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/calibration-overlay")
+async def update_calibration_overlay(body: CalibrationOverlayUpdate):
+    try:
+        return await store.update_calibration_overlay(body.values)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/world-calibration/dot-calibration")
+async def update_dot_calibration(body: DotCalibrationUpdate):
+    try:
+        return await store.update_dot_calibration(body.values)
+    except (DotCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/world-calibration/dot-calibration/solve")
+async def solve_dot_calibration():
+    try:
+        return await store.solve_dot_calibration()
+    except (DotCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/world-calibration/dot-calibration/apply")
+async def apply_dot_calibration():
+    try:
+        return await store.apply_dot_calibration_solution()
+    except (DotCalibrationError, TrackingConfigError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 

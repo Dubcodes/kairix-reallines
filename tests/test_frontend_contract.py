@@ -92,6 +92,8 @@ class FrontendContractCase(unittest.TestCase):
         for page in ("engineering", "calibration", "control"):
             html = (STATIC / f"{page}.html").read_text(encoding="utf-8")
             js = (STATIC / "js" / f"{page}.js").read_text(encoding="utf-8")
+            if page == "calibration":
+                js += (STATIC / "js" / "dot_calibration_ui.js").read_text(encoding="utf-8")
             controls = set(re.findall(r"<(?:button|input|select)[^>]+\bid=['\"]([^'\"]+)", html))
             for control_id in controls:
                 self.assertRegex(js, rf"['\"]{re.escape(control_id)}['\"]", f"{page}: {control_id}")
@@ -109,6 +111,8 @@ class FrontendContractCase(unittest.TestCase):
                         routes.add(re.sub(r"\{[^}]+\}", "{}", value))
         for page in ("engineering", "calibration", "control"):
             js = (STATIC / "js" / f"{page}.js").read_text(encoding="utf-8")
+            if page == "calibration":
+                js += (STATIC / "js" / "dot_calibration_ui.js").read_text(encoding="utf-8")
             targets = re.findall(r"api\((?:`|'|\")(/api/.*?)(?:`|'|\")", js)
             for target in targets:
                 shape = re.sub(r"\$\{[^}]+\}", "{}", target)
@@ -172,7 +176,7 @@ class FrontendContractCase(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         for name in ("common", "engineering", "engineering_contract", "calibration", "control", "editor", "render"):
             self.assertIn(f"node --check app/static/js/{name}.js", workflow)
-        for name in ("calibration_contract", "preview", "preview_media"):
+        for name in ("calibration_contract", "preview", "preview_media", "dot_lock", "dot_calibration_ui"):
             self.assertIn(f"node --check app/static/js/{name}.js", workflow)
 
     def test_preview_and_clean_gfx_contracts_are_separate(self):
@@ -332,18 +336,27 @@ class FrontendContractCase(unittest.TestCase):
         self.assertNotIn("Angle offset", zoom_branch)
         self.assertNotIn("degreesPerCount", zoom_branch)
 
-    def test_dot_lock_is_calibration_only_and_uses_render_camera(self):
+    def test_dot_calibration_supports_repeated_observations_and_optional_gfx_overlay(self):
         html = (STATIC / "calibration.html").read_text(encoding="utf-8")
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        dot_ui = (STATIC / "js" / "dot_calibration_ui.js").read_text(encoding="utf-8")
         dot_lock = (STATIC / "js" / "dot_lock.js").read_text(encoding="utf-8")
         renderer = (STATIC / "js" / "render.js").read_text(encoding="utf-8")
-        self.assertIn("Dot Lock — Visual Calibration", html)
+        gfx = (STATIC / "gfx.html").read_text(encoding="utf-8")
+        self.assertIn("Dot Calibration — Repeated Observations", html)
         self.assertIn('id="dotLockCanvas"', html)
-        self.assertIn("state.render_camera", calibration)
-        self.assertIn("REFERENCE CHANGED — RECAPTURE", calibration)
+        self.assertIn('id="dotOverlayGfx"', html)
+        self.assertIn("Save observation &amp; refine", html)
+        self.assertIn("this.state.render_camera", dot_ui)
+        self.assertIn("projectModelPoints", dot_ui)
+        self.assertIn("modelPointsFromObservation", dot_ui)
+        self.assertIn("drawGfxCalibrationOverlay", gfx)
+        self.assertLess(gfx.index("renderScene(c,state"), gfx.index("drawGfxCalibrationOverlay(c,state)"), "GFX calibration overlay must share the normal scene frame")
+        self.assertIn("state.render_camera||state.camera", dot_lock)
         self.assertIn("projectPoint", dot_lock)
         self.assertNotIn("dotLock", renderer)
         self.assertNotIn("dot-lock", renderer)
+        self.assertIn("DotCalibrationUi", calibration)
 
     def test_operator_workflow_uses_plain_language_without_breaking_control_ids(self):
         engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")

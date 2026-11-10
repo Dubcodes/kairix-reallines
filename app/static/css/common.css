@@ -184,3 +184,22 @@ canvas.editor-canvas:focus { border-color:#4c6578; }
   .compact-fields,.calibration-workflow { grid-template-columns:1fr; }
   .setup-stages { grid-template-columns:1fr; }
 }
+
+.dot-lock-toolbar { display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin:10px 0; }
+.dot-lock-toolbar label { min-width:170px; }
+.calibration-gfx-toggle { padding:8px 10px; border:1px solid #755d25; border-radius:6px; background:#241d0f; color:#ffd166; }
+.dot-lock-actions { margin-top:8px; }
+.dot-calibration-details { display:grid; grid-template-columns:minmax(210px,.8fr) minmax(250px,1fr) minmax(280px,1.1fr); gap:12px; margin-top:12px; }
+.dot-calibration-details > div { border:1px solid #2b3947; border-radius:7px; padding:10px; background:#0c1319; min-width:0; }
+.dot-calibration-details h3 { margin:0 0 8px; }
+.marker-list,.observation-list { display:flex; gap:6px; flex-wrap:wrap; }
+.marker-chip,.observation-chip { border:1px solid #344554; border-radius:999px; padding:5px 8px; background:#111820; color:#cbd7e0; font-size:.78rem; cursor:pointer; }
+.marker-chip.selected { border-color:#ffce67; color:#ffdf91; background:#332814; }
+.marker-chip.hidden { opacity:.45; text-decoration:line-through; }
+.observation-chip { border-radius:6px; cursor:default; }
+.dot-lock-viewport.editing { border-color:#ffce67; box-shadow:inset 0 0 0 1px rgba(255,206,103,.35); cursor:grab; }
+.dot-lock-viewport.dragging { cursor:grabbing; }
+.dot-lock-viewport canvas { user-select:none; }
+@media (max-width:900px) { .dot-calibration-details { grid-template-columns:1fr; } }
+.marker-control { display:flex; align-items:center; gap:3px; padding:2px; border:1px solid #263643; border-radius:999px; background:#0e151c; }
+.marker-control .tool-check { padding:2px 6px 2px 0; font-size:.72rem; }
