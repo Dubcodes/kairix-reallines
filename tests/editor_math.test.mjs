@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {
+  clearDotLockSession,createDotLockSession,dotLockRay,dotLockReferencesMatch,
+  dotLockWorldPoint,normalizedScreenPoint,projectDotLockSession,
+} from '../app/static/js/dot_lock.js';
 
 async function browserModule(path) {
   const source=await readFile(new URL(path,import.meta.url),'utf8');
@@ -66,4 +70,43 @@ scene.groups[0].visible=true;
 assert.equal(isItemEffectivelyVisible(marker,scene),true);
 marker.visible=false;
 assert.equal(isItemEffectivelyVisible(marker,scene),false);
+
+const dotCamera={x:0,y:0,z:1.7,pan:0,tilt:0,roll:0,fov:60,height:1.7,valid:true,world_valid:false};
+const centreRay=dotLockRay({x:.5,y:.5},dotCamera,1280,720);
+assert.ok(Math.abs(centreRay.direction.x)<1e-12);
+assert.ok(Math.abs(centreRay.direction.y-1)<1e-12);
+assert.ok(Math.abs(centreRay.direction.z)<1e-12);
+const upperRightRay=dotLockRay({x:.75,y:.25},dotCamera,1280,720);
+assert.ok(upperRightRay.direction.x>0);
+assert.ok(upperRightRay.direction.z>0);
+const centreWorld=dotLockWorldPoint({x:.5,y:.5},dotCamera,10,1280,720);
+assert.deepEqual(centreWorld,{x:0,y:10,z:1.7});
+const dotInputs=[{id:1,x:.5,y:.5},{id:2,x:.35,y:.4},{id:3,x:.65,y:.6},{id:4,x:.8,y:.25}];
+const dotSceneBefore=structuredClone(scene);
+const dotSession=createDotLockSession({camera:dotCamera,points:dotInputs,targetDistance:10,referenceIds:{pan:'P1',tilt:'T1',zoom:'Z1'},width:1280,height:720});
+const fixedWorld=structuredClone(dotSession.points.map(point=>point.world));
+const referenceProjection=projectDotLockSession(dotSession,dotCamera,1280,720);
+for(let index=0;index<dotInputs.length;index++){
+  assert.ok(Math.abs(referenceProjection[index].predicted.x-dotInputs[index].x)<1e-12);
+  assert.ok(Math.abs(referenceProjection[index].predicted.y-dotInputs[index].y)<1e-12);
+}
+const pannedProjection=projectDotLockSession(dotSession,{...dotCamera,pan:8},1280,720);
+const tiltedProjection=projectDotLockSession(dotSession,{...dotCamera,tilt:5},1280,720);
+const zoomedProjection=projectDotLockSession(dotSession,{...dotCamera,fov:30},1280,720);
+assert.notDeepEqual(pannedProjection.map(point=>point.predicted),referenceProjection.map(point=>point.predicted));
+assert.notDeepEqual(tiltedProjection.map(point=>point.predicted),referenceProjection.map(point=>point.predicted));
+assert.notDeepEqual(zoomedProjection.map(point=>point.predicted),referenceProjection.map(point=>point.predicted));
+assert.deepEqual(dotSession.points.map(point=>point.world),fixedWorld,'provisional world points stay fixed while the camera moves');
+const restoredProjection=projectDotLockSession(dotSession,dotCamera,1280,720);
+assert.deepEqual(restoredProjection.map(point=>point.predicted),referenceProjection.map(point=>point.predicted));
+const resizedProjection=projectDotLockSession(dotSession,dotCamera,640,360);
+for(let index=0;index<dotInputs.length;index++){
+  assert.ok(Math.abs(resizedProjection[index].predicted.x-dotInputs[index].x)<1e-12);
+  assert.ok(Math.abs(resizedProjection[index].predicted.y-dotInputs[index].y)<1e-12);
+}
+assert.deepEqual(normalizedScreenPoint({x:.25,y:.75},800,400),{x:200,y:300});
+assert.equal(dotLockReferencesMatch(dotSession,{pan:'P1',tilt:'T1',zoom:'Z1'}),true);
+assert.equal(dotLockReferencesMatch(dotSession,{pan:'P2',tilt:'T1',zoom:'Z1'}),false);
+assert.equal(clearDotLockSession(),null);
+assert.deepEqual(scene,dotSceneBefore,'Dot Lock does not alter scene/layout objects');
 console.log('editor math tests passed');

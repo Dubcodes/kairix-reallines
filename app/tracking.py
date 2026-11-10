@@ -195,6 +195,35 @@ def merge_axis_update(axis: str, current: dict[str, Any], updates: dict[str, Any
     return candidate
 
 
+def acquisition_signature(config: dict[str, Any]) -> tuple[Any, ...]:
+    """Return only settings that require a hardware worker/request restart."""
+    source = config.get("source")
+    mapping = config.get("mapping") or {}
+    source_config = config.get("source_config") or {}
+    if source == "quadrature_gpio":
+        return (
+            source,
+            str(source_config.get("chip", "")),
+            source_config.get("line_a"),
+            source_config.get("line_b"),
+            source_config.get("bias", "as_is"),
+            source_config.get("integrity_policy", "strict"),
+            int(mapping.get("quadrature_multiplier", 4)),
+        )
+    if source == "linux_rotary":
+        return (
+            source,
+            source_config.get("discovery", "auto"),
+            source_config.get("rel_axis"),
+            source_config.get("device_override", ""),
+            source_config.get("pin_a"),
+            source_config.get("pin_b"),
+            int(source_config.get("steps_per_period", 4)),
+            int(mapping.get("quadrature_multiplier", 4)),
+        )
+    return (source,)
+
+
 def counts_per_camera_revolution(config: dict[str, Any]) -> float:
     mapping = config["mapping"]
     return float(mapping["ppr"]) * int(mapping["quadrature_multiplier"]) * float(mapping["encoder_revs_per_camera_rev"])

@@ -4,12 +4,16 @@ import test from 'node:test';
 import {
   ENGINEERING_AXES,
   ENGINEERING_STATE_FIELDS,
+  acceptZoomFovDraft,
   buildEncoderSourceConfig,
   buildSourceUpdate,
+  createZoomFovDrafts,
+  setZoomFovDraft,
   sourceChoicesFor,
   supportsPrototypePolicy,
   validateEncoderDraft,
   validateEngineeringState,
+  zoomFovDraftValue,
 } from '../app/static/js/engineering_contract.js';
 
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
@@ -59,6 +63,19 @@ test('Engineering state contract accepts the required page payload', () => {
   const broken = {...state};
   delete broken.sync;
   assert.throws(() => validateEngineeringState(broken), /missing sync/);
+});
+
+test('Zoom FOV drafts survive live updates until successful capture', () => {
+  const drafts=createZoomFovDrafts();
+  assert.equal(zoomFovDraftValue(drafts,'wide',64.6),'64.6');
+  setZoomFovDraft(drafts,'wide','52.17');
+  assert.equal(drafts.wide.dirty,true);
+  assert.equal(zoomFovDraftValue(drafts,'wide',64.6),'52.17');
+  setZoomFovDraft(drafts,'tight','12.77');
+  assert.equal(zoomFovDraftValue(drafts,'tight',10),'12.77');
+  acceptZoomFovDraft(drafts,'wide',52.17);
+  assert.deepEqual(drafts.wide,{value:'52.17',dirty:false});
+  assert.equal(zoomFovDraftValue(drafts,'wide',52.17),'52.17');
 });
 
 test('GPIO draft is validated and built as one coherent source_config update', () => {

@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -550,6 +551,52 @@ class DualGpioManagerCase(unittest.TestCase):
 
         self.assertTrue(all(worker.stopped for worker in instances))
 
+    def test_mapping_changes_preserve_workers_but_acquisition_changes_restart(self):
+        instances = []
+
+        class FakeWorker:
+            def __init__(self, axis, config):
+                self.axis = axis
+                self.config = config
+                self.started = False
+                self.stopped = False
+                instances.append(self)
+
+            def start(self):
+                self.started = True
+
+            def stop(self):
+                self.stopped = True
+
+        profile = default_profile()
+        for axis in ("pan", "tilt", "zoom"):
+            profile["axes"][axis]["source"] = "quadrature_gpio"
+        manager = TrackingSourceManager()
+        with patch("app.source_manager.QuadratureGpioWorker", FakeWorker):
+            manager.configure("rig", profile)
+            original = dict(manager._workers)
+            for axis in ("pan", "tilt"):
+                for key, value in (("encoder_revs_per_camera_rev", 3.21), ("direction", -1), ("offset", 0.25), ("ppr", 601)):
+                    profile["axes"][axis]["mapping"][key] = value
+                    manager.configure("rig", profile)
+                    self.assertIs(manager._workers[axis], original[axis], f"{axis} {key} must not restart acquisition")
+                    self.assertIs(manager._workers["zoom"], original["zoom"])
+
+            profile["axes"]["pan"]["source_config"]["line_a"] = 18
+            manager.configure("rig", profile)
+            replacement = manager._workers["pan"]
+            self.assertIsNot(replacement, original["pan"])
+            self.assertTrue(original["pan"].stopped)
+            self.assertIs(manager._workers["tilt"], original["tilt"])
+            self.assertIs(manager._workers["zoom"], original["zoom"])
+
+            profile["axes"]["pan"]["source"] = "simulator"
+            manager.configure("rig", profile)
+            self.assertNotIn("pan", manager._workers)
+            self.assertTrue(replacement.stopped)
+            self.assertIs(manager._workers["zoom"], original["zoom"])
+            manager.stop()
+
     def test_counts_references_motion_and_integrity_are_axis_local(self):
         pan = QuadratureGpioWorker("pan", worker_config("pan", 17, 27))
         tilt = QuadratureGpioWorker("tilt", worker_config("tilt", 22, 23))
@@ -727,6 +774,51 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(store.camera["valid"])
             self.assertIsNone(store.tracking["axes"]["pan"]["value"])
             self.assertFalse(store.pose_history.samples[-1].valid)
+
+    async def test_live_mapping_updates_preserve_reference_and_zoom_calibration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_axis(store, "pan", line_a=17, line_b=27)
+            await self.configure_axis(store, "tilt", line_a=22, line_b=23)
+            await self.configure_axis(store, "zoom", line_a=5, line_b=6)
+            store.sample_tick({
+                "pan": self.axis_sample("PAN-REF", raw_count=500, reference_count=100, reference_angle=5.0),
+                "tilt": self.axis_sample("TILT-REF", raw_count=300, reference_count=100, reference_angle=-2.0),
+                "zoom": self.axis_sample("ZOOM-REF", raw_count=0, reference_count=0),
+            })
+            await store.capture_zoom_fov_point("wide", 64.6)
+            store.sample_tick({"zoom": self.axis_sample("ZOOM-REF", raw_count=1000, reference_count=0)})
+            await store.capture_zoom_fov_point("tight", 10.0)
+            zoom_before = deepcopy(store.zoom_fov_mapping)
+            pan_before = deepcopy(store.tracking["axes"]["pan"])
+            old_value = pan_before["value"]
+            generation = store.pose_history.generation
+
+            await store.update_axis_config(store.profile_index["active_id"], "pan", {
+                "mapping": {"encoder_revs_per_camera_rev": 3.2},
+            })
+            pan = store.tracking["axes"]["pan"]
+            for key in ("raw_count", "reference_count", "reference_id", "driver_alive", "diagnostics"):
+                self.assertEqual(pan[key], pan_before[key])
+            self.assertNotEqual(pan["value"], old_value)
+            self.assertTrue(pan["valid"])
+            self.assertGreater(store.pose_history.generation, generation)
+            self.assertEqual(store.zoom_fov_mapping["wide"], zoom_before["wide"])
+            self.assertEqual(store.zoom_fov_mapping["tight"], zoom_before["tight"])
+            self.assertTrue(store.zoom_fov_mapping["active"])
+
+            reference_id = pan["reference_id"]
+            await store.update_axis_config(store.profile_index["active_id"], "pan", {"mapping": {"direction": -1}})
+            self.assertEqual(store.tracking["axes"]["pan"]["reference_id"], reference_id)
+            await store.update_axis_config(store.profile_index["active_id"], "pan", {"mapping": {"offset": 1.25}})
+            self.assertEqual(store.tracking["axes"]["pan"]["reference_id"], reference_id)
+
+            references = {axis: store.tracking["axes"][axis]["reference_id"] for axis in ("pan", "tilt", "zoom")}
+            await store.update_sync_config({"graphics_delay_ms": 55})
+            self.assertEqual(
+                {axis: store.tracking["axes"][axis]["reference_id"] for axis in references},
+                references,
+            )
 
     async def test_driver_failure_invalidates_authoritative_camera_and_history(self):
         with tempfile.TemporaryDirectory() as directory:

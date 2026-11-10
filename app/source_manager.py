@@ -6,7 +6,7 @@ from typing import Any
 
 from .gpio_source import QuadratureGpioWorker
 from .linux_rotary_source import LinuxRotaryWorker
-from .tracking import AXES
+from .tracking import AXES, acquisition_signature
 
 
 class TrackingSourceManager:
@@ -36,11 +36,19 @@ class TrackingSourceManager:
         for axis, config in wanted.items():
             worker = old.pop(axis, None)
             worker_type = QuadratureGpioWorker if config["source"] == "quadrature_gpio" else LinuxRotaryWorker
-            if worker is None or not isinstance(worker, worker_type) or not same_profile or worker.config != config:
+            restart = (
+                worker is None
+                or not isinstance(worker, worker_type)
+                or not same_profile
+                or acquisition_signature(worker.config) != acquisition_signature(config)
+            )
+            if restart:
                 if worker is not None:
                     worker.stop()
                 worker = worker_type(axis, config)
                 worker.start()
+            else:
+                worker.config = deepcopy(config)
             created[axis] = worker
         for worker in old.values():
             worker.stop()

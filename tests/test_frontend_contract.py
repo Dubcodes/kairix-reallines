@@ -211,8 +211,8 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("movement[axis]", calibration)
         self.assertIn("/api/profiles/${state.profiles.active_id}/axes/${axis}", calibration)
         self.assertIn("direction_learned:true", calibration)
-        self.assertIn("requires a new encoder position reference", html)
-        self.assertIn("invalidate", html)
+        self.assertIn("preserves the live encoder count and position reference", html)
+        self.assertIn("venue calibration must be verified or recalculated", html)
 
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
@@ -320,12 +320,30 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("Capture current Zoom position as TIGHT", engineering)
         self.assertIn("not measured lens truth", engineering)
         self.assertIn("/api/tracking/zoom/fov-points/", engineering)
+        self.assertIn("data-zoom-fov-step", engineering)
+        self.assertIn("setZoomFovDraft", engineering)
         self.assertIn("Physical Zoom — Temporary mapping", (ROOT / "app" / "state.py").read_text(encoding="utf-8"))
-        self.assertIn("state.render_camera", (STATIC / "js" / "render.js").read_text(encoding="utf-8"))
+        renderer = (STATIC / "js" / "render.js").read_text(encoding="utf-8")
+        self.assertIn("state.render_camera", renderer)
+        self.assertNotIn("zoom_fov", renderer)
+        self.assertNotIn("relative_count", renderer)
         zoom_branch = engineering.split("const zoomConfig=", 1)[1].split("return `<article", 1)[0]
         self.assertNotIn("Gear ratio", zoom_branch)
         self.assertNotIn("Angle offset", zoom_branch)
         self.assertNotIn("degreesPerCount", zoom_branch)
+
+    def test_dot_lock_is_calibration_only_and_uses_render_camera(self):
+        html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        dot_lock = (STATIC / "js" / "dot_lock.js").read_text(encoding="utf-8")
+        renderer = (STATIC / "js" / "render.js").read_text(encoding="utf-8")
+        self.assertIn("Dot Lock — Visual Calibration", html)
+        self.assertIn('id="dotLockCanvas"', html)
+        self.assertIn("state.render_camera", calibration)
+        self.assertIn("REFERENCE CHANGED — RECAPTURE", calibration)
+        self.assertIn("projectPoint", dot_lock)
+        self.assertNotIn("dotLock", renderer)
+        self.assertNotIn("dot-lock", renderer)
 
     def test_operator_workflow_uses_plain_language_without_breaking_control_ids(self):
         engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")

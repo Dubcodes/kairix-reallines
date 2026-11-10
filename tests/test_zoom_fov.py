@@ -105,6 +105,14 @@ class TemporaryZoomStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.profile["camera"]["fov"], 64.6)
             self.assertTrue(store.tracking["valid"], "optional Zoom must not alter Pan/Tilt validity")
 
+            count = store.zoom_fov_mapping["wide"]["relative_count"]
+            saved_reference = store.zoom_fov_mapping["wide"]["reference_id"]
+            adjusted = await store.update_zoom_fov_point("wide", 63.5)
+            self.assertEqual(adjusted["wide"]["relative_count"], count)
+            self.assertEqual(adjusted["wide"]["reference_id"], saved_reference)
+            self.assertEqual(adjusted["wide"]["fov"], 63.5)
+            self.assertTrue(adjusted["active"])
+
             store.pose_history.reset("mapped FOV delay fixture")
             zoom.decoder.count = 0
             with patch("app.state.time.monotonic", return_value=100.0):
@@ -176,6 +184,29 @@ class TemporaryZoomStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(store.zoom_fov_mapping["tight"])
             with self.assertRaisesRegex(ValueError, "greater than 0"):
                 await store.capture_zoom_fov_point("tight", 0)
+
+    async def test_zoom_acquisition_change_invalidates_mapping_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_zoom(store)
+            zoom = QuadratureGpioWorker("zoom", worker_config())
+            zoom.begin_acquisition(0, 0)
+            zoom.set_reference(0)
+            store.sample_tick({"zoom": zoom.snapshot()})
+            await store.capture_zoom_fov_point("wide", 64.6)
+            zoom.decoder.count = 1000
+            store.sample_tick({"zoom": zoom.snapshot()})
+            await store.capture_zoom_fov_point("tight", 10.0)
+            self.assertTrue(store.zoom_fov_mapping["active"])
+
+            await store.update_axis_config(store.profile_index["active_id"], "zoom", {
+                "source_config": {"line_a": 7, "line_b": 8},
+            })
+            self.assertFalse(store.tracking["axes"]["zoom"]["referenced"])
+            self.assertIsNone(store.zoom_fov_mapping["wide"])
+            self.assertIsNone(store.zoom_fov_mapping["tight"])
+            self.assertFalse(store.zoom_fov_mapping["active"])
+            self.assertAlmostEqual(store.camera["fov"], 64.6)
 
 
 if __name__ == "__main__":

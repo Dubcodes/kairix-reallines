@@ -19,7 +19,7 @@ from fastapi import WebSocket
 from .debug import DebugRecorder
 from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
-from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
+from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, acquisition_signature, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
@@ -696,12 +696,61 @@ class StateStore:
         await self.broadcast_state()
         return result
 
+    async def update_zoom_fov_point(self, point: str, fov: float) -> dict[str, Any]:
+        if point not in {"wide", "tight"}:
+            raise ValueError("Zoom FOV point must be wide or tight")
+        try:
+            fov = float(fov)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Zoom FOV must be numeric") from exc
+        if not math.isfinite(fov) or not 0.0 < fov < 180.0:
+            raise ValueError("Zoom FOV must be greater than 0 and less than 180 degrees")
+        async with self.lock:
+            candidate = deepcopy(self.zoom_fov_mapping)
+            saved = candidate.get(point)
+            if not saved:
+                raise ValueError(f"Capture the {point.title()} Zoom point before adjusting its FOV")
+            zoom = self.tracking["axes"].get("zoom", {})
+            if not zoom.get("referenced") or saved.get("reference_id") != zoom.get("reference_id"):
+                raise ValueError("Zoom reference changed — capture Wide/Tight again")
+            saved["fov"] = fov
+            wide, tight = candidate.get("wide"), candidate.get("tight")
+            if wide and tight:
+                temporary_zoom_fov(
+                    int(wide["relative_count"]), int(wide["relative_count"]), float(wide["fov"]),
+                    int(tight["relative_count"]), float(tight["fov"]),
+                )
+            self.zoom_fov_mapping = candidate
+            self._refresh_camera_from_tracking()
+            result = deepcopy(self.zoom_fov_mapping)
+        await self.broadcast_state()
+        return result
+
     def _refresh_tracking_from_profile(self, initial: bool = False) -> None:
         self.camera["fov"] = float(self.profile.get("camera", {}).get("fov", self.camera["fov"]))
         self.camera["height"] = float(self.profile.get("camera", {}).get("height", self.camera["height"]))
         for axis in AXES:
             self._apply_axis_runtime(axis, initial=initial)
         self._refresh_camera_from_tracking()
+
+    def _remap_axis_runtime(self, axis: str) -> None:
+        """Apply pure mapping changes without discarding live encoder state."""
+        runtime = self.tracking["axes"][axis]
+        config = self.profile["axes"][axis]
+        raw_count = runtime.get("raw_count")
+        reference_count = runtime.get("reference_count")
+        if raw_count is None or not runtime.get("referenced") or reference_count is None or not runtime.get("reference_id"):
+            return
+        if axis in POSITION_ENCODER_AXES:
+            mapped = relative_position_count(config, int(raw_count), int(reference_count))
+            runtime.update({"relative_count": mapped, "value": mapped})
+        else:
+            runtime.update({
+                "relative_angle": (int(raw_count) - int(reference_count)) * degrees_per_count(config),
+                "value": map_referenced_count(
+                    config, int(raw_count), int(reference_count), float(runtime.get("reference_angle", 0.0)),
+                ),
+            })
 
     def apply_tracking_samples(self, samples: dict[str, dict[str, Any]], timestamp: float | None = None) -> None:
         """Canonical StateStore boundary for a combined source-manager sample."""
@@ -1135,13 +1184,28 @@ class StateStore:
                             raise TrackingConfigError(f"GPIO {chip} line {line} conflicts with {used_lines[identity]}")
                         used_lines[identity] = f"{other_axis}.{key}"
             source_changed = previous["source"] != candidate["source"]
+            acquisition_changed = acquisition_signature(previous) != acquisition_signature(candidate)
             self.profile["axes"][axis] = candidate
             self._write_active_profile_locked()
             if axis in {"pan", "tilt"}:
                 self._sync_calibration_from_profile()
                 self._save("calibration.json", self.calibration)
             self._sync_engineering_compat_locked()
-            self._apply_axis_runtime(axis)
+            if acquisition_changed:
+                self._apply_axis_runtime(axis)
+                runtime = self.tracking["axes"][axis]
+                if candidate["source"] in ENCODER_SOURCES:
+                    runtime.update({
+                        "valid": False, "value": None, "referenced": False,
+                        "reference_count": None, "reference_id": None,
+                        "health": "REFERENCE_REQUIRED", "status": "Encoder acquisition changed — set position again",
+                    })
+                    if axis in POSITION_ENCODER_AXES:
+                        runtime["relative_count"] = None
+                    else:
+                        runtime.update({"reference_angle": 0.0, "relative_angle": None})
+            else:
+                self._remap_axis_runtime(axis)
             self._refresh_camera_from_tracking()
             saved = deepcopy(candidate)
         self.debug.app("tracking_source_selected" if source_changed else "profile_updated", profile_id=profile_id, axis=axis, source=candidate["source"])

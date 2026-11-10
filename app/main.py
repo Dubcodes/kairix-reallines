@@ -430,6 +430,14 @@ async def capture_zoom_fov_point(point: str, body: ZoomFovCapture):
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.patch("/api/tracking/zoom/fov-points/{point}")
+async def update_zoom_fov_point(point: str, body: ZoomFovCapture):
+    try:
+        return await store.update_zoom_fov_point(point, body.fov)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/world-calibration")
 async def get_world_calibration():
     snapshot = store.snapshot()

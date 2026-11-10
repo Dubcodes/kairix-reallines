@@ -64,6 +64,27 @@ export function buildSourceUpdate(source) {
     : {source};
 }
 
+export function createZoomFovDrafts() {
+  return {wide:{value:'',dirty:false},tight:{value:'',dirty:false}};
+}
+
+export function setZoomFovDraft(drafts, point, value) {
+  drafts[point] = {value:String(value), dirty:true};
+  return drafts[point];
+}
+
+export function zoomFovDraftValue(drafts, point, serverValue) {
+  const draft = drafts[point];
+  if (draft?.dirty) return draft.value;
+  draft.value = String(serverValue);
+  return draft.value;
+}
+
+export function acceptZoomFovDraft(drafts, point, serverValue) {
+  drafts[point] = {value:String(serverValue), dirty:false};
+  return drafts[point];
+}
+
 export function validateEngineeringState(state) {
   if (!state || typeof state !== 'object') throw new Error('State payload is unavailable');
   for (const field of ENGINEERING_STATE_FIELDS) {
