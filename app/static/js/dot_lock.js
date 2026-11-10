@@ -90,37 +90,33 @@ export function hitTestDot(points,point,width,height,radius=20){
   return best;
 }
 
-export function drawDotCalibrationOverlay(ctx,width,height,{predicted=[],observed={},selected=null,showConnections=false,markers=[]}={}){
-  const dpr=Math.min(globalThis.devicePixelRatio||1,2);
+export function drawDotCalibrationOverlay(ctx,width,height,{predicted=[],observed={},selected=null,showConnections=false,markers=[],markerScale=1,showLabels=true,showVectors=true}={}){
+  const dpr=Math.min(globalThis.devicePixelRatio||1,2),scale=Math.max(.75,Math.min(4,Number(markerScale)||1));
   const predictedMap=new Map((predicted||[]).map(point=>[String(point.id),point.predicted]));
   const ids=markers.length?markers.map(marker=>String(marker.id)):[...new Set([...predictedMap.keys(),...Object.keys(observed||{})])];
-  const observedMap=observed||{};
-  const pathIds=['M1','M2','M3','M4'];
+  const observedMap=observed||{},pathIds=['M1','M2','M3','M4'];
+  const label=(id,x,y,fill)=>{
+    if(!showLabels)return;
+    const fontSize=12*dpr*scale,pad=4*dpr*scale,text=String(id);
+    ctx.save();ctx.font=`800 ${fontSize}px system-ui`;const metrics=ctx.measureText(text),w=metrics.width+pad*2,h=fontSize+pad*1.5;
+    ctx.fillStyle='rgba(3,10,16,.82)';ctx.fillRect(x+12*dpr*scale,y-h-7*dpr*scale,w,h);
+    ctx.fillStyle=fill;ctx.fillText(text,x+12*dpr*scale+pad,y-9*dpr*scale);ctx.restore();
+  };
   if(showConnections&&pathIds.every(id=>observedMap[id]||predictedMap.get(id))){
-    const drawPath=(source,style,dash=[])=>{
-      ctx.save();ctx.strokeStyle=style;ctx.lineWidth=2*dpr;ctx.setLineDash(dash.map(v=>v*dpr));ctx.beginPath();
-      pathIds.forEach((id,index)=>{const p=source(id);if(!p)return;const x=p.x*width,y=p.y*height;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});
-      const first=source(pathIds[0]);if(first)ctx.lineTo(first.x*width,first.y*height);ctx.stroke();ctx.restore();
-    };
-    drawPath(id=>predictedMap.get(id),'rgba(87,184,255,.72)',[6,5]);
-    drawPath(id=>observedMap[id],'rgba(255,206,103,.92)');
+    const drawPath=(source,style,dash=[])=>{ctx.save();ctx.strokeStyle=style;ctx.lineWidth=2*dpr*scale;ctx.setLineDash(dash.map(v=>v*dpr*scale));ctx.beginPath();pathIds.forEach((id,index)=>{const p=source(id);if(!p)return;const x=p.x*width,y=p.y*height;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});const first=source(pathIds[0]);if(first)ctx.lineTo(first.x*width,first.y*height);ctx.stroke();ctx.restore();};
+    drawPath(id=>predictedMap.get(id),'rgba(87,184,255,.78)',[6,5]);drawPath(id=>observedMap[id],'rgba(255,206,103,.96)');
   }
   for(const id of ids){
     const predictedPoint=predictedMap.get(id);
     if(predictedPoint){
-      const x=predictedPoint.x*width,y=predictedPoint.y*height;
-      ctx.save();ctx.strokeStyle='#57b8ff';ctx.lineWidth=2*dpr;ctx.beginPath();
-      ctx.moveTo(x-10*dpr,y);ctx.lineTo(x+10*dpr,y);ctx.moveTo(x,y-10*dpr);ctx.lineTo(x,y+10*dpr);ctx.stroke();
-      ctx.fillStyle='#57b8ff';ctx.font=`700 ${11*dpr}px system-ui`;ctx.fillText(id,x+11*dpr,y-9*dpr);ctx.restore();
+      const x=predictedPoint.x*width,y=predictedPoint.y*height,r=12*dpr*scale;
+      ctx.save();ctx.strokeStyle='#57b8ff';ctx.lineWidth=2.5*dpr*scale;ctx.beginPath();ctx.moveTo(x-r,y);ctx.lineTo(x+r,y);ctx.moveTo(x,y-r);ctx.lineTo(x,y+r);ctx.stroke();ctx.fillStyle='#57b8ff';ctx.beginPath();ctx.arc(x,y,2.5*dpr*scale,0,Math.PI*2);ctx.fill();label(id,x,y,'#7fcbff');ctx.restore();
     }
     const observedPoint=observedMap[id];
     if(observedPoint){
-      const x=observedPoint.x*width,y=observedPoint.y*height;
-      ctx.save();ctx.strokeStyle=String(selected)===id?'#fff2b2':'#ffce67';ctx.fillStyle='rgba(255,206,103,.18)';ctx.lineWidth=2.5*dpr;ctx.beginPath();ctx.arc(x,y,8*dpr,0,Math.PI*2);ctx.fill();ctx.stroke();
-      ctx.font=`800 ${12*dpr}px system-ui`;ctx.fillStyle=ctx.strokeStyle;ctx.fillText(id,x+11*dpr,y-11*dpr);ctx.restore();
-      if(predictedPoint){
-        ctx.save();ctx.strokeStyle='rgba(255,143,153,.72)';ctx.lineWidth=1.5*dpr;ctx.setLineDash([4*dpr,4*dpr]);ctx.beginPath();ctx.moveTo(predictedPoint.x*width,predictedPoint.y*height);ctx.lineTo(x,y);ctx.stroke();ctx.restore();
-      }
+      const x=observedPoint.x*width,y=observedPoint.y*height,r=10*dpr*scale,stroke=String(selected)===id?'#fff7c9':'#ffce67';
+      ctx.save();ctx.strokeStyle=stroke;ctx.fillStyle='rgba(255,206,103,.20)';ctx.lineWidth=3*dpr*scale;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.beginPath();ctx.moveTo(x-r*1.45,y);ctx.lineTo(x+r*1.45,y);ctx.moveTo(x,y-r*1.45);ctx.lineTo(x,y+r*1.45);ctx.stroke();ctx.fillStyle=stroke;ctx.beginPath();ctx.arc(x,y,3*dpr*scale,0,Math.PI*2);ctx.fill();label(id,x,y,stroke);ctx.restore();
+      if(predictedPoint&&showVectors){ctx.save();ctx.strokeStyle='rgba(255,95,111,.95)';ctx.lineWidth=2*dpr*scale;ctx.setLineDash([5*dpr*scale,4*dpr*scale]);ctx.beginPath();ctx.moveTo(predictedPoint.x*width,predictedPoint.y*height);ctx.lineTo(x,y);ctx.stroke();ctx.setLineDash([]);const angle=Math.atan2(y-predictedPoint.y*height,x-predictedPoint.x*width),ah=7*dpr*scale;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-ah*Math.cos(angle-.55),y-ah*Math.sin(angle-.55));ctx.moveTo(x,y);ctx.lineTo(x-ah*Math.cos(angle+.55),y-ah*Math.sin(angle+.55));ctx.stroke();ctx.restore();}
     }
   }
 }
@@ -141,8 +137,15 @@ export function drawGfxCalibrationOverlay(canvas,state){
   if(!target)return false;
   const ctx=canvas.getContext('2d'),width=canvas.width,height=canvas.height;
   const predicted=projectModelPoints(target.model_points||{},state.render_camera||state.camera,width,height);
-  drawDotCalibrationOverlay(ctx,width,height,{predicted,observed:overlay.editing?(overlay.draft_points||{}):{},selected:overlay.selected_marker,showConnections:target.type==='rectangle',markers:target.markers||[]});
-  const dpr=Math.min(globalThis.devicePixelRatio||1,2);
-  ctx.save();ctx.fillStyle='rgba(112,27,35,.88)';ctx.fillRect(12*dpr,12*dpr,250*dpr,28*dpr);ctx.fillStyle='#ffe1e4';ctx.font=`800 ${12*dpr}px system-ui`;ctx.fillText('CALIBRATION OVERLAY — NOT FOR AIR',22*dpr,31*dpr);ctx.restore();
+  drawDotCalibrationOverlay(ctx,width,height,{
+    predicted,observed:overlay.editing?(overlay.draft_points||{}):{},selected:overlay.selected_marker,
+    showConnections:target.type==='rectangle',markers:target.markers||[],markerScale:overlay.marker_scale??2,
+    showLabels:overlay.show_labels!==false,showVectors:overlay.show_vectors!==false,
+  });
+  const dpr=Math.min(globalThis.devicePixelRatio||1,2),text='CALIBRATION OVERLAY — NOT FOR AIR';
+  ctx.save();ctx.font=`800 ${14*dpr}px system-ui`;const metrics=ctx.measureText(text),pad=10*dpr;
+  ctx.fillStyle='rgba(112,27,35,.92)';ctx.fillRect(14*dpr,height-48*dpr,metrics.width+pad*2,34*dpr);
+  ctx.fillStyle='#ffe1e4';ctx.fillText(text,14*dpr+pad,height-25*dpr);ctx.restore();
   return true;
 }
+

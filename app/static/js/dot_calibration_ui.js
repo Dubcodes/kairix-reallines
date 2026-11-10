@@ -90,6 +90,15 @@ export class DotCalibrationUi {
     id('dotOverlayGfx').onchange=async event=>{
       await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{enabled:event.target.checked,target_id:this.data.active_target_id}})});
     };
+    id('dotOverlayScale').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_scale:Number(event.target.value)}})});
+    };
+    id('dotOverlayLabels').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_labels:event.target.checked}})});
+    };
+    id('dotOverlayVectors').onchange=async event=>{
+      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_vectors:event.target.checked}})});
+    };
     for(const field of ['dotTargetName','dotLockDistance','dotTargetWidth','dotTargetHeight'])id(field).addEventListener('change',()=>this.commitTargetFields());
     id('dotEdgeMidpoints').addEventListener('change',()=>this.toggleEdgeMidpoints());
     const canvas=id('dotLockCanvas');
@@ -190,17 +199,28 @@ export class DotCalibrationUi {
   pointerDown(event){
     const target=this.activeTarget();if(!target||!this.editor.editing)return;
     const point=this.pointerPoint(event),{width,height,canvas}=this.canvasSize();
-    const candidates=Object.entries(this.editor.draft).map(([id,observed])=>({id,observed}));
-    const hit=hitTestDot(candidates,point,width,height,22);
-    if(hit){this.editor.selected=String(hit.id);this.editor.dragging=true;canvas.setPointerCapture?.(event.pointerId);this.render();return;}
+    const candidates=Object.entries(this.editor.draft).filter(([id])=>this.editor.enabled.has(id)).map(([id,observed])=>({id,observed}));
+    const hit=hitTestDot(candidates,point,width,height,28);
+    if(hit){this.editor.selected=String(hit.id);this.editor.dragging=true;canvas.setPointerCapture?.(event.pointerId);this.updateOverlay(true);this.render();return;}
     if(this.editor.adding){
       if(target.markers.length>=20){this.setStatus('MAXIMUM 20 MARKERS','bad');return;}
       const id=this.ensureMarker(target);this.editor.draft[id]=point;this.editor.enabled.add(id);this.editor.selected=id;this.editor.dragging=true;canvas.setPointerCapture?.(event.pointerId);this.persist().catch(()=>{});this.updateOverlay();this.render();return;
     }
-    if(this.editor.selected){this.editor.draft[this.editor.selected]=point;this.editor.enabled.add(this.editor.selected);this.editor.dragging=true;canvas.setPointerCapture?.(event.pointerId);this.updateOverlay();this.render();}
+    // A blank click only deselects. It must never teleport whichever marker was
+    // previously selected; that made off-screen-marker editing unpredictable.
+    this.editor.selected=null;this.editor.dragging=false;this.updateOverlay(true);this.render();
   }
   pointerMove(event){if(!this.editor.dragging||!this.editor.selected)return;this.editor.draft[this.editor.selected]=this.pointerPoint(event);this.updateOverlay();this.draw();}
   pointerUp(event){if(!this.editor.dragging)return;this.editor.dragging=false;this.byId('dotLockCanvas').releasePointerCapture?.(event.pointerId);this.updateOverlay(true);this.render();}
+
+  centerMarker(markerId){
+    const target=this.activeTarget();if(!target)return;
+    if(!this.editor.editing)this.prepareObservation();
+    this.editor.adding=false;this.editor.selected=markerId;this.editor.enabled.add(markerId);
+    this.editor.draft[markerId]={x:.5,y:.5};
+    this.setStatus(`${markerId} PLACED AT VIEW CENTRE — DRAG IT ONTO THE REAL FEATURE`,'warn');
+    this.updateOverlay(true);this.render();
+  }
 
   observationPoints(){
     return Object.fromEntries([...this.editor.enabled].filter(id=>this.editor.draft[id]).map(id=>[id,{x:Number(this.editor.draft[id].x),y:Number(this.editor.draft[id].y)}]));
@@ -241,7 +261,10 @@ export class DotCalibrationUi {
   }
 
   async clearObservations(){
-    const target=this.activeTarget();if(!target)return;target.observations=[];target.model_points={};this.data.last_solution=null;await this.persist();this.cancelEdit(false);this.render();this.setStatus('OBSERVATIONS CLEARED — TARGET MEASUREMENTS AND MARKER LAYOUT RETAINED','warn');
+    const target=this.activeTarget();if(!target)return;
+    target.observations=[];target.model_points={};this.data.last_solution=null;
+    await this.persist();this.cancelEdit(false);await this.updateOverlay(true);this.render();
+    this.setStatus('OBSERVATIONS CLEARED — 0 SAVED · TARGET MEASUREMENTS AND MARKER LAYOUT RETAINED','warn');
   }
 
   renderTargetFields(){
@@ -259,16 +282,36 @@ export class DotCalibrationUi {
     id('dotTargetWidth').disabled=!target||target.type!=='rectangle';id('dotTargetHeight').disabled=!target||target.type!=='rectangle';
     id('deleteDotTarget').disabled=!target;id('addDotLock').disabled=!target;id('prepareDotObservation').disabled=!target;
     id('saveDotObservation').disabled=!target||!this.editor.editing;id('clearDotDraft').disabled=!this.editor.editing;
-    id('dotOverlayGfx').checked=!!this.state?.calibration_overlay?.enabled;
+    const overlay=this.state?.calibration_overlay||{};
+    id('dotOverlayGfx').checked=!!overlay.enabled;
+    id('dotOverlayScale').value=String(overlay.marker_scale??2);
+    id('dotOverlayLabels').checked=overlay.show_labels!==false;
+    id('dotOverlayVectors').checked=overlay.show_vectors!==false;
   }
 
   renderMarkerList(){
     const target=this.activeTarget(),root=this.byId('dotMarkerList');root.replaceChildren();if(!target)return;
     for(const marker of target.markers){
       const wrap=document.createElement('div');wrap.className='marker-control';
-      const button=document.createElement('button');button.type='button';button.className=`marker-chip${this.editor.selected===marker.id?' selected':''}`;button.textContent=marker.label||marker.id;button.onclick=()=>{this.editor.selected=marker.id;this.editor.adding=false;this.render();};
-      const label=document.createElement('label');label.className='tool-check';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=this.editor.enabled.has(marker.id);checkbox.disabled=!this.editor.editing;checkbox.onchange=()=>{if(checkbox.checked){this.editor.enabled.add(marker.id);if(!this.editor.draft[marker.id]){const predicted=this.predictions().find(p=>String(p.id)===String(marker.id))?.predicted;if(predicted)this.editor.draft[marker.id]={...predicted};}}else this.editor.enabled.delete(marker.id);this.updateOverlay();this.draw();};label.append(checkbox,document.createTextNode(' use'));
-      wrap.append(button,label);root.append(wrap);
+      const button=document.createElement('button');button.type='button';button.className=`marker-chip${this.editor.selected===marker.id?' selected':''}`;button.textContent=marker.label||marker.id;button.title='Click to select · double-click to move to viewport centre';
+      button.onclick=()=>{this.editor.selected=marker.id;this.editor.adding=false;this.updateOverlay(true);this.render();};
+      button.ondblclick=event=>{event.preventDefault();this.centerMarker(marker.id);};
+      const label=document.createElement('label');label.className='tool-check';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=this.editor.enabled.has(marker.id);checkbox.disabled=!this.editor.editing;
+      checkbox.onchange=()=>{
+        if(checkbox.checked){
+          this.editor.enabled.add(marker.id);
+          if(!this.editor.draft[marker.id]){
+            const predicted=this.predictions().find(p=>String(p.id)===String(marker.id))?.predicted;
+            this.editor.draft[marker.id]=predicted&&inViewport(predicted)?{...predicted}:{x:.5,y:.5};
+          }
+          this.editor.selected=marker.id;
+        }else{
+          this.editor.enabled.delete(marker.id);delete this.editor.draft[marker.id];
+          if(this.editor.selected===marker.id)this.editor.selected=null;
+        }
+        this.updateOverlay(true);this.render();
+      };
+      label.append(checkbox,document.createTextNode(' use'));wrap.append(button,label);root.append(wrap);
     }
   }
 
@@ -286,11 +329,14 @@ export class DotCalibrationUi {
     const p=solution.proposed||{},c=solution.current||{},coverage=solution.coverage||{};
     const rows=[
       ['Error',`${fmt(solution.rms_before_px,1)} → ${fmt(solution.rms_after_px,1)} px RMS`],
-      ['Matched markers',solution.matched_points??'—'],['Observation sets',solution.observation_sets??'—'],
+      ['Matched placements',solution.matched_points??'—'],['Observation sets',solution.observation_sets??'—'],
       ['Pan ratio',`${fmt(c.pan_ratio,6)} → ${fmt(p.pan_ratio,6)}`],['Tilt ratio',`${fmt(c.tilt_ratio,6)} → ${fmt(p.tilt_ratio,6)}`],
-      ['Zoom curve',`${fmt(c.zoom_curvature,4)} → ${fmt(p.zoom_curvature,4)}`],
+      ['Zoom curve',solution.zoom_saturated?'MODEL LIMIT — NOT APPLIED':`${fmt(c.zoom_curvature,4)} → ${fmt(p.zoom_curvature,4)}`],
       ['Coverage',`Pan ${coverage.pan??0} counts · Tilt ${coverage.tilt??0} · Zoom ${coverage.zoom??0}`],
-    ];root.innerHTML=rows.map(([a,b])=>`<div>${a}</div><div>${b}</div>`).join('');apply.disabled=false;
+    ];
+    root.innerHTML=rows.map(([a,b])=>`<div>${a}</div><div>${b}</div>`).join('');
+    for(const warning of solution.warnings||[]){const line=document.createElement('div');line.className='form-error dot-solution-warning';line.textContent=warning;root.append(line);}
+    apply.disabled=false;
   }
 
   draw(){

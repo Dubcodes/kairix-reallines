@@ -120,11 +120,56 @@ class DotCalibrationMathCase(unittest.TestCase):
             observations.append(obs)
         dot_data = {"targets": [target_with(observations)], "active_target_id": "target-1", "last_solution": None}
         solved = solve_dot_calibration(profile, dot_data, zoom)
-        self.assertEqual(solved["matched_points"], 4)
-        self.assertEqual(solved["observation_sets"], 4)
+        # Both the baseline placements and their follow-up placements are
+        # equal-authority measurements in the symmetric solver.
+        self.assertEqual(solved["matched_points"], 8)
+        self.assertEqual(solved["observation_sets"], 5)
         self.assertAlmostEqual(solved["proposed"]["pan_ratio"], true_pan, places=3)
         self.assertAlmostEqual(solved["proposed"]["tilt_ratio"], true_tilt, places=3)
         self.assertLess(solved["rms_after_px"], solved["rms_before_px"] * 0.01)
+
+
+    def test_repeated_observations_drive_fit_independently_of_distance_hint(self):
+        profile = profile_fixture(3.0, 2.0)
+        zoom = {"wide": None, "tight": None, "curvature": 0.0}
+        true_pan, true_tilt = 3.7, 2.6
+        baseline = observation("O1", points=BASE_POINTS, refs={"pan": "P1", "tilt": "T1", "zoom": None})
+        camera = _camera_for_observation(baseline, profile, true_pan, true_tilt, zoom, 0.0)
+        world = _world_points_for_baseline({"type": "free", "approx_distance_m": 18.0}, baseline, camera)
+        observations = [baseline]
+        for index, (pan_raw, tilt_raw) in enumerate(((140, 55), (-180, -70), (260, 95)), 2):
+            obs = observation(f"O{index}", pan_raw, tilt_raw, refs={"pan": "P1", "tilt": "T1", "zoom": None})
+            camera = _camera_for_observation(obs, profile, true_pan, true_tilt, zoom, 0.0)
+            obs["points"] = {marker_id: _project(point, camera) for marker_id, point in world.items()}
+            observations.append(obs)
+        near = solve_dot_calibration(profile, {"targets": [target_with(deepcopy(observations), approx_distance_m=2.0)], "active_target_id": "target-1"}, zoom)
+        far = solve_dot_calibration(profile, {"targets": [target_with(deepcopy(observations), approx_distance_m=200.0)], "active_target_id": "target-1"}, zoom)
+        self.assertAlmostEqual(near["proposed"]["pan_ratio"], true_pan, places=3)
+        self.assertAlmostEqual(near["proposed"]["tilt_ratio"], true_tilt, places=3)
+        self.assertAlmostEqual(near["proposed"]["pan_ratio"], far["proposed"]["pan_ratio"], places=6)
+        self.assertAlmostEqual(near["proposed"]["tilt_ratio"], far["proposed"]["tilt_ratio"], places=6)
+
+    def test_solving_same_observations_after_apply_is_stable(self):
+        profile = profile_fixture(3.1, 2.2)
+        zoom = {"wide": None, "tight": None, "curvature": 0.0}
+        true_pan, true_tilt = 3.6, 2.5
+        baseline = observation("O1", points=BASE_POINTS, refs={"pan": "P1", "tilt": "T1", "zoom": None})
+        camera = _camera_for_observation(baseline, profile, true_pan, true_tilt, zoom, 0.0)
+        world = _world_points_for_baseline({"type": "free", "approx_distance_m": 20.0}, baseline, camera)
+        observations = [baseline]
+        for index, (pan_raw, tilt_raw) in enumerate(((120, 60), (-170, -50), (240, 90)), 2):
+            obs = observation(f"O{index}", pan_raw, tilt_raw, refs={"pan": "P1", "tilt": "T1", "zoom": None})
+            camera = _camera_for_observation(obs, profile, true_pan, true_tilt, zoom, 0.0)
+            obs["points"] = {marker_id: _project(point, camera) for marker_id, point in world.items()}
+            observations.append(obs)
+        data = {"targets": [target_with(observations)], "active_target_id": "target-1"}
+        first = solve_dot_calibration(profile, data, zoom)
+        profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"] = first["proposed"]["pan_ratio"]
+        profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"] = first["proposed"]["tilt_ratio"]
+        second = solve_dot_calibration(profile, data, zoom)
+        self.assertAlmostEqual(second["proposed"]["pan_ratio"], first["proposed"]["pan_ratio"], places=5)
+        self.assertAlmostEqual(second["proposed"]["tilt_ratio"], first["proposed"]["tilt_ratio"], places=5)
+        self.assertLess(second["rms_after_px"], 0.01)
 
     def test_solver_recovers_nonlinear_zoom_curve_without_moving_endpoints(self):
         profile = profile_fixture(3.6, 2.5)
@@ -180,8 +225,12 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             store = self.make_store(directory)
             target = target_with([])
             await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
-            await store.update_calibration_overlay({"enabled": True, "target_id": target["id"], "editing": True, "draft_points": {"M1": {"x": 0.4, "y": 0.4}}})
-            self.assertTrue(store.snapshot()["calibration_overlay"]["enabled"])
+            await store.update_calibration_overlay({"enabled": True, "target_id": target["id"], "editing": True, "draft_points": {"M1": {"x": 0.4, "y": 0.4}}, "marker_scale": 3.0, "show_labels": False, "show_vectors": False})
+            overlay = store.snapshot()["calibration_overlay"]
+            self.assertTrue(overlay["enabled"])
+            self.assertEqual(overlay["marker_scale"], 3.0)
+            self.assertFalse(overlay["show_labels"])
+            self.assertFalse(overlay["show_vectors"])
             reloaded = self.make_store(directory)
             self.assertFalse(reloaded.snapshot()["calibration_overlay"]["enabled"])
             self.assertEqual(reloaded.world_calibration["dot_calibration"]["targets"][0]["name"], "Measured sign")

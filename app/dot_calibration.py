@@ -323,48 +323,143 @@ def _values_dict(names: list[str], values: list[float], profile: dict[str, Any],
     return result
 
 
-def _residuals(names: list[str], values: list[float], profile: dict[str, Any], zoom_mapping: dict[str, Any], dot_calibration: dict[str, Any], include_models: bool = False):
+def _project_direction(direction: dict[str, float], camera: dict[str, float]) -> dict[str, float] | None:
+    """Project a world-space bearing through a camera without assuming target depth."""
+    origin = {axis: float(camera.get(axis, 0.0 if axis != "z" else 1.7)) for axis in ("x", "y", "z")}
+    point = {axis: origin[axis] + direction[axis] * 1000.0 for axis in ("x", "y", "z")}
+    return _project(point, camera)
+
+
+def _mean_direction(directions: list[dict[str, float]]) -> dict[str, float] | None:
+    if not directions:
+        return None
+    vector = {axis: sum(direction[axis] for direction in directions) for axis in ("x", "y", "z")}
+    length = math.sqrt(sum(vector[axis] * vector[axis] for axis in ("x", "y", "z")))
+    if length <= 1e-9:
+        return None
+    return {axis: vector[axis] / length for axis in ("x", "y", "z")}
+
+
+def _model_points_from_bearings(
+    target: dict[str, Any],
+    marker_directions: dict[str, dict[str, float]],
+    reference_camera: dict[str, float],
+) -> dict[str, dict[str, float]]:
+    """Give solved bearings a finite depth for overlay rendering.
+
+    Approximate distance is a scale hint only. Once repeated observations exist,
+    marker bearings are solved from all image measurements equally. A measured
+    rectangle can replace the distance hint with metric scale.
+    """
+    if not marker_directions:
+        return {}
+    origin = {axis: float(reference_camera.get(axis, 0.0 if axis != "z" else 1.7)) for axis in ("x", "y", "z")}
+
+    def points_at(distance: float) -> dict[str, dict[str, float]]:
+        return {
+            marker_id: {axis: origin[axis] + direction[axis] * distance for axis in ("x", "y", "z")}
+            for marker_id, direction in marker_directions.items()
+        }
+
+    distance = float(target.get("approx_distance_m") or 10.0)
+    if target.get("type") == "rectangle" and (target.get("width_m") or target.get("height_m")):
+        unit = points_at(1.0)
+        ratios: list[float] = []
+
+        def separation(a: str, b: str) -> float | None:
+            if a not in unit or b not in unit:
+                return None
+            return math.sqrt(sum((unit[a][axis] - unit[b][axis]) ** 2 for axis in ("x", "y", "z")))
+
+        if target.get("width_m"):
+            for pair in (("M1", "M2"), ("M4", "M3")):
+                measured = separation(*pair)
+                if measured and measured > 1e-9:
+                    ratios.append(float(target["width_m"]) / measured)
+        if target.get("height_m"):
+            for pair in (("M1", "M4"), ("M2", "M3")):
+                measured = separation(*pair)
+                if measured and measured > 1e-9:
+                    ratios.append(float(target["height_m"]) / measured)
+        if ratios:
+            ratios.sort()
+            distance = ratios[len(ratios) // 2]
+    return points_at(max(0.05, min(5000.0, distance)))
+
+
+def _residuals(
+    names: list[str], values: list[float], profile: dict[str, Any], zoom_mapping: dict[str, Any],
+    dot_calibration: dict[str, Any], include_models: bool = False,
+):
+    """Return symmetric image-space residuals for repeated marker observations.
+
+    No observation is treated as hidden ground truth. For each physical marker,
+    every saved screen position is converted to a world-space bearing using the
+    candidate Pan/Tilt/Zoom model. The common marker bearing is the normalised
+    mean of those bearings, and every observation is then reprojected against
+    that same bearing. This makes the operator's dragged dots the measurements
+    that drive the fit instead of forcing later observations to compromise with
+    a 3D plane manufactured from Observation 1.
+    """
     params = _values_dict(names, values, profile, zoom_mapping)
     result: list[float] = []
     models: dict[str, dict[str, dict[str, float]]] = {}
     used_points = 0
-    used_observations = 0
+    used_observation_ids: set[str] = set()
+
     for target in dot_calibration.get("targets") or []:
         observations = target.get("observations") or []
         if len(observations) < 2:
             continue
-        baseline = observations[0]
-        if not baseline.get("points"):
-            continue
-        try:
-            baseline_camera = _camera_for_observation(baseline, profile, params["pan_ratio"], params["tilt_ratio"], zoom_mapping, params["zoom_curvature"])
-            world_points = _world_points_for_baseline(target, baseline, baseline_camera)
-        except (DotCalibrationError, ValueError, ZeroDivisionError):
-            continue
-        if include_models:
-            models[target["id"]] = deepcopy(world_points)
-        for observation in observations[1:]:
+
+        tracks: dict[str, list[tuple[dict[str, Any], dict[str, float], dict[str, float], dict[str, float]]]] = {}
+        reference_camera: dict[str, float] | None = None
+        for observation in observations:
+            points = observation.get("points") or {}
+            if not points:
+                continue
             try:
-                camera = _camera_for_observation(observation, profile, params["pan_ratio"], params["tilt_ratio"], zoom_mapping, params["zoom_curvature"])
+                camera = _camera_for_observation(
+                    observation, profile, params["pan_ratio"], params["tilt_ratio"],
+                    zoom_mapping, params["zoom_curvature"],
+                )
             except DotCalibrationError:
                 continue
-            observation_used = False
-            for marker_id, observed in (observation.get("points") or {}).items():
-                world = world_points.get(marker_id)
-                if not world:
+            if reference_camera is None:
+                reference_camera = camera
+            for marker_id, observed in points.items():
+                try:
+                    _, direction = _camera_ray(observed, camera)
+                    direction = _norm(direction)
+                except (ValueError, ZeroDivisionError):
                     continue
-                projected = _project(world, camera)
+                tracks.setdefault(str(marker_id), []).append((observation, camera, observed, direction))
+
+        marker_directions: dict[str, dict[str, float]] = {}
+        for marker_id, entries in tracks.items():
+            if len(entries) < 2:
+                continue
+            common = _mean_direction([entry[3] for entry in entries])
+            if common is None:
+                continue
+            marker_directions[marker_id] = common
+            for observation, camera, observed, _direction in entries:
+                projected = _project_direction(common, camera)
                 if not projected:
                     continue
-                result.extend(((projected["x"] - float(observed["x"])) * REFERENCE_WIDTH, (projected["y"] - float(observed["y"])) * REFERENCE_HEIGHT))
+                result.extend((
+                    (projected["x"] - float(observed["x"])) * REFERENCE_WIDTH,
+                    (projected["y"] - float(observed["y"])) * REFERENCE_HEIGHT,
+                ))
                 used_points += 1
-                observation_used = True
-            if observation_used:
-                used_observations += 1
-    if include_models:
-        return result, models, used_points, used_observations
-    return result
+                used_observation_ids.add(str(observation.get("id") or id(observation)))
 
+        if include_models and reference_camera is not None and marker_directions:
+            models[target["id"]] = _model_points_from_bearings(target, marker_directions, reference_camera)
+
+    if include_models:
+        return result, models, used_points, len(used_observation_ids)
+    return result
 
 def _cost(residuals: list[float]) -> float:
     return sum(value * value for value in residuals)
@@ -390,77 +485,101 @@ def _solve_linear(matrix: list[list[float]], vector: list[float]) -> list[float]
 
 def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, Any], zoom_mapping: dict[str, Any]) -> dict[str, Any]:
     dot_calibration = normalise_dot_calibration(dot_calibration)
-    names, initial_values = _parameter_model(profile, zoom_mapping, dot_calibration)
-    initial_residual = _residuals(names, initial_values, profile, zoom_mapping, dot_calibration)
-    if len(initial_residual) < 8:
-        raise DotCalibrationError("Need at least four matched marker observations after the baseline view")
-    params = initial_values[:]
-    damping = 1e-2
+    all_names, all_initial = _parameter_model(profile, zoom_mapping, dot_calibration)
 
-    def bounded(values: list[float]) -> list[float]:
-        result = values[:]
-        for index, name in enumerate(names):
-            if name == "pan_ratio":
-                base = float(profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"])
-                result[index] = max(base * 0.25, min(base * 4.0, result[index]))
-            elif name == "tilt_ratio":
-                base = float(profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"])
-                result[index] = max(base * 0.25, min(base * 4.0, result[index]))
-            elif name == "zoom_curvature":
-                result[index] = max(-1.0, min(4.0, result[index]))
-        return result
+    def optimise(names: list[str], initial_values: list[float]) -> tuple[list[float], list[float], list[float], bool]:
+        initial_residual = _residuals(names, initial_values, profile, zoom_mapping, dot_calibration)
+        if len(initial_residual) < 8:
+            raise DotCalibrationError("Need at least four repeated marker placements across two or more views")
+        params = initial_values[:]
+        damping = 1e-2
 
-    def objective(values: list[float]) -> tuple[float, list[float]]:
-        residual = _residuals(names, values, profile, zoom_mapping, dot_calibration)
-        if len(residual) != len(initial_residual):
-            return float("inf"), residual
-        cost = _cost(residual)
-        # Weak priors keep under-constrained datasets from producing absurd jumps.
-        for name, value, initial in zip(names, values, initial_values):
-            if name.endswith("ratio"):
-                scale = max(abs(initial) * 0.15, 0.05)
-                cost += 4.0 * ((value - initial) / scale) ** 2
-            else:
-                cost += 0.25 * ((value - initial) / 1.5) ** 2
-        return cost, residual
+        def bounded(values: list[float]) -> list[float]:
+            result = values[:]
+            for index, name in enumerate(names):
+                if name == "pan_ratio":
+                    base = float(profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"])
+                    result[index] = max(base * 0.25, min(base * 4.0, result[index]))
+                elif name == "tilt_ratio":
+                    base = float(profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"])
+                    result[index] = max(base * 0.25, min(base * 4.0, result[index]))
+                elif name == "zoom_curvature":
+                    result[index] = max(-1.0, min(4.0, result[index]))
+            return result
 
-    converged = False
-    for _ in range(80):
-        base_cost, residual = objective(params)
-        if not math.isfinite(base_cost):
-            raise DotCalibrationError("Dot calibration objective is invalid")
-        jacobian = [[0.0] * len(params) for _ in residual]
-        for column, name in enumerate(names):
-            step = 1e-5 * max(1.0, abs(params[column])) if name.endswith("ratio") else 1e-4
-            trial = params[:]
-            trial[column] += step
-            _, shifted = objective(bounded(trial))
-            if len(shifted) != len(residual):
+        def objective(values: list[float]) -> tuple[float, list[float]]:
+            residual = _residuals(names, values, profile, zoom_mapping, dot_calibration)
+            if len(residual) != len(initial_residual):
+                return float("inf"), residual
+            cost = _cost(residual)
+            # Guard rails only. Image correspondences dominate these tiny priors.
+            for name, value, initial in zip(names, values, initial_values):
+                if name.endswith("ratio"):
+                    scale = max(abs(initial) * 0.20, 0.05)
+                    cost += 0.05 * ((value - initial) / scale) ** 2
+                else:
+                    cost += 0.01 * ((value - initial) / 2.0) ** 2
+            return cost, residual
+
+        converged = False
+        for _ in range(100):
+            base_cost, residual = objective(params)
+            if not math.isfinite(base_cost):
+                raise DotCalibrationError("Dot calibration objective is invalid")
+            jacobian = [[0.0] * len(params) for _ in residual]
+            for column, name in enumerate(names):
+                step = 1e-5 * max(1.0, abs(params[column])) if name.endswith("ratio") else 1e-4
+                trial = params[:]
+                trial[column] += step
+                _, shifted = objective(bounded(trial))
+                if len(shifted) != len(residual):
+                    continue
+                for row in range(len(residual)):
+                    jacobian[row][column] = (shifted[row] - residual[row]) / step
+            normal = [[sum(jacobian[k][i] * jacobian[k][j] for k in range(len(residual))) for j in range(len(params))] for i in range(len(params))]
+            gradient = [sum(jacobian[k][i] * residual[k] for k in range(len(residual))) for i in range(len(params))]
+            for index in range(len(params)):
+                normal[index][index] += damping
+            try:
+                delta = _solve_linear(normal, [-value for value in gradient])
+            except DotCalibrationError:
+                damping *= 10.0
                 continue
-            for row in range(len(residual)):
-                jacobian[row][column] = (shifted[row] - residual[row]) / step
-        normal = [[sum(jacobian[k][i] * jacobian[k][j] for k in range(len(residual))) for j in range(len(params))] for i in range(len(params))]
-        gradient = [sum(jacobian[k][i] * residual[k] for k in range(len(residual))) for i in range(len(params))]
-        for index in range(len(params)):
-            normal[index][index] += damping
-        try:
-            delta = _solve_linear(normal, [-value for value in gradient])
-        except DotCalibrationError:
-            damping *= 10.0
-            continue
-        candidate = bounded([value + change for value, change in zip(params, delta)])
-        candidate_cost, _ = objective(candidate)
-        if candidate_cost < base_cost:
-            params = candidate
-            damping = max(1e-8, damping / 3.0)
-            if max(abs(change) for change in delta) < 1e-7:
-                converged = True
-                break
-        else:
-            damping *= 10.0
-    final_residual, models, used_points, used_observations = _residuals(names, params, profile, zoom_mapping, dot_calibration, include_models=True)
+            candidate = bounded([value + change for value, change in zip(params, delta)])
+            candidate_cost, _ = objective(candidate)
+            if candidate_cost < base_cost:
+                params = candidate
+                damping = max(1e-8, damping / 3.0)
+                if max(abs(change) for change in delta) < 1e-7:
+                    converged = True
+                    break
+            else:
+                damping *= 10.0
+        final_residual = _residuals(names, params, profile, zoom_mapping, dot_calibration)
+        return params, initial_residual, final_residual, converged
+
+    names = all_names[:]
+    initial_values = all_initial[:]
+    params, initial_residual, final_residual, converged = optimise(names, initial_values)
+
+    zoom_saturated = False
+    if "zoom_curvature" in names:
+        zoom_index = names.index("zoom_curvature")
+        zoom_value = params[zoom_index]
+        zoom_saturated = zoom_value <= -0.9995 or zoom_value >= 3.9995
+        # A boundary hit means this one-number lens model cannot explain the data.
+        # Do not let a bad Zoom parameter drag the otherwise useful Pan/Tilt fit.
+        if zoom_saturated and len(names) > 1:
+            names = [name for name in all_names if name != "zoom_curvature"]
+            initial_values = [value for name, value in zip(all_names, all_initial) if name != "zoom_curvature"]
+            params, initial_residual, final_residual, converged = optimise(names, initial_values)
+
+    final_residual, models, used_points, used_observations = _residuals(
+        names, params, profile, zoom_mapping, dot_calibration, include_models=True,
+    )
     if not final_residual:
-        raise DotCalibrationError("Dot calibration has no usable correspondences")
+        raise DotCalibrationError("Dot calibration has no usable repeated marker correspondences")
+
     initial_rms = math.sqrt(_cost(initial_residual) / len(initial_residual))
     final_rms = math.sqrt(_cost(final_residual) / len(final_residual))
     current = _values_dict(names, initial_values, profile, zoom_mapping)
@@ -477,6 +596,13 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
             if value is not None:
                 counts["zoom"].append(int(value))
     coverage = {axis: (max(values) - min(values) if values else 0) for axis, values in counts.items()}
+
+    warnings: list[str] = []
+    if zoom_saturated:
+        warnings.append("Zoom fit hit the limit of the current one-curve lens model. Zoom correction was excluded from this proposal; Pan/Tilt still use the marker observations.")
+    if final_rms > 12.0:
+        warnings.append("Residual image error is still high. Add more well-spread observations or review marker identity/placement before trusting the refinement.")
+
     return {
         "solved": True,
         "converged": converged,
@@ -490,9 +616,13 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
         "observation_sets": used_observations,
         "coverage": coverage,
         "target_models": models,
+        "zoom_saturated": zoom_saturated,
+        "warnings": warnings,
         "notes": [
-            "V1 refines Pan/Tilt encoder gearing and Zoom curve shape from repeated image correspondences.",
-            "Saved target dimensions are used to improve distance scale when a measured rectangle is available.",
+            "Repeated marker placements are equal-authority image measurements; Observation 1 is no longer hidden 3D truth.",
+            "Approximate target distance is used only to give solved bearings a finite display depth; measured rectangle dimensions can provide metric scale.",
+            "V2 refines Pan/Tilt encoder gearing and, when the current lens model can support it, Zoom curve shape.",
             "Rig-offset and lens-distortion solving remain separate future refinements.",
         ],
     }
+

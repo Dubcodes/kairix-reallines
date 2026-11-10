@@ -12,10 +12,13 @@
   <button id="newRectangleDotTarget" type="button" class="primary">New rectangle target</button>
   <button id="deleteDotTarget" type="button" class="danger subtle">Delete target</button>
   <label class="tool-check calibration-gfx-toggle"><input id="dotOverlayGfx" type="checkbox"> Show calibration overlay on GFX</label>
+  <label>GFX marker size<select id="dotOverlayScale"><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option><option value="3">3×</option></select></label>
+  <label class="tool-check"><input id="dotOverlayLabels" type="checkbox" checked> Labels</label>
+  <label class="tool-check"><input id="dotOverlayVectors" type="checkbox" checked> Error arrows</label>
 </div>
 <div id="dotTargetFields" class="compact-fields">
   <label>Name<input id="dotTargetName" type="text" maxlength="80"></label>
-  <label>Approx. distance (m)<input id="dotLockDistance" type="number" min="0.05" step="0.1" value="10"></label>
+  <label>Approx. distance (m)<input id="dotLockDistance" type="number" min="0.05" step="0.1" value="10"><span class="small">Starting scale hint only — repeated marker observations drive the refinement once calibration begins.</span></label>
   <label>Measured width (m)<input id="dotTargetWidth" type="number" min="0.001" step="0.001" placeholder="optional"></label>
   <label>Measured height (m)<input id="dotTargetHeight" type="number" min="0.001" step="0.001" placeholder="optional"></label>
   <label class="tool-check"><input id="dotEdgeMidpoints" type="checkbox"> Rectangle edge midpoints (8 markers)</label>
@@ -35,7 +38,7 @@
   <canvas id="dotLockCanvas" aria-label="Dot calibration viewport"></canvas>
 </div>
 <div class="dot-calibration-details">
-  <div><h3>Markers</h3><div id="dotMarkerList" class="marker-list"></div><p class="small">Select a marker, then drag it. At extreme zoom it is fine if only one marker remains visible; save only the markers you can confidently align.</p></div>
+  <div><h3>Markers</h3><div id="dotMarkerList" class="marker-list"></div><p class="small">Click a marker to select it. <strong>Double-click a marker to place it in the centre of the viewport</strong> so an off-screen marker can be recovered. Drag the gold marker onto the real feature. Uncheck <em>use</em> for markers that are not visible in this observation.</p></div>
   <div><h3>Saved observations</h3><div id="dotObservationList" class="observation-list"></div></div>
   <div><h3>Refinement</h3><div id="dotSolution" class="kv"></div><div class="row"><button id="solveDotCalibration" type="button">Calculate refinement</button><button id="applyDotCalibration" type="button" class="primary" disabled>Apply refinement</button></div></div>
 </div>

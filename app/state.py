@@ -161,6 +161,7 @@ class StateStore:
         self.calibration_overlay: dict[str, Any] = {
             "enabled": False, "target_id": None, "editing": False,
             "draft_points": {}, "selected_marker": None,
+            "marker_scale": 2.0, "show_labels": True, "show_vectors": True,
         }
         self._refresh_tracking_from_profile(initial=True)
         self.clients: set[WebSocket] = set()
@@ -1026,7 +1027,7 @@ class StateStore:
         return result
 
     async def update_calibration_overlay(self, values: dict[str, Any]) -> dict[str, Any]:
-        unknown = set(values) - {"enabled", "target_id", "editing", "draft_points", "selected_marker"}
+        unknown = set(values) - {"enabled", "target_id", "editing", "draft_points", "selected_marker", "marker_scale", "show_labels", "show_vectors"}
         if unknown:
             raise ValueError(f"Unknown calibration overlay setting: {sorted(unknown)[0]}")
         candidate = deepcopy(self.calibration_overlay)
@@ -1038,6 +1039,15 @@ class StateStore:
             candidate["editing"] = bool(values["editing"])
         if "selected_marker" in values:
             candidate["selected_marker"] = None if values["selected_marker"] is None else str(values["selected_marker"])
+        if "marker_scale" in values:
+            scale = float(values["marker_scale"])
+            if not math.isfinite(scale) or not 0.75 <= scale <= 4.0:
+                raise ValueError("Calibration overlay marker_scale must be between 0.75 and 4.0")
+            candidate["marker_scale"] = scale
+        if "show_labels" in values:
+            candidate["show_labels"] = bool(values["show_labels"])
+        if "show_vectors" in values:
+            candidate["show_vectors"] = bool(values["show_vectors"])
         if "draft_points" in values:
             raw = values["draft_points"] or {}
             if not isinstance(raw, dict) or len(raw) > 20:
