@@ -1072,7 +1072,7 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)
             pose = store.pose_snapshot()
-            self.assertEqual(set(pose), {"camera", "live_camera", "render_camera", "tracking", "sync", "server_mono"})
+            self.assertEqual(set(pose), {"camera", "live_camera", "render_camera", "tracking", "zoom_fov", "sync", "server_mono"})
             self.assertNotIn("scene", pose)
             self.assertIn("scene", store.snapshot())
             client = RecordingClient()

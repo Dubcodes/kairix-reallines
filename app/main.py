@@ -117,6 +117,10 @@ class EncoderReference(BaseModel):
     angle: float = 0.0
 
 
+class ZoomFovCapture(BaseModel):
+    fov: float
+
+
 class FrontendLog(BaseModel):
     level: str = "info"
     page: str = "unknown"
@@ -416,6 +420,14 @@ async def clear_encoder_reference(axis: str):
         store.sample_tick(source_manager.snapshots())
     await store.broadcast_state()
     return {"ok": True}
+
+
+@app.post("/api/tracking/zoom/fov-points/{point}")
+async def capture_zoom_fov_point(point: str, body: ZoomFovCapture):
+    try:
+        return await store.capture_zoom_fov_point(point, body.fov)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/world-calibration")

@@ -26,6 +26,25 @@ DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
 DEFAULT_ENGINEERING = {"profile_name": "Development Simulator", "debug_enabled": True, "allow_provisional_gfx": False, "preview_source": "none", "preview_url": "", "input_sources": {"pan": "simulator", "tilt": "simulator", "zoom": "simulator", "focus": "disabled"}}
 DEFAULT_SYNC = {"graphics_delay_ms": 0, "history_duration_seconds": 5.0}
+
+
+def temporary_zoom_fov(current_count: int, wide_count: int, wide_fov: float, tight_count: int, tight_fov: float) -> float:
+    """Map a session-relative Zoom count through a clamped focal-length proxy."""
+    values = (float(wide_fov), float(tight_fov))
+    if any(not math.isfinite(value) or not 0.0 < value < 180.0 for value in values):
+        raise ValueError("Zoom FOV values must be greater than 0 and less than 180 degrees")
+    if wide_fov <= tight_fov:
+        raise ValueError("Wide FOV must be greater than Tight FOV")
+    if int(wide_count) == int(tight_count):
+        raise ValueError("Wide and Tight Zoom positions must use different counts")
+    position = (int(current_count) - int(wide_count)) / (int(tight_count) - int(wide_count))
+    position = max(0.0, min(1.0, position))
+    wide_proxy = 1.0 / math.tan(math.radians(float(wide_fov)) / 2.0)
+    tight_proxy = 1.0 / math.tan(math.radians(float(tight_fov)) / 2.0)
+    live_proxy = wide_proxy + position * (tight_proxy - wide_proxy)
+    return math.degrees(2.0 * math.atan(1.0 / live_proxy))
+
+
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAX_PNG_BYTES = 10 * 1024 * 1024
 ASSET_ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -121,6 +140,11 @@ class StateStore:
             "calibration_confidence": "UNAVAILABLE", "warnings": [],
             "required_axes": list(REQUIRED_AXES),
         }
+        self.zoom_fov_mapping: dict[str, Any] = {
+            "wide": None, "tight": None, "active": False,
+            "status": "NOT CALIBRATED", "reference_id": None,
+            "fov_source": "Manual / Profile", "live_fov": float(self.profile.get("camera", {}).get("fov", 60.0)),
+        }
         self._refresh_tracking_from_profile(initial=True)
         self.clients: set[WebSocket] = set()
         self.lock = asyncio.Lock()
@@ -179,6 +203,11 @@ class StateStore:
             for axis in REQUIRED_AXES
             if self.profile["axes"][axis]["source"] in ENCODER_SOURCES
         )
+        zoom_points = tuple(
+            (name, point.get("relative_count"), point.get("fov"), point.get("reference_id"))
+            for name in ("wide", "tight")
+            if (point := self.zoom_fov_mapping.get(name))
+        )
         return (
             self.profile_index["active_id"],
             tracking_fingerprint(self.profile),
@@ -189,6 +218,7 @@ class StateStore:
             self.profile.get("camera", {}).get("fov"),
             self.profile.get("camera", {}).get("height"),
             rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")),
+            zoom_points,
         )
 
     def _record_pose_sample(self, timestamp: float | None = None) -> None:
@@ -569,6 +599,7 @@ class StateStore:
             pivot_height = float(self.profile.get("camera", {}).get("height", self.camera.get("height", 1.7)))
             pivot = {"x": 0.0, "y": 0.0, "z": pivot_height}
             self.camera.update({"roll": 0.0})
+        self._refresh_zoom_fov_mapping()
         optical_centre = camera_position(
             pivot,
             float(self.camera.get("pan", 0.0)),
@@ -590,6 +621,80 @@ class StateStore:
         self.camera["updated_mono"] = max((self.tracking["axes"][axis]["updated_mono"] for axis in REQUIRED_AXES), default=0.0)
         if sample:
             self._refresh_pose_reference_and_sample()
+
+    def _refresh_zoom_fov_mapping(self) -> None:
+        manual_fov = float(self.profile.get("camera", {}).get("fov", 60.0))
+        zoom = self.tracking["axes"].get("zoom", {})
+        current_reference = zoom.get("reference_id") if zoom.get("referenced") else None
+        points = [self.zoom_fov_mapping.get(name) for name in ("wide", "tight")]
+        stored_references = {point.get("reference_id") for point in points if point}
+        if stored_references and (not current_reference or stored_references != {current_reference}):
+            self.zoom_fov_mapping.update({
+                "wide": None, "tight": None, "active": False, "reference_id": None,
+                "status": "REFERENCE CHANGED — CAPTURE WIDE/TIGHT AGAIN",
+            })
+        wide, tight = self.zoom_fov_mapping.get("wide"), self.zoom_fov_mapping.get("tight")
+        active = bool(
+            self.profile["axes"]["zoom"]["source"] == "quadrature_gpio"
+            and zoom.get("referenced") and zoom.get("relative_count") is not None
+            and wide and tight and wide.get("reference_id") == current_reference == tight.get("reference_id")
+        )
+        live_fov = manual_fov
+        if active:
+            live_fov = temporary_zoom_fov(
+                int(zoom["relative_count"]), int(wide["relative_count"]), float(wide["fov"]),
+                int(tight["relative_count"]), float(tight["fov"]),
+            )
+            self.zoom_fov_mapping.update({
+                "active": True, "status": "LIVE ZOOM ACTIVE", "reference_id": current_reference,
+                "fov_source": "Physical Zoom — Temporary mapping", "live_fov": live_fov,
+            })
+        else:
+            status = self.zoom_fov_mapping.get("status", "NOT CALIBRATED")
+            if wide and not tight:
+                status = "WIDE CAPTURED — CAPTURE TIGHT"
+            elif tight and not wide:
+                status = "TIGHT CAPTURED — CAPTURE WIDE"
+            elif not wide and not tight and not status.startswith("REFERENCE CHANGED"):
+                status = "NOT CALIBRATED"
+            self.zoom_fov_mapping.update({
+                "active": False, "status": status, "reference_id": current_reference,
+                "fov_source": "Manual / Profile", "live_fov": manual_fov,
+            })
+        self.camera["fov"] = live_fov
+        self.camera["fov_source"] = self.zoom_fov_mapping["fov_source"]
+
+    async def capture_zoom_fov_point(self, point: str, fov: float) -> dict[str, Any]:
+        if point not in {"wide", "tight"}:
+            raise ValueError("Zoom FOV point must be wide or tight")
+        try:
+            fov = float(fov)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Zoom FOV must be numeric") from exc
+        if not math.isfinite(fov) or not 0.0 < fov < 180.0:
+            raise ValueError("Zoom FOV must be greater than 0 and less than 180 degrees")
+        async with self.lock:
+            zoom = self.tracking["axes"].get("zoom", {})
+            if self.profile["axes"]["zoom"]["source"] != "quadrature_gpio" or not zoom.get("referenced") or zoom.get("relative_count") is None or not zoom.get("reference_id"):
+                raise ValueError("Reference the Direct GPIO Zoom encoder before capturing FOV points")
+            candidate = deepcopy(self.zoom_fov_mapping)
+            candidate[point] = {
+                "relative_count": int(zoom["relative_count"]), "fov": fov,
+                "reference_id": str(zoom["reference_id"]),
+            }
+            wide, tight = candidate.get("wide"), candidate.get("tight")
+            if wide and tight:
+                if wide["reference_id"] != tight["reference_id"]:
+                    raise ValueError("Wide and Tight Zoom points must use the same encoder reference")
+                temporary_zoom_fov(
+                    int(wide["relative_count"]), int(wide["relative_count"]), float(wide["fov"]),
+                    int(tight["relative_count"]), float(tight["fov"]),
+                )
+            self.zoom_fov_mapping = candidate
+            self._refresh_camera_from_tracking()
+            result = deepcopy(self.zoom_fov_mapping)
+        await self.broadcast_state()
+        return result
 
     def _refresh_tracking_from_profile(self, initial: bool = False) -> None:
         self.camera["fov"] = float(self.profile.get("camera", {}).get("fov", self.camera["fov"]))
@@ -796,7 +901,7 @@ class StateStore:
         else:
             world["effective_status"] = world.get("status")
         world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
-        return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
+        return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -807,7 +912,7 @@ class StateStore:
             axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
-        return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "sync": sync, "server_mono": now}
+        return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "zoom_fov": deepcopy(self.zoom_fov_mapping), "sync": sync, "server_mono": now}
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         dead: list[WebSocket] = []

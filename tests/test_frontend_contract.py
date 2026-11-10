@@ -183,7 +183,10 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn('@app.get("/preview")', main)
         self.assertIn("renderScene(canvas,state", preview)
         self.assertIn("allowProvisional:true", preview)
-        self.assertIn("state.render_camera", (STATIC / "js" / "render.js").read_text(encoding="utf-8"))
+        renderer = (STATIC / "js" / "render.js").read_text(encoding="utf-8")
+        self.assertIn("state.render_camera", renderer)
+        self.assertNotIn("zoom_fov", renderer)
+        self.assertNotIn("relative_count", renderer)
         self.assertIn("NO CAMERA PREVIEW SOURCE", preview_html)
         self.assertNotIn("preview-media", gfx)
         self.assertNotRegex(gfx, r"<(?:img|video)\b")
@@ -312,6 +315,13 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("×4 — Full resolution", engineering)
         self.assertIn("Encoder data was lost. Set the lens position again.", engineering)
         self.assertIn("zoomPosition?", engineering)
+        self.assertIn("Temporary live FOV mapping — Development", engineering)
+        self.assertIn("Capture current Zoom position as WIDE", engineering)
+        self.assertIn("Capture current Zoom position as TIGHT", engineering)
+        self.assertIn("not measured lens truth", engineering)
+        self.assertIn("/api/tracking/zoom/fov-points/", engineering)
+        self.assertIn("Physical Zoom — Temporary mapping", (ROOT / "app" / "state.py").read_text(encoding="utf-8"))
+        self.assertIn("state.render_camera", (STATIC / "js" / "render.js").read_text(encoding="utf-8"))
         zoom_branch = engineering.split("const zoomConfig=", 1)[1].split("return `<article", 1)[0]
         self.assertNotIn("Gear ratio", zoom_branch)
         self.assertNotIn("Angle offset", zoom_branch)
@@ -373,7 +383,7 @@ class FrontendContractCase(unittest.TestCase):
             snapshot = StateStore(Path(directory), SilentDebug()).snapshot()
         expected_state = {
             "profiles", "tracking", "camera", "render_camera", "sync",
-            "world_calibrations", "engineering", "imu", "clients",
+            "world_calibrations", "engineering", "imu", "zoom_fov", "clients",
         }
         self.assertTrue(expected_state <= snapshot.keys())
 

@@ -12,7 +12,7 @@ class SilentDebug:
         return lambda *_args, **_kwargs: None
 
 
-def sample(timestamp, pan, valid=True, profile="profile", calibration="calibration", world_valid=None):
+def sample(timestamp, pan, valid=True, profile="profile", calibration="calibration", world_valid=None, fov=60):
     return PoseSample(
         timestamp=timestamp,
         tracking_pan=pan,
@@ -23,7 +23,7 @@ def sample(timestamp, pan, valid=True, profile="profile", calibration="calibrati
         y=2 * timestamp,
         z=1.8,
         roll=0,
-        fov=60,
+        fov=fov,
         valid=valid,
         world_valid=valid if world_valid is None else world_valid,
         profile_id=profile,
@@ -58,6 +58,14 @@ class PoseHistoryCase(unittest.TestCase):
         for milliseconds in (0, 7, 21, 34, 58):
             history.append(sample(milliseconds / 1000, milliseconds))
         self.assertAlmostEqual(history.query(0.0275)["pose"]["pan"], 27.5)
+
+    def test_fov_is_interpolated_with_the_historic_pose(self):
+        history = PoseHistory(5)
+        history.append(sample(0, 0, fov=64.6))
+        history.append(sample(1, 20, fov=10.0))
+        pose = history.query(0.5)["pose"]
+        self.assertAlmostEqual(pose["fov"], 37.3)
+        self.assertAlmostEqual(pose["pan"], 10.0)
 
     def test_underrun_invalid_region_and_static_latest(self):
         history = PoseHistory(5)

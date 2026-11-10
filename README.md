@@ -168,7 +168,7 @@ Direct GPIO Pan, Tilt and Zoom axes have an optional per-axis **Prototype wiring
 
 Production operation should use a proper PCB or soldered connections, stable common ground, verified 3.3 V pull-ups/input conditioning and strict integrity mode. Disable prototype tolerance and restore trusted encoder integrity before final camera or venue calibration.
 
-This bring-up does not drive `camera.fov`: the manually configured/profile FOV remains authoritative in live poses and pose history. The existing Zoom simulator retains its earlier generic simulator behaviour until a future lens profile maps physical relative Zoom counts to a calibrated horizontal-FOV curve. Linux Rotary and Focus are not enabled for physical Zoom acquisition in this phase.
+Engineering includes a development-only, session-only two-point mapping from physical Zoom count to live horizontal FOV. Reference the Direct GPIO Zoom encoder, capture a Wide position/FOV and a different Tight position/FOV, and RealLines interpolates linearly in focal-length proxy space (`1 / tan(FOV / 2)`) with endpoint clamping. The configured profile FOV remains unchanged and is the fallback whenever the encoder is unreferenced, its reference identity changes, or the service restarts. Both points are tied to the current session reference and must be captured again after any such discontinuity. Soft `SUSPECT` integrity continues to drive the mapped FOV while remaining visibly untrusted. This temporary curve is for live validation only; it is not measured lens truth or a persisted production lens profile. Linux Rotary and Focus are not enabled for physical Zoom acquisition in this phase.
 
 ### Linux rotary-encoder ×4 production trial
 

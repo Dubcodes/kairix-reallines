@@ -35,6 +35,9 @@ function axisMarkup(axis,config){
   const sc=config.source_config||{};
   const prototypeMode=supportsPrototypePolicy(axis,config.source)&&sc.integrity_policy==='prototype';
   const mapping=config.mapping;
+  const zoomFov=state?.zoom_fov||{};
+  const wideFov=zoomFov.wide?.fov??state?.profiles?.active?.camera?.fov??60;
+  const tightFov=zoomFov.tight?.fov??10;
   const degreesPerCount=360/(Number(mapping.ppr)*Number(mapping.quadrature_multiplier)*Number(mapping.encoder_revs_per_camera_rev));
   const sourceOptions=sourceChoicesFor(axis).map(choice=>`<option value="${choice.value}"${config.source===choice.value?' selected':''}${choice.enabled?'':' disabled'}>${choice.label}</option>`).join('');
   const gpioDraft=`<div class="gpio-draft"${gpioEncoder?'':' hidden'}>
@@ -70,7 +73,15 @@ function axisMarkup(axis,config){
     <label>Direction<select data-mapping="direction"><option value="1"${mapping.direction===1?' selected':''}>Normal</option><option value="-1"${mapping.direction===-1?' selected':''}>Reversed</option></select></label>
     <label>Encoder pulses per revolution (PPR)<input type="number" value="${mapping.ppr}" disabled></label>
     <div class="property-stat"><span>Encoder resolution</span><strong>×4 — Full resolution</strong></div>
-    ${gpioDraft}${referenceControls}${encoderDiagnostics}
+    ${gpioDraft}${referenceControls}
+    <section class="zoom-fov-development"><h4>Temporary live FOV mapping — Development</h4>
+      <div class="kv"><div>Current relative count</div><div data-runtime="zoom-fov-count">—</div><div>Current live FOV</div><div data-runtime="zoom-live-fov">—</div><div>FOV source</div><div data-runtime="zoom-fov-source">Manual / Profile</div></div>
+      <label>Wide FOV — temporary test value (°)<input data-zoom-fov-input="wide" type="number" min="0.1" max="179" step="0.1" value="${wideFov}"></label>
+      <button data-zoom-fov-capture="wide" type="button">Capture current Zoom position as WIDE</button>
+      <label>Tight FOV — temporary test value, not measured lens truth (°)<input data-zoom-fov-input="tight" type="number" min="0.1" max="179" step="0.1" value="${tightFov}"></label>
+      <button data-zoom-fov-capture="tight" type="button">Capture current Zoom position as TIGHT</button>
+      <strong data-runtime="zoom-fov-status" class="status-warn">NOT CALIBRATED</strong>
+    </section>${encoderDiagnostics}
   </div>`:'';
   return `<article class="axis-card" data-axis="${axis}">
     <div class="axis-heading"><h3>${axis.toUpperCase()}</h3><span class="axis-health" data-runtime="health"></span></div>
@@ -165,6 +176,11 @@ function bindAxisCards(){
         }));
       };
     });
+    card.querySelectorAll('[data-zoom-fov-capture]').forEach(button=>button.onclick=async()=>{
+      const point=button.dataset.zoomFovCapture;
+      const input=card.querySelector(`[data-zoom-fov-input="${point}"]`);
+      await safe(()=>api(`/api/tracking/zoom/fov-points/${point}`,{method:'POST',body:JSON.stringify({fov:Number(input.value)})}));
+    });
   });
 }
 
@@ -230,6 +246,14 @@ function renderAxes(){
         : runtime.referenced?'<strong>POSITION SET</strong><span>RealLines knows this camera angle.</span>':'<strong>SET CAMERA POSITION</strong><span>RealLines knows the encoder is moving but does not yet know the camera’s current angle.</span>';
     }
     renderEncoderDiagnostics(axis,card,runtime);
+    if(axis==='zoom'&&runtime.source==='quadrature_gpio'){
+      const zoomFov=state.zoom_fov||{};
+      card.querySelector('[data-runtime="zoom-fov-count"]').textContent=formatSignedCount(runtime.relative_count);
+      card.querySelector('[data-runtime="zoom-live-fov"]').textContent=`${format(state.camera.fov,2)}°`;
+      card.querySelector('[data-runtime="zoom-fov-source"]').textContent=zoomFov.fov_source||'Manual / Profile';
+      const status=card.querySelector('[data-runtime="zoom-fov-status"]');status.textContent=zoomFov.status||'NOT CALIBRATED';status.className=zoomFov.active?'status-ok':'status-warn';
+      for(const point of ['wide','tight']){const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),saved=zoomFov[point]?.fov;if(saved!==undefined&&input!==document.activeElement)input.value=saved;}
+    }
     card.title=runtime.status||'';
   }
 }
@@ -285,7 +309,7 @@ function renderState(incoming,event){
       if(simulator&&runtime.raw!==null&&byId(id)!==document.activeElement){byId(id).value=runtime.raw;showSlider(id,runtime.raw);}
       if(!simulator)byId(id+'Out').textContent=`Simulator inactive — ${sourceLabel(runtime.source)} source active`;
     }
-    for(const [id,value] of [['fov',state.camera.fov],['height',state.profiles.active.camera.height]])if(value!==null&&byId(id)!==document.activeElement){byId(id).value=value;showSlider(id,value);}
+    for(const [id,value] of [['fov',state.profiles.active.camera.fov],['height',state.profiles.active.camera.height]])if(value!==null&&byId(id)!==document.activeElement){byId(id).value=value;showSlider(id,value);}
     byId('fov').disabled=false;byId('height').disabled=false;
     const gfxToggle=byId('allowProvisionalGfx');
     gfxToggle.disabled=false;
