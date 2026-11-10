@@ -105,6 +105,12 @@ def worker_config(axis="pan", line_a=5, line_b=6):
     return config
 
 
+def prototype_worker_config(axis="pan", line_a=5, line_b=6):
+    config = worker_config(axis, line_a, line_b)
+    config["source_config"]["integrity_policy"] = "prototype"
+    return config
+
+
 def edge_records(edge_count, line_a=5, line_b=6, start_global=1, start_timestamp=1_000_000_000, interval_ns=50_000):
     pattern = ((line_b, True), (line_a, True), (line_b, False), (line_a, False))
     line_sequences = {line_a: 0, line_b: 0}
@@ -156,6 +162,72 @@ class GpioWorkerIntegrityCase(unittest.TestCase):
         self.assertIsNone(snapshot["reference_id"])
         self.assertEqual(snapshot["health"], "REFERENCE_REQUIRED")
         self.assertEqual(snapshot["last_error"], "request lost")
+
+    def test_prototype_zoom_tolerates_all_soft_integrity_warning_classes(self):
+        cases = (
+            lambda worker: (
+                worker.process_edge(6, True, 1, global_seqno=1, line_seqno=1),
+                worker.process_edge(5, True, 2, global_seqno=3, line_seqno=1),
+            ),
+            lambda worker: (
+                worker.process_edge(6, True, 1, global_seqno=1, line_seqno=1),
+                worker.process_edge(6, False, 2, global_seqno=2, line_seqno=3),
+            ),
+            lambda worker: (
+                worker.process_edge(6, True, 1, global_seqno=100, line_seqno=1),
+                worker.process_edge(5, True, 2, global_seqno=99, line_seqno=1),
+            ),
+            lambda worker: (
+                worker.process_edge(6, True, 1, global_seqno=1, line_seqno=100),
+                worker.process_edge(6, False, 2, global_seqno=2, line_seqno=99),
+            ),
+            lambda worker: worker.process_levels(1, 1, 1),
+        )
+        for exercise in cases:
+            with self.subTest(exercise=exercise):
+                worker = QuadratureGpioWorker("zoom", prototype_worker_config("zoom", 5, 6))
+                worker.begin_acquisition(0, 0)
+                reference_id = worker.set_reference(0)
+                reference_count = worker.snapshot()["reference_count"]
+                worker.decoder.count = 842
+                exercise(worker)
+                snapshot = worker.snapshot(2)
+                self.assertTrue(snapshot["referenced"])
+                self.assertEqual(snapshot["reference_id"], reference_id)
+                self.assertEqual(snapshot["reference_count"], reference_count)
+                self.assertEqual(snapshot["integrity"], "SUSPECT")
+                self.assertEqual(snapshot["calibration_confidence"], "SUSPECT")
+                self.assertGreater(snapshot["integrity_fault_events"], 0)
+                self.assertGreater(snapshot["warnings_tolerated_since_reference"], 0)
+
+    def test_prototype_pan_and_tilt_keep_reference_but_lifecycle_faults_clear_it(self):
+        for axis, line_a, line_b in (("pan", 17, 27), ("tilt", 22, 23)):
+            with self.subTest(axis=axis):
+                worker = QuadratureGpioWorker(axis, prototype_worker_config(axis, line_a, line_b))
+                worker.begin_acquisition(0, 0)
+                reference_id = worker.set_reference(12.5)
+                worker.process_levels(1, 1, 1)
+                snapshot = worker.snapshot(1)
+                self.assertTrue(snapshot["referenced"])
+                self.assertEqual(snapshot["reference_id"], reference_id)
+                self.assertEqual(snapshot["integrity_policy"], "prototype")
+                self.assertEqual(snapshot["integrity"], "SUSPECT")
+                worker._set_error("GPIO request failed")
+                self.assertFalse(worker.snapshot()["referenced"])
+                worker.begin_acquisition(0, 0)
+                self.assertFalse(worker.snapshot()["referenced"])
+
+    def test_high_event_rate_alone_does_not_invalidate_prototype_reference(self):
+        worker = QuadratureGpioWorker("pan", prototype_worker_config("pan", 17, 27))
+        worker.begin_acquisition(0, 0)
+        reference_id = worker.set_reference(0)
+        records = edge_records(20_000, 17, 27, interval_ns=50_000)
+        worker.process_edge_batch(records)
+        snapshot = worker.snapshot(records[-1][2])
+        self.assertEqual(snapshot["reference_id"], reference_id)
+        self.assertEqual(snapshot["integrity"], "TRUSTED")
+        self.assertGreater(snapshot["event_rate_hz"], 10_000)
+        self.assertEqual(snapshot["raw_count"], 20_000)
 
     def test_illegal_transition_latches_suspect_integrity_and_retains_reference(self):
         worker, reference_id = self.referenced_worker()
@@ -684,6 +756,35 @@ class EncoderStateCase(unittest.IsolatedAsyncioTestCase):
             store.sample_tick({"zoom": zoom.snapshot(1_000_000_000)})
             self.assertFalse(store.tracking["axes"]["zoom"]["referenced"])
             self.assertFalse(store.tracking["axes"]["zoom"]["valid"])
+            self.assertTrue(store.tracking["valid"])
+            self.assertEqual(store.camera["fov"], 47.5)
+
+    async def test_prototype_zoom_keeps_relative_output_suspect_without_affecting_fov_or_tracking_validity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            await store.set_camera({"fov": 47.5})
+            await store.update_axis_config(profile_id, "zoom", {
+                "source": "quadrature_gpio",
+                "source_config": {"integrity_policy": "prototype"},
+            })
+            zoom = QuadratureGpioWorker("zoom", prototype_worker_config("zoom", 5, 6))
+            zoom.begin_acquisition(0, 0)
+            reference_id = zoom.set_reference(0)
+            reference_count = zoom.snapshot()["reference_count"]
+            zoom.decoder.count = 842
+            zoom.process_levels(1, 1, 1_000_000_000)
+            store.sample_tick({"zoom": zoom.snapshot(1_000_000_000)})
+            runtime = store.tracking["axes"]["zoom"]
+            self.assertTrue(runtime["valid"])
+            self.assertTrue(runtime["referenced"])
+            self.assertEqual(runtime["reference_id"], reference_id)
+            self.assertEqual(runtime["reference_count"], reference_count)
+            self.assertEqual(runtime["relative_count"], 842)
+            self.assertEqual(runtime["value"], 842)
+            self.assertEqual(runtime["health"], "SUSPECT")
+            self.assertEqual(runtime["integrity"], "SUSPECT")
+            self.assertEqual(runtime["calibration_confidence"], "SUSPECT")
             self.assertTrue(store.tracking["valid"])
             self.assertEqual(store.camera["fov"], 47.5)
 

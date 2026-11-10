@@ -4,6 +4,7 @@ import {
   buildEncoderSourceConfig,
   buildSourceUpdate,
   sourceChoicesFor,
+  supportsPrototypePolicy,
   validateEngineeringState,
 } from './engineering_contract.js?v=world-media1';
 
@@ -32,6 +33,7 @@ function axisMarkup(axis,config){
   const encoder=gpioEncoder||rotaryEncoder;
   const zoomPosition=axis==='zoom'&&gpioEncoder;
   const sc=config.source_config||{};
+  const prototypeMode=supportsPrototypePolicy(axis,config.source)&&sc.integrity_policy==='prototype';
   const mapping=config.mapping;
   const degreesPerCount=360/(Number(mapping.ppr)*Number(mapping.quadrature_multiplier)*Number(mapping.encoder_revs_per_camera_rev));
   const sourceOptions=sourceChoicesFor(axis).map(choice=>`<option value="${choice.value}"${config.source===choice.value?' selected':''}${choice.enabled?'':' disabled'}>${choice.label}</option>`).join('');
@@ -41,6 +43,9 @@ function axisMarkup(axis,config){
     <label>${zoomPosition?'B':'Line B offset'}<input data-source-config="line_b" type="number" min="0" step="1" value="${sc.line_b??''}"></label>
     <label>Bias<select data-source-config="bias">${[['as_is','As-is'],['pull_up','Pull-up'],['pull_down','Pull-down']].map(([value,label])=>`<option value="${value}"${(sc.bias||'as_is')===value?' selected':''}>${label}</option>`).join('')}</select></label>
     <div class="row"><button data-apply-gpio type="button">Apply GPIO settings</button><strong data-gpio-save-state class="status-ok">SAVED</strong></div>
+    <label class="tool-check"><input data-integrity-policy type="checkbox"${prototypeMode?' checked':''}> Prototype wiring mode — keep tracking through encoder warnings</label>
+    <p class="small">Keep tracking through encoder signal warnings. Development only. Changing this mode restarts the worker and requires a fresh position reference.</p>
+    ${prototypeMode?'<strong class="status-warn">PROTOTYPE TOLERANCE ON</strong><p class="form-error">Development only. Position may become inaccurate. Disable this before final calibration or production use.</p>':''}
   </div>`;
   const referenceControls=zoomPosition
     ? `<div class="reference-guidance" data-runtime="reference-guidance"></div><div class="row"><button data-reference="zero" type="button">Set current position as 0</button><button data-reference="clear" type="button">Clear position reference</button></div>`
@@ -133,6 +138,12 @@ function bindAxisCards(){
       setAxisError(card);
     }));
     card.querySelector('[data-apply-gpio]')?.addEventListener('click',()=>applyGpioDraft(axis,card));
+    card.querySelector('[data-integrity-policy]')?.addEventListener('change',async event=>{
+      const enabled=event.target.checked;
+      const answer=await showDialog({title:`${enabled?'Enable':'Disable'} prototype wiring mode?`,message:'This restarts the Direct GPIO worker and requires a fresh position reference.',accept:enabled?'Enable prototype mode':'Use strict mode'});
+      if(!answer.accepted){event.target.checked=!enabled;return;}
+      updateAxis(axis,{source_config:{integrity_policy:enabled?'prototype':'strict'}});
+    });
 
     card.querySelectorAll('[data-reference]').forEach(button=>{
       button.onclick=async()=>{
@@ -179,22 +190,25 @@ function renderEncoderDiagnostics(axis,card,runtime){
   const referenceId=runtime.reference_id?escapeHtml(String(runtime.reference_id).slice(0,12)):'—';
   const sourceDetails=rotary
     ? `<div>Kernel driver</div><div>${escapeHtml(d.kernel_driver||'rotary-encoder')}</div><div>Resolution mode</div><div>×4 quarter-period</div><div>REL axis</div><div>${escapeHtml(d.rel_axis||'—')}</div><div>Device identity</div><div>${escapeHtml(d.device_identity||'—')}</div><div>Resolved device</div><div>${escapeHtml(d.resolved_event_device||'—')}</div><div>SYN_DROPPED</div><div>${d.evdev_dropped_events??0}</div>`
-    : `<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Requested GPIO event buffer</div><div>${d.kernel_event_buffer_size??'—'} (actual kernel capacity may be lower/capped)</div><div>Read batch size</div><div>${d.read_batch_size??'—'}</div><div>Confirmed global gaps</div><div>${d.confirmed_global_gaps??d.global_sequence_gaps??0}</div><div>Global-only gaps</div><div>${d.global_only_sequence_gaps??0}</div><div>Global out-of-order</div><div>${d.global_out_of_order_events??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div>`;
+    : `<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Requested GPIO event buffer</div><div>${d.kernel_event_buffer_size??'—'} (actual kernel capacity may be lower/capped)</div><div>Read batch size</div><div>${d.read_batch_size??'—'}</div><div>Confirmed global gaps</div><div>${d.confirmed_global_gaps??d.global_sequence_gaps??0}</div><div>Global-only gaps</div><div>${d.global_only_sequence_gaps??0}</div><div>Global out-of-order</div><div>${d.global_out_of_order_events??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Line out-of-order</div><div>${d.line_out_of_order_events??0}</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div>`;
   const positionDetails=positionAxis
     ? `<div>Relative lens position</div><div>${formatSignedCount(runtime.relative_count)}</div><div>Position reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div>`
     : `<div>Relative angle</div><div>${runtime.relative_angle===null||runtime.relative_angle===undefined?'—':`${format(runtime.relative_angle,3)}°`}</div><div>Mapped angle</div><div>${runtime.value===null?'—':`${format(runtime.value,3)}°`}</div><div>Reference</div><div>${runtime.referenced?'REFERENCED':'REFERENCE REQUIRED'}</div><div>Reference angle</div><div>${runtime.referenced?`${format(runtime.reference_angle,3)}°`:'—'}</div>`;
   const angularRate=positionAxis?'':`<div>Degrees/sec</div><div>${format(d.degrees_per_second??0,2)}°</div>`;
   diagnostics.className='kv encoder-diagnostics';
-  diagnostics.innerHTML=`${sourceDetails}<div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Reference count</div><div>${runtime.reference_count??'—'}</div>${positionDetails}<div>Reference ID</div><div title="${escapeHtml(runtime.reference_id||'')}">${referenceId}</div><div>Direction value</div><div>${state.profiles.active.axes[axis].mapping.direction>0?'+1':'-1'}</div><div>Events/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Peak events/sec</div><div>${format(d.peak_event_rate_hz??0,1)}</div><div>Total movement events</div><div>${d.events??0}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div>${angularRate}<div>Integrity warning events</div><div>${d.integrity_loss_events??0}</div><div>Integrity</div><div>${runtime.integrity||d.integrity_status||'—'}</div><div>Calibration confidence</div><div>${runtime.calibration_confidence||'—'}</div><div>Last event age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;
+  diagnostics.innerHTML=`${sourceDetails}<div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Reference count</div><div>${runtime.reference_count??'—'}</div>${positionDetails}<div>Reference ID</div><div title="${escapeHtml(runtime.reference_id||'')}">${referenceId}</div><div>Direction value</div><div>${state.profiles.active.axes[axis].mapping.direction>0?'+1':'-1'}</div><div>Events/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Peak events/sec</div><div>${format(d.peak_event_rate_hz??0,1)}</div><div>Total movement events</div><div>${d.events??0}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div>${angularRate}<div>Integrity policy</div><div>${(runtime.integrity_policy||'strict').toUpperCase()}</div><div>Integrity warning events</div><div>${d.integrity_fault_events??d.integrity_loss_events??0}</div><div>Warnings tolerated since reference</div><div>${d.warnings_tolerated_since_reference??0}</div><div>Integrity</div><div>${runtime.integrity||d.integrity_status||'—'}</div><div>Calibration confidence</div><div>${runtime.calibration_confidence||'—'}</div><div>Last event age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;
   const alert=card.querySelector('[data-runtime="encoder-alert"]');
   if(!alert)return;
+  const prototype=runtime.source==='quadrature_gpio'&&runtime.integrity_policy==='prototype';
   alert.textContent=runtime.health==='ERROR'
     ? `Encoder hardware error: ${runtime.status||'check the connection and driver.'}`
     : positionAxis&&d.integrity_lost&&!runtime.referenced
       ? 'Encoder data was lost. Set the lens position again.'
-      : runtime.integrity==='SUSPECT'
-        ? `${axis.toUpperCase()}: ${runtime.integrity_reason||'Possible encoder count loss'}. Tracking is still operating, but the absolute angle may be wrong. Verify and set the camera position again to restore confidence.`
-        : '';
+      : prototype&&runtime.integrity==='SUSPECT'
+        ? 'Prototype wiring mode is enabled. Encoder warnings were detected. Position is still being tracked, but may not be accurate.'
+        : runtime.integrity==='SUSPECT'
+          ? `${axis.toUpperCase()}: ${runtime.integrity_reason||'Possible encoder count loss'}. Tracking is still operating, but the absolute angle may be wrong. Verify and set the camera position again to restore confidence.`
+          : prototype?'PROTOTYPE TOLERANCE ON — tracking continues through encoder warnings; verify position before final calibration.':'';
 }
 function renderAxes(){
   const configKey=state.profiles.active_id+JSON.stringify(state.profiles.active.axes);

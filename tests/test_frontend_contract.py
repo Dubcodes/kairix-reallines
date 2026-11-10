@@ -276,6 +276,18 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("IMU-assisted movement calibration", calibration_html)
         self.assertIn("Manual calibration above always remains available", calibration_html)
 
+    def test_prototype_integrity_controls_and_calibration_warning_are_explicit(self):
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
+        calibration_html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        self.assertIn('data-integrity-policy', engineering)
+        self.assertIn('Prototype wiring mode — keep tracking through encoder warnings', engineering)
+        self.assertIn('PROTOTYPE TOLERANCE ON', engineering)
+        self.assertIn("supportsPrototypePolicy(axis,config.source)&&sc.integrity_policy==='prototype'", engineering)
+        self.assertIn("source==='quadrature_gpio'&&runtime.integrity_policy==='prototype'", engineering)
+        self.assertIn('prototypeCalibrationWarning', calibration)
+        self.assertIn('Prototype encoder tolerance is active', calibration_html)
+
     def test_linux_rotary_ui_is_distinct_fixed_x4_and_overlay_explicit(self):
         engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")

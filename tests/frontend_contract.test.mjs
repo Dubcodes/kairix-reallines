@@ -7,11 +7,21 @@ import {
   buildEncoderSourceConfig,
   buildSourceUpdate,
   sourceChoicesFor,
+  supportsPrototypePolicy,
   validateEncoderDraft,
   validateEngineeringState,
 } from '../app/static/js/engineering_contract.js';
+
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
+
+test('prototype tolerance is exposed only for Direct GPIO Pan Tilt and Zoom', () => {
+  for (const axis of ['pan','tilt','zoom']) assert.equal(supportsPrototypePolicy(axis,'quadrature_gpio'), true);
+  assert.equal(supportsPrototypePolicy('focus','quadrature_gpio'), false);
+  for (const source of ['simulator','disabled','linux_rotary','imu','external']) {
+    assert.equal(supportsPrototypePolicy('pan',source), false);
+  }
+});
 
 test('Engineering source choices expose only implemented paths as usable', () => {
   for (const axis of ENGINEERING_AXES) {

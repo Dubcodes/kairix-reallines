@@ -162,6 +162,12 @@ Zoom can use the existing Direct GPIO worker as an optional full-resolution raw 
 
 Unlike Pan/Tilt, physical Zoom is a position encoder, not a camera-angle axis. After **Set current position as 0**, its runtime value is `direction × (raw_count - reference_count)` in counts. It has no degree unit, angle offset, degrees-per-count conversion, or encoder-turns-per-camera-turn gearing. A service/driver restart, source change, or count-integrity loss clears only the Zoom session reference and requires the lens position to be set again. Zoom remains optional and does not participate in overall Pan/Tilt tracking validity or the current world-calibration fingerprint.
 
+### Prototype wiring tolerance
+
+Direct GPIO Pan, Tilt and Zoom axes have an optional per-axis **Prototype wiring mode** for temporary breadboard/mechanical development. It is off by default and persisted as `source_config.integrity_policy`; missing values mean `strict`. In prototype mode, sequence gaps/regressions and illegal quadrature transitions remain fully counted and reported as `SUSPECT`, but a live worker retains its session reference and continues producing untrusted position output. Driver/request restart, reopen, failure, source change, service restart and explicit reference clear always discard the reference in every mode. This mode adds no debounce, rate threshold, transition filtering, or resolution reduction.
+
+Production operation should use a proper PCB or soldered connections, stable common ground, verified 3.3 V pull-ups/input conditioning and strict integrity mode. Disable prototype tolerance and restore trusted encoder integrity before final camera or venue calibration.
+
 This bring-up does not drive `camera.fov`: the manually configured/profile FOV remains authoritative in live poses and pose history. The existing Zoom simulator retains its earlier generic simulator behaviour until a future lens profile maps physical relative Zoom counts to a calibrated horizontal-FOV curve. Linux Rotary and Focus are not enabled for physical Zoom acquisition in this phase.
 
 ### Linux rotary-encoder ×4 production trial

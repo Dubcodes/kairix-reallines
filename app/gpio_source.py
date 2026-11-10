@@ -45,6 +45,7 @@ class QuadratureGpioWorker:
         self.axis = axis
         self.config = deepcopy(config)
         self.decoder = QuadratureDecoder(int(config["mapping"]["quadrature_multiplier"]))
+        self.integrity_policy = str(config.get("source_config", {}).get("integrity_policy", "strict"))
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -70,6 +71,8 @@ class QuadratureGpioWorker:
             "integrity_loss_events": 0, "integrity_lost": False, "integrity_status": "TRUSTED",
             "integrity": "TRUSTED", "integrity_reason": None, "integrity_since_ns": None,
             "integrity_fault_events": 0, "availability": "UNAVAILABLE",
+            "integrity_policy": self.integrity_policy,
+            "warnings_tolerated_since_reference": 0,
             "calibration_confidence": "UNREFERENCED",
             "illegal_transitions": 0, "restarts": 0,
         }
@@ -151,6 +154,7 @@ class QuadratureGpioWorker:
                 "integrity_lost": False, "integrity_status": "TRUSTED", "integrity": "TRUSTED",
                 "integrity_reason": None, "integrity_since_ns": None,
                 "calibration_confidence": "TRUSTED",
+                "warnings_tolerated_since_reference": 0,
                 "health": "VALID" if self._snapshot["driver_alive"] else self._snapshot["health"],
                 "status": "Lens position referenced" if self.axis in POSITION_ENCODER_AXES else "Referenced",
             })
@@ -175,22 +179,26 @@ class QuadratureGpioWorker:
                 self._snapshot["integrity_loss_events"] += 1
 
     def _mark_integrity_suspect_locked(self, reason: str, timestamp_ns: int) -> None:
-        if self.axis in POSITION_ENCODER_AXES:
+        prototype = self.integrity_policy == "prototype"
+        if self.axis in POSITION_ENCODER_AXES and not prototype:
             self._snapshot["integrity_fault_events"] += 1
             self._invalidate_reference_locked(f"{reason}; set the lens position again", integrity_loss=True)
             self._snapshot["integrity_since_ns"] = self._snapshot["integrity_since_ns"] or int(timestamp_ns)
             return
         already_suspect = self._snapshot["integrity"] == "SUSPECT"
         self._snapshot["integrity_fault_events"] += 1
+        if prototype and self._snapshot["referenced"]:
+            self._snapshot["warnings_tolerated_since_reference"] += 1
+        position_name = "relative position" if self.axis in POSITION_ENCODER_AXES else "absolute angle"
         self._snapshot.update({
             "integrity_lost": True,
             "integrity": "SUSPECT",
-            "integrity_status": "SUSPECT — TRACKING CONTINUES",
+            "integrity_status": "SUSPECT — PROTOTYPE TRACKING CONTINUES" if prototype else "SUSPECT — TRACKING CONTINUES",
             "integrity_reason": reason,
             "integrity_since_ns": self._snapshot["integrity_since_ns"] or int(timestamp_ns),
             "calibration_confidence": "SUSPECT" if self._snapshot["referenced"] else "UNREFERENCED",
             "health": "SUSPECT" if self._snapshot["referenced"] else "REFERENCE_REQUIRED",
-            "status": f"{reason}; tracking continues but absolute angle may be wrong"
+            "status": f"{reason}; tracking continues but {position_name} may be wrong"
             if self._snapshot["referenced"] else f"{reason}; set an encoder reference",
         })
         if not already_suspect:

@@ -78,6 +78,22 @@ class MappingCase(unittest.TestCase):
         self.assertEqual(normalise_axis_config("pan", legacy)["source_config"]["line_a"], 17)
         self.assertEqual(normalise_axis_config("tilt", legacy)["source_config"]["line_a"], 22)
 
+    def test_integrity_policy_defaults_strict_and_is_gpio_only(self):
+        for axis in ("pan", "tilt", "zoom"):
+            self.assertEqual(default_axis_config(axis)["source_config"]["integrity_policy"], "strict")
+            legacy = default_axis_config(axis, "quadrature_gpio")
+            legacy["source_config"].pop("integrity_policy")
+            self.assertEqual(normalise_axis_config(axis, legacy)["source_config"]["integrity_policy"], "strict")
+        gpio = merge_axis_update("pan", default_axis_config("pan", "quadrature_gpio"), {"source_config": {"integrity_policy": "prototype"}})
+        self.assertEqual(gpio["source_config"]["integrity_policy"], "prototype")
+        self.assertEqual(gpio["mapping"]["quadrature_multiplier"], 4)
+        simulator = merge_axis_update("pan", gpio, {"source": "simulator"})
+        self.assertEqual(simulator["source_config"]["integrity_policy"], "strict")
+        with self.assertRaisesRegex(TrackingConfigError, "Direct GPIO"):
+            merge_axis_update("pan", default_axis_config("pan"), {"source_config": {"integrity_policy": "prototype"}})
+        with self.assertRaisesRegex(TrackingConfigError, "strict or prototype"):
+            merge_axis_update("pan", default_axis_config("pan", "quadrature_gpio"), {"source_config": {"integrity_policy": "ignore"}})
+
     def test_encoder_mapping_known_values_direction_and_offset(self):
         config = default_axis_config("pan", "quadrature_gpio")
         config["mapping"].update({"ppr": 600, "quadrature_multiplier": 4, "encoder_revs_per_camera_rev": 5, "direction": 1, "offset": 0})
@@ -167,6 +183,18 @@ class TrackingStoreCase(unittest.IsolatedAsyncioTestCase):
             reloaded = self.make_store(directory)
             source = reloaded.profile["axes"]["pan"]["source_config"]
             self.assertEqual((source["chip"], source["line_a"], source["line_b"], source["bias"]), ("/dev/gpiochip4", 9, 10, "pull_up"))
+
+    async def test_prototype_integrity_policy_is_profile_scoped_and_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            await store.update_axis_config(profile_id, "zoom", {
+                "source": "quadrature_gpio",
+                "source_config": {"integrity_policy": "prototype"},
+            })
+            reloaded = self.make_store(directory)
+            self.assertEqual(reloaded.profile["axes"]["zoom"]["source_config"]["integrity_policy"], "prototype")
+            self.assertEqual(reloaded.profile["axes"]["pan"]["source_config"]["integrity_policy"], "strict")
 
     async def test_rig_geometry_persists_and_old_profiles_migrate_to_zero(self):
         with tempfile.TemporaryDirectory() as directory:

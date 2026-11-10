@@ -466,6 +466,7 @@ class StateStore:
             "integrity": "UNKNOWN",
             "integrity_reason": None,
             "calibration_confidence": "UNAVAILABLE",
+            "integrity_policy": config.get("source_config", {}).get("integrity_policy", "strict") if source == "quadrature_gpio" else "strict",
         }
         if source == "simulator":
             try:
@@ -625,8 +626,9 @@ class StateStore:
                 "integrity": sample.get("integrity", "TRUSTED"),
                 "integrity_reason": sample.get("integrity_reason"),
                 "calibration_confidence": sample.get("calibration_confidence", "UNREFERENCED"),
+                "integrity_policy": sample.get("integrity_policy", "strict"),
                 "updated_mono": now,
-                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "health", "status"}},
+                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "health", "status"}},
             })
             if axis in POSITION_ENCODER_AXES:
                 runtime["relative_count"] = relative_position_count(self.profile["axes"][axis], raw_count, int(reference_count)) if referenced and reference_count is not None else None
@@ -802,7 +804,7 @@ class StateStore:
         self._refresh_camera_from_tracking(sample=False)
         render_camera, sync = self._render_pose_state(now)
         compact_axes = {
-            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "calibration_confidence", "diagnostics") if key in runtime}
+            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
         return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "sync": sync, "server_mono": now}

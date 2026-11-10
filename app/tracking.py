@@ -13,6 +13,7 @@ SOURCE_TYPES = ("simulator", "disabled", "quadrature_gpio", "linux_rotary", "imu
 REQUIRED_AXES = ("pan", "tilt")
 ENCODER_SOURCES = ("quadrature_gpio", "linux_rotary")
 ALLOWED_DECODE_MULTIPLIERS = (1, 2, 4)
+INTEGRITY_POLICIES = ("strict", "prototype")
 DEFAULT_GPIO_BY_AXIS = {
     "pan": {"chip": "/dev/gpiochip0", "line_a": 17, "line_b": 27},
     "tilt": {"chip": "/dev/gpiochip0", "line_a": 22, "line_b": 23},
@@ -34,6 +35,7 @@ def default_axis_config(axis: str, source: str | None = None) -> dict[str, Any]:
     selected = source or ("simulator" if axis in {"pan", "tilt", "zoom"} else "disabled")
     source_config = {
         "stale_timeout_seconds": 2.0,
+        "integrity_policy": "strict",
         "chip": "",
         "line_a": None,
         "line_b": None,
@@ -133,6 +135,9 @@ def validate_axis_config(axis: str, config: dict[str, Any]) -> None:
             raise TrackingConfigError("Linux rotary encoder requires quadrature multiplier ×4")
     if source == "quadrature_gpio":
         source_config = config.get("source_config") or {}
+        integrity_policy = source_config.get("integrity_policy", "strict")
+        if integrity_policy not in INTEGRITY_POLICIES:
+            raise TrackingConfigError("GPIO integrity policy must be strict or prototype")
         bias = source_config.get("bias", "as_is")
         if bias not in {"as_is", "pull_up", "pull_down"}:
             raise TrackingConfigError("GPIO bias must be as_is, pull_up or pull_down")
@@ -148,6 +153,8 @@ def validate_axis_config(axis: str, config: dict[str, Any]) -> None:
                 raise TrackingConfigError("GPIO line offsets must be zero or greater")
             if line_a == line_b:
                 raise TrackingConfigError("GPIO A and B must use different lines")
+    elif (config.get("source_config") or {}).get("integrity_policy", "strict") != "strict":
+        raise TrackingConfigError("Prototype integrity policy is available for Direct GPIO encoders only")
     elif source == "linux_rotary":
         if axis not in DEFAULT_ROTARY_BY_AXIS:
             raise TrackingConfigError("Linux rotary encoder is available for Pan and Tilt only")
@@ -182,6 +189,8 @@ def merge_axis_update(axis: str, current: dict[str, Any], updates: dict[str, Any
         candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
     if axis in POSITION_ENCODER_AXES and current.get("source") != "quadrature_gpio" and candidate.get("source") == "quadrature_gpio":
         candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
+    if current.get("source") == "quadrature_gpio" and candidate.get("source") != "quadrature_gpio":
+        candidate.setdefault("source_config", {})["integrity_policy"] = "strict"
     validate_axis_config(axis, candidate)
     return candidate
 

@@ -16,6 +16,10 @@ export const SOURCE_CHOICES = Object.freeze([
 
 export const GPIO_BIASES = Object.freeze(['as_is', 'pull_up', 'pull_down']);
 
+export function supportsPrototypePolicy(axis, source) {
+  return source === 'quadrature_gpio' && ['pan', 'tilt', 'zoom'].includes(axis);
+}
+
 export function sourceChoicesFor(axis) {
   return SOURCE_CHOICES.map(choice => ({
     ...choice,
