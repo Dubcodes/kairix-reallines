@@ -861,6 +861,35 @@ def solve_dot_world_reference(
     }
     return {"solution": solution, "target": world_target}
 
+def model_points_from_saved_observation(
+    target: dict[str, Any], observation: dict[str, Any],
+    profile: dict[str, Any], zoom_mapping: dict[str, Any],
+) -> dict[str, dict[str, float]]:
+    """Build provisional marker geometry from the last saved gold observation.
+
+    A newly applied Pan/Tilt mapping must not shift that same stopped view.
+    This is a display anchor, NOT an independent measured world calibration.
+    The measured-target world solve replaces these points with metric geometry.
+    """
+    pan_config = profile["axes"]["pan"]
+    tilt_config = profile["axes"]["tilt"]
+    pan = _axis_angle(observation, "pan", pan_config, float(pan_config["mapping"]["encoder_revs_per_camera_rev"]))
+    tilt = _axis_angle(observation, "tilt", tilt_config, float(tilt_config["mapping"]["encoder_revs_per_camera_rev"]))
+    pivot = {"x": 0.0, "y": 0.0, "z": float(profile.get("camera", {}).get("height", 1.7))}
+    optical = camera_position(pivot, pan, tilt, profile.get("camera", {}).get("rig_offset"))
+    zoom_count = ((observation.get("axes") or {}).get("zoom") or {}).get("relative_count")
+    fov = zoom_fov_for_count(zoom_count, zoom_mapping) if zoom_mapping.get("active") else None
+    if fov is None:
+        fov = float(profile.get("camera", {}).get("fov", 60.0))
+    camera = {**optical, "pan": pan, "tilt": tilt, "roll": 0.0, "fov": fov}
+    return _world_points_for_baseline(target, observation, camera)
+
+
+def metric_rectangle_model_points(target: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """Use the existing RealLines internal M1/M2/M3/M4 convention unchanged."""
+    return _rectangle_world_points(target)
+
+
 def _cost(residuals: list[float]) -> float:
     return sum(value * value for value in residuals)
 

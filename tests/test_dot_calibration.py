@@ -14,6 +14,8 @@ from app.dot_calibration import (
     _world_points_for_baseline,
     default_dot_calibration,
     normalise_dot_calibration,
+    metric_rectangle_model_points,
+    model_points_from_saved_observation,
     solve_dot_calibration,
     solve_dot_world_reference,
     zoom_fov_for_count,
@@ -78,6 +80,31 @@ def target_with(observations, **updates):
 
 
 class DotCalibrationMathCase(unittest.TestCase):
+    def test_saved_anchor_is_pixel_stable_after_mapping_change(self):
+        profile = profile_fixture(4.73, 2.43, 56.0)
+        profile["camera"]["height"] = 1.9
+        profile["camera"]["rig_offset"] = {"right_m": -0.015, "forward_m": -0.01, "up_m": 0.1}
+        obs = observation("O-last", pan_raw=477, tilt_raw=80, points=BASE_POINTS, fov=77.6)
+        target = target_with([obs], type="rectangle", width_m=1.3415, height_m=1.1685, approx_distance_m=5.715)
+        model = model_points_from_saved_observation(target, obs, profile, {"active": False})
+        pan = _camera_for_observation(obs, profile, 4.73, 2.43, {}, 0.0, horizontal_fov=56.0)
+        optical = camera_position(
+            {"x": 0.0, "y": 0.0, "z": 1.9}, pan["pan"], pan["tilt"], profile["camera"]["rig_offset"]
+        )
+        camera = {**optical, "pan": pan["pan"], "tilt": pan["tilt"], "roll": 0.0, "fov": 56.0}
+        for marker_id, observed in BASE_POINTS.items():
+            projected = _project(model[marker_id], camera)
+            self.assertAlmostEqual(projected["x"], observed["x"], places=8)
+            self.assertAlmostEqual(projected["y"], observed["y"], places=8)
+
+    def test_internal_rectangle_marker_order_is_unchanged(self):
+        points = metric_rectangle_model_points(target_with(
+            [], type="rectangle", width_m=1.3415, height_m=1.1685, bottom_height_m=.3575
+        ))
+        self.assertLess(points["M1"]["x"], points["M2"]["x"])
+        self.assertGreater(points["M3"]["x"], points["M4"]["x"])
+        self.assertEqual(points["M3"]["z"], points["M4"]["z"])
+
     def test_default_and_normalisation_preserve_partial_marker_observations(self):
         self.assertEqual(default_dot_calibration(), {"targets": [], "active_target_id": None, "last_solution": None})
         data = {
@@ -466,6 +493,8 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.world_calibration["tracking_reference_identity"]["tilt"], "TILT-REF")
             snapshot = store.snapshot()
             self.assertTrue(snapshot["camera"]["world_valid"])
+            world_model = store.world_calibration["dot_calibration"]["targets"][0]["model_points"]
+            self.assertEqual(world_model, metric_rectangle_model_points(target))
 
     async def test_poor_world_solution_is_not_marked_valid_for_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -498,10 +527,12 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
                 },
                 "target": {"center": {"x": 0.0, "y": 0.0, "z": 1.0}, "width": 2.0, "height": 1.0, "yaw": 0.0, "plane": "vertical_rectangle"},
             }
+            before_world = deepcopy(store.world_calibration)
             with patch("app.state.solve_dot_world_reference", return_value=fake):
-                await store.solve_dot_world_reference(target["id"])
-            self.assertFalse(store.world_calibration["valid"])
-            self.assertIn("NOT VALID FOR OUTPUT", store.world_calibration["status"])
+                outcome = await store.solve_dot_world_reference(target["id"])
+            self.assertFalse(outcome["valid"])
+            self.assertIn("NOT APPLIED", outcome["status"])
+            self.assertEqual(store.world_calibration, before_world)
 
     async def test_apply_refinement_preserves_live_encoder_reference_and_counts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -561,6 +592,39 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertIn("DOT CALIBRATION APPLIED", store.world_calibration["status"])
             applied_model = store.world_calibration["dot_calibration"]["targets"][0]["model_points"]["M1"]
             self.assertEqual(applied_model, refined_model["M1"])
+
+    async def test_apply_preserves_gold_positions_in_latest_stationary_view(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_angle_axes(store)
+            store.sample_tick({
+                "pan": self.axis_sample("PAN-REF", raw_count=500, reference_count=0),
+                "tilt": self.axis_sample("TILT-REF", raw_count=0, reference_count=0),
+            })
+            first = observation("O1", pan_raw=100, points=BASE_POINTS,
+                                refs={"pan": "PAN-REF", "tilt": "TILT-REF", "zoom": None})
+            latest = observation("O2", pan_raw=500, points=BASE_POINTS,
+                                 refs={"pan": "PAN-REF", "tilt": "TILT-REF", "zoom": None})
+            target = target_with([first, latest], type="rectangle", width_m=1.3415,
+                                 height_m=1.1685, approx_distance_m=5.715)
+            base = store.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]
+            await store.update_dot_calibration({
+                "targets": [target], "active_target_id": target["id"],
+                "last_solution": {
+                    "solved": True, "apply_allowed": True, "parameters": ["pan_ratio"],
+                    "current": {"pan_ratio": base},
+                    "proposed": {"pan_ratio": base * 1.02},
+                    "solve_context": {"references": {"pan": "PAN-REF",
+                                     "tilt": "TILT-REF", "zoom": None}},
+                    "target_models": {target["id"]: {"M1": {"x": 1.0, "y": 50.0, "z": 4.0}}},
+                },
+            })
+            await store.apply_dot_calibration_solution()
+            model = store.world_calibration["dot_calibration"]["targets"][0]["model_points"]
+            for marker_id, gold in latest["points"].items():
+                projected = _project(model[marker_id], store.camera)
+                self.assertAlmostEqual(projected["x"], gold["x"], places=7)
+                self.assertAlmostEqual(projected["y"], gold["y"], places=7)
 
     async def test_review_only_refinement_cannot_be_applied(self):
         with tempfile.TemporaryDirectory() as directory:

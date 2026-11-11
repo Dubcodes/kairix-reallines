@@ -2,7 +2,7 @@ import {api,logFrontend} from './common.js?v=world-media1';
 import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
-  rectangleTemplatePoints,rmsOverlayError,
+  rectangleTemplatePoints,rmsOverlayError,withoutObservation,
 } from './dot_lock.js?v=world-media1';
 
 const clone=value=>structuredClone(value);
@@ -280,6 +280,14 @@ export class DotCalibrationUi {
   async saveObservation(){
     const target=this.activeTarget();if(!target||!this.editor.editing||!this.editor.capture){this.setStatus('PRESS “ADJUST THIS VIEW” BEFORE SAVING AN OBSERVATION','bad');return;}
     const points=this.observationPoints(),count=Object.keys(points).length,baseline=target.observations.length===0;
+    const captured=this.editor.capture.axes||{},now=this.currentAxisCounts();
+    for(const [axis,tolerance] of [['pan',3],['tilt',3],['zoom',8]]){
+      const saved=axis==='zoom'?captured.zoom?.relative_count:captured[axis]?.raw_count;
+      const current=now[axis];
+      if(saved!==null&&saved!==undefined&&current!==null&&current!==undefined&&Math.abs(Number(current)-Number(saved))>tolerance){
+        this.setStatus(`CAMERA ${axis.toUpperCase()} MOVED DURING DOT ADJUSTMENT — CANCEL AND RECAPTURE THIS VIEW`,'bad');return;
+      }
+    }
     if(baseline&&count<4){this.setStatus('THE BASELINE VIEW NEEDS AT LEAST FOUR MARKERS','bad');return;}
     if(!baseline&&count<1){this.setStatus('ALIGN AT LEAST ONE VISIBLE MARKER','bad');return;}
     const observation={id:uid('obs'),...clone(this.editor.capture),points};
@@ -336,10 +344,32 @@ export class DotCalibrationUi {
         method:'POST',body:JSON.stringify({values:{target_id:target.id}}),
       });
       const solution=result.solution||{};
-      this.setStatus(`WORLD CALIBRATION APPLIED — ${fmt(solution.rms_pixel_error,1)} px RMS · PIVOT ${fmt(solution.pivot?.x,2)}, ${fmt(solution.pivot?.y,2)}, ${fmt(solution.pivot?.z,2)} m`,'ok');
+      if(result.valid!==true){
+        this.setStatus(`${result.status||'WORLD SOLVE NOT APPLIED'} · ${fmt(solution.rms_pixel_error,1)} px RMS · PREVIOUS CAMERA MODEL RETAINED`,'bad');
+      }else{
+        this.setStatus(`WORLD CALIBRATION APPLIED — ${fmt(solution.rms_pixel_error,1)} px RMS · PIVOT ${fmt(solution.pivot?.x,2)}, ${fmt(solution.pivot?.y,2)}, ${fmt(solution.pivot?.z,2)} m`,'ok');
+      }
     }catch(error){
       this.setStatus(String(error).replace(/^Error:\s*/,''),'bad');
       logFrontend('calibration','dot_world_solve_failed',{error:String(error)});
+    }
+  }
+
+  async deleteObservation(targetId,observationId){
+    if(this.editor.editing){this.setStatus('FINISH OR CANCEL THE CURRENT ADJUSTMENT BEFORE DELETING AN OBSERVATION','warn');return;}
+    const target=this.data.targets.find(entry=>entry.id===targetId);if(!target)return;
+    const original=target.observations||[];
+    if(!original.some(obs=>obs.id===observationId))return;
+    const backup=clone(this.data),index=original.findIndex(obs=>obs.id===observationId);
+    target.observations=withoutObservation(original,observationId);
+    this.data.last_solution=null;
+    if(this.anchorObservationId===observationId)this.anchorObservationId=null;
+    if(!target.observations.length)target.model_points={};
+    try{
+      await this.persist();await this.updateOverlay(true);this.render();
+      this.setStatus(`DELETED O${index+1} — OTHER SAVED OBSERVATIONS UNCHANGED · RECALCULATE REFINEMENT`,'warn');
+    }catch(error){
+      this.data=backup;this.render();this.setStatus(`DELETE FAILED — ${String(error)}`,'bad');
     }
   }
 
@@ -406,7 +436,8 @@ export class DotCalibrationUi {
   renderObservations(){
     const target=this.activeTarget(),root=this.byId('dotObservationList');root.replaceChildren();if(!target)return;
     for(const [index,obs] of target.observations.entries()){
-      const chip=document.createElement('span');chip.className='observation-chip';const axes=obs.axes||{};chip.textContent=`O${index+1} · ${Object.keys(obs.points||{}).length} pt · P ${axes.pan?.raw_count??'—'} · T ${axes.tilt?.raw_count??'—'} · Z ${axes.zoom?.relative_count??'—'}`;root.append(chip);
+      const chip=document.createElement('span');chip.className='observation-chip';const axes=obs.axes||{};chip.append(document.createTextNode(`O${index+1} · ${Object.keys(obs.points||{}).length} pt · P ${axes.pan?.raw_count??'—'} · T ${axes.tilt?.raw_count??'—'} · Z ${axes.zoom?.relative_count??'—'}`));
+      const remove=document.createElement('button');remove.type='button';remove.className='observation-remove';remove.textContent='×';remove.title=`Delete observation O${index+1}`;remove.setAttribute('aria-label',remove.title);remove.disabled=this.editor.editing;remove.onclick=event=>{event.preventDefault();event.stopPropagation();this.deleteObservation(target.id,obs.id);};chip.append(remove);root.append(chip);
     }
     if(target.observations.length){const clear=document.createElement('button');clear.type='button';clear.className='danger subtle';clear.textContent='Clear observations (keep target)';clear.onclick=()=>this.clearObservations();root.append(clear);}
   }

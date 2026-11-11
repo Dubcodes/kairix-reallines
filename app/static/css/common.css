@@ -196,7 +196,10 @@ canvas.editor-canvas:focus { border-color:#4c6578; }
 .marker-chip,.observation-chip { border:1px solid #344554; border-radius:999px; padding:5px 8px; background:#111820; color:#cbd7e0; font-size:.78rem; cursor:pointer; }
 .marker-chip.selected { border-color:#ffce67; color:#ffdf91; background:#332814; }
 .marker-chip.hidden { opacity:.45; text-decoration:line-through; }
-.observation-chip { border-radius:6px; cursor:default; }
+.observation-chip { border-radius:6px; cursor:default; display:inline-flex; align-items:center; gap:7px; }
+.observation-remove { display:inline-flex; align-items:center; justify-content:center; width:19px; height:19px; min-width:19px; padding:0; border-radius:4px; background:transparent; color:#ff9fa5; border:1px solid transparent; font-size:17px; line-height:1; cursor:pointer; }
+.observation-remove:hover,.observation-remove:focus-visible { background:#5a252d; border-color:#d87e8a; color:#fff; }
+.observation-remove:disabled { opacity:.35; cursor:not-allowed; }
 .dot-lock-viewport.editing { border-color:#ffce67; box-shadow:inset 0 0 0 1px rgba(255,206,103,.35); cursor:grab; }
 .dot-lock-viewport.dragging { cursor:grabbing; }
 .dot-lock-viewport canvas { user-select:none; }

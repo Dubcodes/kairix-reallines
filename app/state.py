@@ -21,7 +21,7 @@ from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
 from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, acquisition_signature, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
-from .dot_calibration import DotCalibrationError, default_dot_calibration, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
+from .dot_calibration import DotCalibrationError, default_dot_calibration, metric_rectangle_model_points, model_points_from_saved_observation, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -1199,16 +1199,30 @@ class StateStore:
                 self.zoom_fov_mapping["tight"]["fov"] = round(max(5.0, min(160.0, float(proposed["tight_fov"]))), 6)
             if "zoom_curvature" in (solution.get("parameters") or []):
                 self.zoom_fov_mapping["curvature"] = max(-1.0, min(4.0, float(proposed.get("zoom_curvature", 0.0))))
-            models = solution.get("target_models") or {}
-            for target in dot_data.get("targets") or []:
-                if target.get("id") in models:
-                    target["model_points"] = deepcopy(models[target["id"]])
-            self.world_calibration["dot_calibration"] = dot_data
+            # The old averaged-bearing display model moved the blue crosses
+            # immediately after Apply. Keep the LAST SAVED view pixel-anchored
+            # in the new provisional reference, without modifying gold points.
             self._write_active_profile_locked()
             self._sync_calibration_from_profile()
             self._save("calibration.json", self.calibration)
             self._sync_engineering_compat_locked()
             self.world_calibration.update({"valid": False, "status": "DOT CALIBRATION APPLIED — VERIFY / SOLVE VENUE"})
+            self._refresh_camera_from_tracking(sample=False)
+            models = solution.get("target_models") or {}
+            for target in dot_data.get("targets") or []:
+                observations = target.get("observations") or []
+                if observations:
+                    try:
+                        target["model_points"] = model_points_from_saved_observation(
+                            target, observations[-1], self.profile, self.zoom_fov_mapping
+                        )
+                    except (DotCalibrationError, ValueError, KeyError) as exc:
+                        self.debug.error("dot_anchor_rebuild_failed", target_id=target.get("id"), error=str(exc))
+                        if target.get("id") in models:
+                            target["model_points"] = deepcopy(models[target["id"]])
+                elif target.get("id") in models:
+                    target["model_points"] = deepcopy(models[target["id"]])
+            self.world_calibration["dot_calibration"] = dot_data
             self._write_active_world_calibration_locked()
             self.pose_history.reset("dot calibration mapping applied")
             self._refresh_camera_from_tracking()
@@ -1243,13 +1257,6 @@ class StateStore:
                     raise DotCalibrationError(f"{target['name']} contains Zoom observations from an older encoder reference — clear observations and realign the saved target")
             result = solve_dot_world_reference(self.profile, dot_data, self.zoom_fov_mapping, target_id=target.get("id"))
             solution = result["solution"]
-            self.world_calibration["target"] = deepcopy(result["target"])
-            self.world_calibration["camera_hint"] = deepcopy(solution["pivot"])
-            self.world_calibration["orientation_hint"] = {
-                "pan_offset": solution["pan_offset"],
-                "tilt_offset": solution["tilt_offset"],
-            }
-            self.world_calibration["horizontal_fov"] = float(self.profile.get("camera", {}).get("fov", solution.get("horizontal_fov", 60.0)))
             rms_px = float(solution.get("rms_pixel_error", float("inf")))
             max_px = float(solution.get("max_pixel_error", float("inf")))
             world_valid = bool(solution.get("converged") and math.isfinite(rms_px) and rms_px <= 6.0 and max_px <= 18.0)
@@ -1259,7 +1266,26 @@ class StateStore:
             elif world_valid:
                 status = f"DOT TARGET WORLD CALIBRATION VALID — PRECISION REFINEMENT NEEDED ({rms_px:.2f} px RMS)"
             else:
-                status = f"DOT TARGET WORLD SOLVED — NOT VALID FOR OUTPUT ({rms_px:.2f} px RMS)"
+                # Leave the previous valid world calibration untouched.
+                return {
+                    "solution": deepcopy(solution), "target": deepcopy(result["target"]),
+                    "valid": False,
+                    "status": f"WORLD SOLVE NOT APPLIED — {rms_px:.2f} px RMS or non-converged",
+                }
+            # A successful metric solve changes the coordinate frame. Rebase
+            # the blue marker model to the same metric target as the camera.
+            self.world_calibration["target"] = deepcopy(result["target"])
+            self.world_calibration["camera_hint"] = deepcopy(solution["pivot"])
+            self.world_calibration["orientation_hint"] = {
+                "pan_offset": solution["pan_offset"],
+                "tilt_offset": solution["tilt_offset"],
+            }
+            self.world_calibration["horizontal_fov"] = float(self.profile.get("camera", {}).get("fov", solution.get("horizontal_fov", 60.0)))
+            dot_data["last_solution"] = None
+            for dot_target in dot_data.get("targets") or []:
+                if dot_target.get("id") == target.get("id"):
+                    dot_target["model_points"] = metric_rectangle_model_points(dot_target)
+            self.world_calibration["dot_calibration"] = dot_data
             self.world_calibration.update({
                 "solution": solution,
                 "valid": world_valid,
@@ -1272,7 +1298,7 @@ class StateStore:
             self._write_active_world_calibration_locked()
             self.pose_history.reset("dot target world calibration applied")
             self._refresh_camera_from_tracking()
-            saved = {"solution": deepcopy(solution), "target": deepcopy(self.world_calibration["target"])}
+            saved = {"solution": deepcopy(solution), "target": deepcopy(self.world_calibration["target"]), "valid": True, "status": status}
         self.debug.app(
             "dot_world_calibration_solved",
             calibration_id=self.world_calibration_index["active_id"],

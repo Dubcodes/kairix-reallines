@@ -1,6 +1,8 @@
 import {cameraRayForScreen} from './editor.js';
 import {projectPoint} from './render.js';
 
+export const withoutObservation=(observations,observationId)=>(observations||[]).filter(obs=>obs.id!==observationId);
+
 const add=(a,b)=>({x:a.x+b.x,y:a.y+b.y,z:a.z+b.z});
 const scale=(value,factor)=>({x:value.x*factor,y:value.y*factor,z:value.z*factor});
 const dot=(a,b)=>a.x*b.x+a.y*b.y+a.z*b.z;

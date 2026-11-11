@@ -18,6 +18,15 @@ import {
 
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
+import {withoutObservation} from '../app/static/js/dot_lock.js';
+
+test('deleting one saved observation preserves the other observations and original history', () => {
+  const observations=[{id:'A',points:{M1:{x:.1,y:.2}}},{id:'B',points:{M1:{x:.3,y:.4}}},{id:'C',points:{M1:{x:.5,y:.6}}}];
+  const updated=withoutObservation(observations,'B');
+  assert.deepEqual(updated,[observations[0],observations[2]]);
+  assert.equal(observations.length,3);
+  assert.deepEqual(withoutObservation(observations,'missing'),observations);
+});
 
 test('prototype tolerance is exposed only for Direct GPIO Pan Tilt and Zoom', () => {
   for (const axis of ['pan','tilt','zoom']) assert.equal(supportsPrototypePolicy(axis,'quadrature_gpio'), true);
