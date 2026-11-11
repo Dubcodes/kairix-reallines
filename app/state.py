@@ -1130,6 +1130,13 @@ class StateStore:
                     if stored.get("zoom") is not None and stored.get("zoom") != current_refs.get("zoom"):
                         raise DotCalibrationError(f"{target['name']} contains Zoom observations from an older encoder reference — clear observations and realign the saved target")
             solution = solve_dot_calibration(self.profile, dot_data, self.zoom_fov_mapping)
+            solution["solve_context"] = {
+                "references": deepcopy(current_refs),
+                "pan_ratio": float(self.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]),
+                "tilt_ratio": float(self.profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"]),
+                "horizontal_fov": float(self.profile.get("camera", {}).get("fov", 60.0)),
+                "zoom_curvature": float(self.zoom_fov_mapping.get("curvature", 0.0)),
+            }
             # Calculating a refinement must not change the active projection.
             # The proposed target model was built using the proposed gearing /
             # Zoom curve, so keep it inside last_solution until the operator
@@ -1148,6 +1155,23 @@ class StateStore:
             solution = dot_data.get("last_solution") or {}
             if not solution.get("solved"):
                 raise DotCalibrationError("Calculate a Dot calibration refinement before applying it")
+            if solution.get("apply_allowed") is not True:
+                blockers = solution.get("apply_blockers") or ["The refinement did not pass the safety checks"]
+                raise DotCalibrationError("Refinement is review-only and cannot be applied: " + "; ".join(str(item) for item in blockers))
+            context = solution.get("solve_context") or {}
+            current_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+            if context.get("references") != current_refs:
+                raise DotCalibrationError("Encoder reference changed after this refinement was calculated — calculate again before applying")
+            expected = solution.get("current") or {}
+            checks = {
+                "pan_ratio": float(self.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]),
+                "tilt_ratio": float(self.profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"]),
+                "horizontal_fov": float(self.profile.get("camera", {}).get("fov", 60.0)),
+                "zoom_curvature": float(self.zoom_fov_mapping.get("curvature", 0.0)),
+            }
+            for key, current_value in checks.items():
+                if key in expected and not math.isclose(float(expected[key]), current_value, rel_tol=0.0, abs_tol=1e-6):
+                    raise DotCalibrationError("Camera/tracking model changed after this refinement was calculated — calculate again before applying")
             proposed = solution.get("proposed") or {}
             for axis, key in (("pan", "pan_ratio"), ("tilt", "tilt_ratio")):
                 if key not in (solution.get("parameters") or []):
@@ -1226,10 +1250,20 @@ class StateStore:
                 "tilt_offset": solution["tilt_offset"],
             }
             self.world_calibration["horizontal_fov"] = float(self.profile.get("camera", {}).get("fov", solution.get("horizontal_fov", 60.0)))
+            rms_px = float(solution.get("rms_pixel_error", float("inf")))
+            max_px = float(solution.get("max_pixel_error", float("inf")))
+            world_valid = bool(solution.get("converged") and math.isfinite(rms_px) and rms_px <= 6.0 and max_px <= 18.0)
+            precision_ready = bool(solution.get("precision_ready"))
+            if world_valid and precision_ready:
+                status = f"DOT TARGET WORLD CALIBRATION VALID — {rms_px:.2f} px RMS"
+            elif world_valid:
+                status = f"DOT TARGET WORLD CALIBRATION VALID — PRECISION REFINEMENT NEEDED ({rms_px:.2f} px RMS)"
+            else:
+                status = f"DOT TARGET WORLD SOLVED — NOT VALID FOR OUTPUT ({rms_px:.2f} px RMS)"
             self.world_calibration.update({
                 "solution": solution,
-                "valid": True,
-                "status": "DOT TARGET WORLD CALIBRATION VALID",
+                "valid": world_valid,
+                "status": status,
                 "last_solve_error": None,
                 "tracking_fingerprint": tracking_fingerprint(self.profile),
                 "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")),

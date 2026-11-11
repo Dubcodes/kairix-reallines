@@ -725,7 +725,9 @@ def solve_dot_world_reference(
     first_pan = _axis_angle(first, "pan", profile["axes"]["pan"], pan_ratio)
     first_tilt = _axis_angle(first, "tilt", profile["axes"]["tilt"], tilt_ratio)
     initial_world_tilt = math.degrees(math.atan2(target_center_z - height, distance))
-    initial = [0.0, -distance, height, -first_pan, initial_world_tilt - first_tilt]
+    profile_fov = float(profile.get("camera", {}).get("fov", 60.0))
+    initial_roll = 0.0
+    initial = [0.0, -distance, height, -first_pan, initial_world_tilt - first_tilt, initial_roll]
 
     def camera_for(observation: dict[str, Any], values: list[float]) -> dict[str, float]:
         pivot = {"x": values[0], "y": values[1], "z": values[2]}
@@ -737,13 +739,17 @@ def solve_dot_world_reference(
         zoom_axis = (observation.get("axes") or {}).get("zoom") or {}
         fov = zoom_fov_for_count(zoom_axis.get("relative_count"), zoom_mapping)
         if fov is None:
-            fov = float((observation.get("camera") or {}).get("fov", profile.get("camera", {}).get("fov", 60.0)))
+            # Observation.camera.fov is historical state, not a measurement of
+            # the physical lens. It may have been changed by an earlier failed
+            # refinement while the lens never moved. Always use the CURRENT
+            # lens model when replaying saved observations.
+            fov = profile_fov
         return {
             **optical,
             "height": optical["z"],
             "pan": world_pan,
             "tilt": world_tilt,
-            "roll": float((observation.get("camera") or {}).get("roll", 0.0)),
+            "roll": values[5],
             "fov": fov,
         }
 
@@ -770,6 +776,7 @@ def solve_dot_world_reference(
             max(-5.0, min(30.0, values[2])),
             _wrap_degrees(values[3]),
             max(-89.0, min(89.0, values[4])),
+            max(-20.0, min(20.0, values[5])),
         ]
 
     params = bounded(initial)
@@ -778,8 +785,8 @@ def solve_dot_world_reference(
     for _ in range(160):
         base = residuals(params)
         base_cost = _cost(base)
-        jacobian = [[0.0] * 5 for _ in base]
-        for column in range(5):
+        jacobian = [[0.0] * 6 for _ in base]
+        for column in range(6):
             step = 1e-4 * max(1.0, abs(params[column]))
             trial = params[:]
             trial[column] += step
@@ -790,11 +797,11 @@ def solve_dot_world_reference(
                 continue
             for row in range(len(base)):
                 jacobian[row][column] = (shifted[row] - base[row]) / actual_step
-        normal = [[sum(jacobian[k][i] * jacobian[k][j] for k in range(len(base))) for j in range(5)] for i in range(5)]
-        gradient = [sum(jacobian[k][i] * base[k] for k in range(len(base))) for i in range(5)]
+        normal = [[sum(jacobian[k][i] * jacobian[k][j] for k in range(len(base))) for j in range(6)] for i in range(6)]
+        gradient = [sum(jacobian[k][i] * base[k] for k in range(len(base))) for i in range(6)]
         # weak stabilising priors around the operator's distance/height hint
-        priors = (1e-4, 1e-4, 2e-3, 1e-7, 1e-7)
-        for index in range(5):
+        priors = (1e-4, 1e-4, 2e-3, 1e-7, 1e-7, 1e-7)
+        for index in range(6):
             normal[index][index] += damping + priors[index]
             gradient[index] += priors[index] * (params[index] - initial[index])
         try:
@@ -816,8 +823,10 @@ def solve_dot_world_reference(
     final = residuals(params)
     rms = math.sqrt(_cost(final) / len(final))
     maximum = max(math.hypot(final[index], final[index + 1]) for index in range(0, len(final), 2))
-    if not math.isfinite(rms) or rms > 30.0:
+    if not math.isfinite(rms) or rms > 20.0:
         raise DotCalibrationError(f"Measured-rectangle world solve is not reliable yet ({rms:.1f} px RMS). Refine the markers or add more views.")
+    precision_ready = bool(converged and rms <= 2.0 and maximum <= 6.0)
+    quality = "EXCELLENT" if rms <= 1.5 else "GOOD" if rms <= 3.0 else "FAIR" if rms <= 6.0 else "POOR"
     solution = {
         "solved": True,
         "pivot": {"x": params[0], "y": params[1], "z": params[2]},
@@ -825,7 +834,7 @@ def solve_dot_world_reference(
         "pan_offset": _wrap_degrees(params[3]),
         "tilt_offset": params[4],
         "rig_offset": rig,
-        "fixed_roll": 0.0,
+        "fixed_roll": params[5],
         "horizontal_fov": float((zoom_mapping.get("wide") or {}).get("fov", profile.get("camera", {}).get("fov", 60.0))),
         "observation_count": sum(len(obs["points"]) for obs in usable),
         "view_count": len(usable),
@@ -835,6 +844,8 @@ def solve_dot_world_reference(
         "target_name": target["name"],
         "deduplicated_observations": duplicates,
         "converged": converged,
+        "quality": quality,
+        "precision_ready": precision_ready,
         "solved_at": datetime.now(timezone.utc).isoformat(),
     }
     world_target = {
@@ -1075,16 +1086,14 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
         pan_stage = ["pan_ratio"]
         if pan_group:
             group_data = _subset_dot_calibration(solve_data, pan_group["ids"])
-            if use_profile_fov:
-                pan_stage.append("horizontal_fov")
-                pan_stage_data = group_data
-                fov_group = pan_group
-            else:
-                # Once both physical Zoom endpoints exist, keep those endpoint
-                # FOVs authoritative and use the full deduplicated session for
-                # Pan ratio. The clean Pan group is still reported as evidence,
-                # but does not override the globally better Pan fit.
-                fov_group = pan_group
+            # IMPORTANT: repeated image bearings alone do not safely identify
+            # Pan gearing and focal length at the same time. With pure Pan they
+            # have a collapse direction (narrower FOV + smaller angular motion)
+            # that can look numerically better while being physically absurd.
+            # Keep the active lens model fixed here. Metric measured-target or
+            # dedicated lens calibration is responsible for FOV/intrinsics.
+            pan_stage_data = group_data
+            fov_group = pan_group
 
     tilt_stage = ["tilt_ratio"] if coverage["tilt"] >= 8 else []
     for name in pan_stage + tilt_stage:
@@ -1161,10 +1170,11 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
     if duplicate_count:
         warnings.append(f"{duplicate_count} near-duplicate observation(s) were averaged so repeated saves at the same pose did not receive extra weight.")
     if fov_group:
-        action = "Pan/FOV fitting used" if use_profile_fov else "A clean Pan sweep was identified from"
         warnings.append(
-            f"{action} {len(fov_group['ids'])} near-constant Tilt/Zoom view(s) spanning {fov_group['coverage']} Pan counts."
+            f"Pan fitting used {len(fov_group['ids'])} near-constant Tilt/Zoom view(s) spanning {fov_group['coverage']} Pan counts; lens FOV was held fixed."
         )
+        if use_profile_fov:
+            warnings.append("Horizontal FOV is intentionally not solved from bearing-only Dot observations. Use measured-target/lens calibration to refine FOV safely.")
     elif coverage["pan"] >= 8 and zoom_complete:
         warnings.append("No clean fixed-Tilt/fixed-Zoom Pan sweep was found, so the lens endpoint FOV was held. Add two or more Pan-separated views without changing Tilt or Zoom.")
     if zoom_complete and coverage["zoom"] >= 10 and len(zoom_levels) < 3:
@@ -1174,9 +1184,43 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
     if final_rms > 12.0:
         warnings.append("Residual image error is still high. Review marker placement, add well-spread motion groups, or solve the measured rectangle as the venue/world reference.")
 
+    # Applying a calibration mutates the live encoder/lens model, so a numerical
+    # minimum is not enough. Reject weak, non-converged or implausibly large
+    # steps instead of allowing repeated Apply clicks to walk the profile into a
+    # degenerate solution.
+    apply_blockers: list[str] = []
+    if not converged_all:
+        apply_blockers.append("The refinement optimizer did not converge")
+    for name in ("pan_ratio", "tilt_ratio"):
+        if name not in parameters:
+            continue
+        before = float(base_params[name])
+        after = float(params[name])
+        if before <= 0 or after <= 0:
+            apply_blockers.append(f"{name.replace('_', ' ').title()} is not physically valid")
+            continue
+        delta = abs(after / before - 1.0)
+        if delta > 0.25:
+            apply_blockers.append(
+                f"{name.replace('_', ' ').title()} changes by {delta * 100.0:.1f}% in one solve; use known-angle or measured-target calibration instead"
+            )
+    improvement_px = initial_rms - final_rms
+    improvement_percent = 0.0 if initial_rms <= 1e-9 else improvement_px * 100.0 / initial_rms
+    if final_rms > 12.0:
+        apply_blockers.append(f"Residual error remains too high ({final_rms:.1f} px RMS)")
+    if improvement_px < 0.25 and improvement_percent < 2.0:
+        apply_blockers.append(
+            f"The proposal only improves RMS by {max(0.0, improvement_px):.2f} px ({max(0.0, improvement_percent):.2f}%)"
+        )
+    apply_allowed = not apply_blockers
+    if apply_blockers:
+        warnings.append("Refinement is REVIEW ONLY and cannot be applied: " + "; ".join(apply_blockers) + ".")
+
     return {
         "solved": True,
         "converged": converged_all,
+        "apply_allowed": apply_allowed,
+        "apply_blockers": apply_blockers,
         "parameters": parameters,
         "current": dict(base_params),
         "proposed": dict(params),
@@ -1186,7 +1230,7 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
         "rms_x_after_px": rms(final_x),
         "rms_y_before_px": rms(initial_y),
         "rms_y_after_px": rms(final_y),
-        "improvement_percent": 0.0 if initial_rms <= 1e-9 else max(-999.0, min(100.0, (initial_rms - final_rms) * 100.0 / initial_rms)),
+        "improvement_percent": max(-999.0, min(100.0, improvement_percent)),
         "matched_points": used_points,
         "observation_sets": used_observations,
         "coverage": coverage,
@@ -1207,7 +1251,8 @@ def solve_dot_calibration(profile: dict[str, Any], dot_calibration: dict[str, An
         "warnings": warnings,
         "notes": [
             "Repeated marker placements are equal-authority image measurements; Observation 1 is not hidden 3D truth.",
-            "Mixed sessions are split into useful motion groups: a fixed-Tilt/fixed-Zoom Pan sweep can refine Pan gearing and lens FOV while other views refine Tilt.",
+            "Mixed sessions are split into useful motion groups: a fixed-Tilt/fixed-Zoom Pan sweep can refine Pan gearing while lens FOV remains anchored by the active lens model.",
+            "Bearing-only Dot refinement never solves Pan gearing and FOV together; measured metric targets or dedicated lens calibration must constrain lens intrinsics.",
             "Near-duplicate camera poses are averaged for solving instead of receiving repeated statistical weight.",
             "Zoom curvature is fitted only after at least three distinct Zoom positions exist.",
             "Approximate target distance supplies display scale only; measured rectangle dimensions can additionally define a metric venue/world frame.",

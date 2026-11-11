@@ -299,12 +299,20 @@ export class DotCalibrationUi {
       this.setStatus('CALCULATING REFINEMENT…','warn');
       const solution=await api('/api/world-calibration/dot-calibration/solve',{method:'POST'});
       this.data.last_solution=solution;
-      this.setStatus(`REFINEMENT READY — ${fmt(solution.rms_before_px,1)} px → ${fmt(solution.rms_after_px,1)} px RMS · APPLY TO USE IT`,'ok');this.render();
+      if(solution.apply_allowed===false){
+        this.setStatus(`REFINEMENT REVIEW ONLY — ${fmt(solution.rms_before_px,1)} px → ${fmt(solution.rms_after_px,1)} px RMS · NOT SAFE TO APPLY`,'bad');
+      }else{
+        this.setStatus(`SAFE REFINEMENT READY — ${fmt(solution.rms_before_px,1)} px → ${fmt(solution.rms_after_px,1)} px RMS · APPLY TO USE IT`,'ok');
+      }
+      this.render();
     }catch(error){this.setStatus(String(error).replace(/^Error:\s*/,''),'bad');if(!silent)logFrontend('calibration','dot_solve_failed',{error:String(error)});}
   }
 
   async apply(){
     if(!this.data.last_solution?.solved)return;
+    if(this.data.last_solution.apply_allowed===false){
+      this.setStatus('THIS REFINEMENT FAILED THE SAFETY CHECKS — REVIEW THE WARNINGS AND CALCULATE AGAIN','bad');return;
+    }
     try{
       const result=await api('/api/world-calibration/dot-calibration/apply',{method:'POST'});
       await this.updateOverlay(true);
@@ -415,7 +423,7 @@ export class DotCalibrationUi {
       ['Matched placements',solution.matched_points??'—'],['Observation sets',solution.observation_sets??'—'],
       ['Pan ratio',parameters.has('pan_ratio')?`${fmt(c.pan_ratio,6)} → ${fmt(p.pan_ratio,6)}`:`${fmt(c.pan_ratio,6)} · not enough Pan movement`],
       ['Tilt ratio',parameters.has('tilt_ratio')?`${fmt(c.tilt_ratio,6)} → ${fmt(p.tilt_ratio,6)}`:`${fmt(c.tilt_ratio,6)} · not enough Tilt movement`],
-      ['Horizontal FOV',parameters.has('horizontal_fov')?`${fmt(c.horizontal_fov,2)}° → ${fmt(p.horizontal_fov,2)}°`:`${fmt(c.horizontal_fov,2)}° · held`],
+      ['Horizontal FOV',parameters.has('horizontal_fov')?`${fmt(c.horizontal_fov,2)}° → ${fmt(p.horizontal_fov,2)}°`:`${fmt(c.horizontal_fov,2)}° · held by lens model`],
       ['Wide FOV',parameters.has('wide_fov')?`${fmt(c.wide_fov,2)}° → ${fmt(p.wide_fov,2)}°`:`${fmt(c.wide_fov,2)}° · held`],
       ['Tight FOV',parameters.has('tight_fov')?`${fmt(c.tight_fov,2)}° → ${fmt(p.tight_fov,2)}°`:`${fmt(c.tight_fov,2)}° · held`],
       ['Zoom curve',solution.zoom_saturated?'MODEL LIMIT — NOT APPLIED':parameters.has('zoom_curvature')?`${fmt(c.zoom_curvature,4)} → ${fmt(p.zoom_curvature,4)}`:`${fmt(c.zoom_curvature,4)} · held`],
@@ -423,7 +431,11 @@ export class DotCalibrationUi {
     ];
     root.innerHTML=rows.map(([a,b])=>`<div>${a}</div><div>${b}</div>`).join('');
     for(const warning of solution.warnings||[]){const line=document.createElement('div');line.className='form-error dot-solution-warning';line.textContent=warning;root.append(line);}
-    apply.disabled=false;
+    if(solution.apply_allowed===false){
+      const title=document.createElement('div');title.className='form-error dot-solution-warning';title.textContent='APPLY BLOCKED — this proposal cannot modify the live camera model.';root.append(title);
+      for(const blocker of solution.apply_blockers||[]){const line=document.createElement('div');line.className='form-error dot-solution-warning';line.textContent=`• ${blocker}`;root.append(line);}
+    }
+    apply.disabled=solution.apply_allowed===false;
   }
 
   draw(){
