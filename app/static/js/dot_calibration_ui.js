@@ -2,7 +2,7 @@ import {api,logFrontend} from './common.js?v=world-media1';
 import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
-  rectangleTemplatePoints,rmsOverlayError,withoutObservation,
+  rectangleTemplatePoints,rmsOverlayError,withoutObservation,nudgeDotPointPx,
 } from './dot_lock.js?v=world-media1';
 
 const clone=value=>structuredClone(value);
@@ -10,6 +10,7 @@ const uid=prefix=>`${prefix}-${globalThis.crypto?.randomUUID?.().slice(0,8)??Mat
 const finite=value=>Number.isFinite(Number(value));
 const fmt=(value,digits=2)=>finite(value)?Number(value).toFixed(digits):'—';
 const inViewport=point=>point&&point.x>=0&&point.x<=1&&point.y>=0&&point.y<=1;
+const MARKER_COORDINATE_FIELDS=Object.freeze({X:'dotMarkerX',Y:'dotMarkerY'});
 
 export class DotCalibrationUi {
   constructor(byId){
@@ -156,6 +157,8 @@ export class DotCalibrationUi {
     canvas.addEventListener('pointermove',event=>this.pointerMove(event));
     canvas.addEventListener('pointerup',event=>this.pointerUp(event));
     canvas.addEventListener('pointercancel',event=>this.pointerUp(event));
+    document.addEventListener('keydown',event=>this.keyDown(event));
+    for(const axis of ['X','Y'])this.byId(MARKER_COORDINATE_FIELDS[axis]).addEventListener('change',event=>this.commitMarkerCoordinate(axis,event.target.value));
   }
 
   async newTarget(type){
@@ -200,7 +203,8 @@ export class DotCalibrationUi {
     const width=this.byId('dotTargetWidth').value.trim(),height=this.byId('dotTargetHeight').value.trim();
     target.width_m=width&&Number(width)>0?Number(width):null;target.height_m=height&&Number(height)>0?Number(height):null;
     const bottom=Number(this.byId('dotTargetBottomHeight').value);target.bottom_height_m=finite(bottom)?bottom:0;
-    this.data.last_solution=null;await this.persist();this.render();
+    this.data.last_solution=null;this.data.world_candidate=null;await this.persist();this.render();
+    if(target.observations.length>=2)await this.recalculateAll();
   }
 
   async deleteSelectedMarker(){
@@ -252,7 +256,7 @@ export class DotCalibrationUi {
     const point=this.pointerPoint(event),{width,height,canvas}=this.canvasSize();
     const candidates=Object.entries(this.editor.draft).filter(([id])=>this.editor.enabled.has(id)).map(([id,observed])=>({id,observed}));
     const hit=hitTestDot(candidates,point,width,height,28);
-    if(hit){this.editor.selected=String(hit.id);this.editor.dragging=true;canvas.setPointerCapture?.(event.pointerId);this.updateOverlay(true);this.render();return;}
+    if(hit){this.editor.selected=String(hit.id);this.editor.dragging=true;canvas.focus({preventScroll:true});canvas.setPointerCapture?.(event.pointerId);this.updateOverlay(true);this.render();return;}
     if(this.editor.adding){
       if(target.markers.length>=20){this.setStatus('MAXIMUM 20 MARKERS','bad');return;}
       const id=this.ensureMarker(target);this.editor.draft[id]=point;this.editor.enabled.add(id);this.editor.selected=id;this.editor.dragging=true;canvas.setPointerCapture?.(event.pointerId);this.persist().catch(()=>{});this.updateOverlay();this.render();return;
@@ -261,8 +265,42 @@ export class DotCalibrationUi {
     // previously selected; that made off-screen-marker editing unpredictable.
     this.editor.selected=null;this.editor.dragging=false;this.updateOverlay(true);this.render();
   }
-  pointerMove(event){if(!this.editor.dragging||!this.editor.selected)return;this.editor.draft[this.editor.selected]=this.pointerPoint(event);this.updateOverlay();this.draw();}
+  pointerMove(event){if(!this.editor.dragging||!this.editor.selected)return;this.editor.draft[this.editor.selected]=this.pointerPoint(event);this.updateOverlay();this.draw();this.renderMarkerCoordinates();}
   pointerUp(event){if(!this.editor.dragging)return;this.editor.dragging=false;this.byId('dotLockCanvas').releasePointerCapture?.(event.pointerId);this.updateOverlay(true);this.render();}
+
+  keyDown(event){
+    if(!this.editor.editing||!this.editor.selected||!this.editor.enabled.has(this.editor.selected))return;
+    if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key))return;
+    const target=event.target;
+    if(target?.isContentEditable||['INPUT','TEXTAREA','SELECT'].includes(target?.tagName))return;
+    const point=this.editor.draft[this.editor.selected];if(!point)return;
+    const next=nudgeDotPointPx(point,event.key,event);if(!next)return;
+    event.preventDefault();this.editor.draft[this.editor.selected]=next;
+    this.updateOverlay();this.draw();this.renderMarkerCoordinates();
+  }
+
+  commitMarkerCoordinate(axis,value){
+    const id=this.editor.selected;
+    if(!this.editor.editing||!id||!this.editor.enabled.has(id)||!this.editor.draft[id])return;
+    const n=Number(value),denominator=axis==='X'?1920:1080;
+    if(!Number.isFinite(n)||n<-.25*denominator||n>1.25*denominator){
+      this.setStatus('MARKER COORDINATE MUST BE WITHIN THE SUPPORTED VIEWPORT RANGE','bad');
+      this.renderMarkerCoordinates();return;
+    }
+    const coordinate=axis==='X'?'x':'y';
+    this.editor.draft[id][coordinate]=n/denominator;
+    this.updateOverlay();this.draw();this.renderMarkerCoordinates();
+  }
+
+  renderMarkerCoordinates(){
+    const id=this.editor.selected,point=id?this.editor.draft[id]:null;
+    const valid=Boolean(this.editor.editing&&point&&this.editor.enabled.has(id));
+    this.byId('dotSelectedLabel').textContent=valid?`Selected marker: ${id}`:'Selected marker: —';
+    for(const [axis,coordinate,size] of [['X','x',1920],['Y','y',1080]]){
+      const input=this.byId(MARKER_COORDINATE_FIELDS[axis]);input.disabled=!valid;
+      if(input!==document.activeElement)input.value=valid?(Number(point[coordinate])*size).toFixed(2):'';
+    }
+  }
 
   centerMarker(markerId){
     const target=this.activeTarget();if(!target)return;
@@ -296,8 +334,30 @@ export class DotCalibrationUi {
       const size=this.canvasSize();
       target.model_points=modelPointsFromObservation({camera:observation.camera,points:Object.entries(points).map(([id,p])=>({id,...p})),targetDistance:target.approx_distance_m,width:size.width,height:size.height});
     }
-    this.data.last_solution=null;await this.persist();this.cancelEdit(false);await this.updateOverlay(true);this.render();
-    if(target.observations.length>=2)await this.solve(true);else this.setStatus('BASELINE SAVED — MOVE PAN/TILT/ZOOM, STOP THE CAMERA, THEN PRESS “ADJUST THIS VIEW”','ok');
+    this.data.last_solution=null;this.data.world_candidate=null;await this.persist();this.cancelEdit(false);await this.updateOverlay(true);this.render();
+    if(target.observations.length>=2)await this.recalculateAll();else this.setStatus('BASELINE SAVED — MOVE PAN/TILT/ZOOM, STOP THE CAMERA, THEN PRESS “ADJUST THIS VIEW”','ok');
+  }
+
+  async recalculateAll(){
+    const target=this.activeTarget();if(!target)return;
+    this.setStatus('UPDATING CALIBRATION FITS FROM ALL SAVED OBSERVATIONS…','warn');
+    // One saved observation is an immutable measurement, not a command to
+    // replace the live projection. World candidates must be reviewed before use.
+    try{await this.solve(true);}catch(error){logFrontend('calibration','automatic_refinement_failed',{error:String(error)});}
+    if(target.type==='rectangle'&&target.width_m&&target.height_m&&target.observations.length>=2){
+      try{
+        const proposal=await api('/api/world-calibration/dot-calibration/preview-world',{
+          method:'POST',body:JSON.stringify({values:{target_id:target.id}}),
+        });
+        this.data.world_candidate=proposal;this.render();
+        this.setStatus(proposal.valid
+          ?`WORLD CANDIDATE READY — ${fmt(proposal.rms_pixel_error,2)} px RMS · REVIEW AND ACCEPT WHEN READY`
+          :`WORLD CANDIDATE REVIEW ONLY — ${fmt(proposal.rms_pixel_error,2)} px RMS · ACTIVE CAMERA UNCHANGED`,proposal.valid?'ok':'warn');
+      }catch(error){
+        this.data.world_candidate=null;this.render();
+        this.setStatus(`WORLD CANDIDATE NOT READY — ${String(error).replace(/^Error:\s*/,'')}`,'warn');
+      }
+    }
   }
 
   async solve(silent=false){
@@ -323,20 +383,22 @@ export class DotCalibrationUi {
     }
     try{
       const result=await api('/api/world-calibration/dot-calibration/apply',{method:'POST'});
-      await this.updateOverlay(true);
-      this.setStatus(`REFINEMENT APPLIED — SAVED GOLD POINTS STAY FIXED; BLUE PREDICTIONS SHOW THE RESIDUAL · PAN ${fmt(result.pan_ratio,6)} · TILT ${fmt(result.tilt_ratio,6)} · FOV ${fmt(result.horizontal_fov,2)}°`,'ok');
-      this.render();
+      this.data.last_solution=null;this.data.world_candidate=null;
+      await this.updateOverlay(true);this.render();
+      await this.recalculateAll();
     }catch(error){this.setStatus(String(error),'bad');}
   }
 
   async solveWorldReference(){
     const target=this.activeTarget();if(!target)return;
-    await this.commitTargetFields();
     if(target.type!=='rectangle'||!target.width_m||!target.height_m){
       this.setStatus('ENTER THE REAL RECTANGLE WIDTH AND HEIGHT BEFORE SOLVING THE VENUE/WORLD','bad');return;
     }
     if((target.observations?.length??0)<2){
       this.setStatus('SAVE AT LEAST TWO RECTANGLE OBSERVATIONS BEFORE SOLVING THE VENUE/WORLD','bad');return;
+    }
+    if(this.data.world_candidate?.valid!==true){
+      this.setStatus('NO SAFE WORLD CANDIDATE — ADD MARKERS OR VIEWS AND REVIEW THE AUTOMATIC FIT','bad');return;
     }
     try{
       this.setStatus('SOLVING CAMERA + WORLD FROM THE MEASURED RECTANGLE…','warn');
@@ -347,6 +409,7 @@ export class DotCalibrationUi {
       if(result.valid!==true){
         this.setStatus(`${result.status||'WORLD SOLVE NOT APPLIED'} · ${fmt(solution.rms_pixel_error,1)} px RMS · PREVIOUS CAMERA MODEL RETAINED`,'bad');
       }else{
+        this.data.world_candidate=null;
         this.setStatus(`WORLD CALIBRATION APPLIED — ${fmt(solution.rms_pixel_error,1)} px RMS · PIVOT ${fmt(solution.pivot?.x,2)}, ${fmt(solution.pivot?.y,2)}, ${fmt(solution.pivot?.z,2)} m`,'ok');
       }
     }catch(error){
@@ -366,8 +429,10 @@ export class DotCalibrationUi {
     if(this.anchorObservationId===observationId)this.anchorObservationId=null;
     if(!target.observations.length)target.model_points={};
     try{
+      this.data.world_candidate=null;
       await this.persist();await this.updateOverlay(true);this.render();
-      this.setStatus(`DELETED O${index+1} — OTHER SAVED OBSERVATIONS UNCHANGED · RECALCULATE REFINEMENT`,'warn');
+      if(target.observations.length>=2)await this.recalculateAll();
+      else this.setStatus(`DELETED O${index+1} — REMAINING OBSERVATIONS KEPT; ADD MORE VIEWS TO REFIT`,'warn');
     }catch(error){
       this.data=backup;this.render();this.setStatus(`DELETE FAILED — ${String(error)}`,'bad');
     }
@@ -375,7 +440,7 @@ export class DotCalibrationUi {
 
   async clearObservations(){
     const target=this.activeTarget();if(!target)return;
-    target.observations=[];target.model_points={};this.data.last_solution=null;this.anchorObservationId=null;
+    target.observations=[];target.model_points={};this.data.last_solution=null;this.data.world_candidate=null;this.anchorObservationId=null;
     await this.persist();this.cancelEdit(false);await this.updateOverlay(true);this.render();
     this.setStatus('OBSERVATIONS CLEARED — 0 SAVED · TARGET MEASUREMENTS AND MARKER LAYOUT RETAINED','warn');
   }
@@ -393,7 +458,7 @@ export class DotCalibrationUi {
     }
     id('dotEdgeMidpoints').checked=!!target?.edge_midpoints;id('dotEdgeMidpoints').disabled=!target||target.type!=='rectangle';
     id('dotTargetWidth').disabled=!target||target.type!=='rectangle';id('dotTargetHeight').disabled=!target||target.type!=='rectangle';id('dotTargetBottomHeight').disabled=!target||target.type!=='rectangle';
-    id('solveDotWorldReference').disabled=!target||target.type!=='rectangle'||!target.width_m||!target.height_m||(target.observations?.length??0)<2;
+    id('solveDotWorldReference').disabled=!target||this.data.world_candidate?.target_id!==target.id||this.data.world_candidate?.valid!==true;
     id('deleteDotTarget').disabled=!target;id('addDotLock').disabled=!target;id('prepareDotObservation').disabled=!target;
     id('saveDotObservation').disabled=!target||!this.editor.editing;id('clearDotDraft').disabled=!this.editor.editing;
     const overlay=this.state?.calibration_overlay||{};
@@ -442,6 +507,23 @@ export class DotCalibrationUi {
     if(target.observations.length){const clear=document.createElement('button');clear.type='button';clear.className='danger subtle';clear.textContent='Clear observations (keep target)';clear.onclick=()=>this.clearObservations();root.append(clear);}
   }
 
+  renderWorldCandidate(){
+    const node=this.byId('dotWorldCandidate'),candidate=this.data.world_candidate;
+    const active=this.state?.world_calibrations?.active?.solution;
+    const target=this.activeTarget(),observations=target?.observations||[];
+    const rows=[
+      ['Saved views',String(observations.length)],
+      ['Current accepted world',active?.rms_pixel_error===undefined?'Not solved':`${fmt(active.rms_pixel_error,2)} px RMS (${active.view_count??'?'} views)`],
+      ['Candidate world RMS',candidate?`${fmt(candidate.rms_pixel_error,2)} px`:'Not calculated'],
+      ['Candidate worst marker',candidate?`${fmt(candidate.max_pixel_error,2)} px`:'—'],
+      ['Candidate quality',candidate?`${candidate.quality||'—'} · ${candidate.valid?'VALID · manual accept':'REVIEW ONLY'}`:'—'],
+      ['Target coverage',`${new Set(observations.flatMap(obs=>Object.keys(obs.points||{}))).size} distinct markers retained`],
+    ];
+    node.replaceChildren(...rows.flatMap(([name,value])=>{
+      const a=document.createElement('div'),b=document.createElement('div');a.textContent=name;b.textContent=value;return[a,b];
+    }));
+  }
+
   renderSolution(){
     const solution=this.data.last_solution,root=this.byId('dotSolution'),apply=this.byId('applyDotCalibration');
     if(!solution?.solved){root.innerHTML='<div>Status</div><div>No refinement calculated</div>';apply.disabled=true;return;}
@@ -466,7 +548,8 @@ export class DotCalibrationUi {
       const title=document.createElement('div');title.className='form-error dot-solution-warning';title.textContent='APPLY BLOCKED — this proposal cannot modify the live camera model.';root.append(title);
       for(const blocker of solution.apply_blockers||[]){const line=document.createElement('div');line.className='form-error dot-solution-warning';line.textContent=`• ${blocker}`;root.append(line);}
     }
-    apply.disabled=solution.apply_allowed===false;
+    apply.disabled=solution.apply_allowed!==true;
+    apply.title=apply.disabled?(solution.apply_blockers||[]).join('; ')||'Not safe to apply':'Apply validated encoder mapping; live projection will change';
   }
 
   draw(){
@@ -484,8 +567,8 @@ export class DotCalibrationUi {
   }
 
   render(){
-    if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSolution();
-    const viewport=this.byId('dotLockViewport');viewport.classList.toggle('editing',this.editor.editing);viewport.classList.toggle('dragging',this.editor.dragging);this.draw();
+    if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSolution();this.renderWorldCandidate();
+    const viewport=this.byId('dotLockViewport');viewport.classList.toggle('editing',this.editor.editing);viewport.classList.toggle('dragging',this.editor.dragging);this.draw();this.renderMarkerCoordinates();
     const target=this.activeTarget();
     if(!target)this.setStatus('CREATE A FREE OR RECTANGLE TARGET','warn');
     else if(!this.editor.editing&&target.observations.length)this.setStatus(`${target.name.toUpperCase()} — ${target.observations.length} OBSERVATION${target.observations.length===1?'':'S'} SAVED · MOVE CAMERA THEN ADJUST THIS VIEW`,'ok');

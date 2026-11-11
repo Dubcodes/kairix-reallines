@@ -34,6 +34,7 @@ def default_dot_calibration() -> dict[str, Any]:
         "targets": [],
         "active_target_id": None,
         "last_solution": None,
+        "world_candidate": None,
     }
 
 
@@ -138,6 +139,7 @@ def normalise_dot_calibration(value: dict[str, Any] | None) -> dict[str, Any]:
         "targets": normalised_targets,
         "active_target_id": active_target_id,
         "last_solution": deepcopy(source.get("last_solution")),
+        "world_candidate": deepcopy(source.get("world_candidate")),
     }
 
 
@@ -883,6 +885,22 @@ def model_points_from_saved_observation(
         fov = float(profile.get("camera", {}).get("fov", 60.0))
     camera = {**optical, "pan": pan, "tilt": tilt, "roll": 0.0, "fov": fov}
     return _world_points_for_baseline(target, observation, camera)
+
+
+def model_points_from_saved_history(
+    target: dict[str, Any], profile: dict[str, Any], zoom_mapping: dict[str, Any],
+) -> dict[str, dict[str, float]]:
+    """Reconstruct every visible-at-least-once marker in the new provisional frame.
+
+    Most recent observation for each marker wins. A Pan sweep that leaves
+    a marker offscreen must never delete that marker's previously saved XYZ.
+    Gold image observations themselves are not modified.
+    """
+    points: dict[str, dict[str, float]] = {}
+    for observation in target.get("observations") or []:
+        projected = model_points_from_saved_observation(target, observation, profile, zoom_mapping)
+        points.update(projected)
+    return points
 
 
 def metric_rectangle_model_points(target: dict[str, Any]) -> dict[str, dict[str, float]]:

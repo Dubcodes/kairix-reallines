@@ -16,6 +16,7 @@ from app.dot_calibration import (
     normalise_dot_calibration,
     metric_rectangle_model_points,
     model_points_from_saved_observation,
+    model_points_from_saved_history,
     solve_dot_calibration,
     solve_dot_world_reference,
     zoom_fov_for_count,
@@ -105,8 +106,18 @@ class DotCalibrationMathCase(unittest.TestCase):
         self.assertGreater(points["M3"]["x"], points["M4"]["x"])
         self.assertEqual(points["M3"]["z"], points["M4"]["z"])
 
+    def test_out_of_frame_markers_are_retained_in_history_model(self):
+        profile = profile_fixture(4.6, 2.43, 56.0)
+        first = observation("O1",pan_raw=0,points=BASE_POINTS)
+        second = observation("O2",pan_raw=450,points={"M1": {"x": .31, "y": .40}})
+        target = target_with([first,second],approx_distance_m=5.715)
+        model = model_points_from_saved_history(target,profile,{"active":False})
+        self.assertEqual(set(model),set(BASE_POINTS))
+        latest = model_points_from_saved_observation(target,second,profile,{"active":False})
+        self.assertEqual(model["M1"],latest["M1"])
+
     def test_default_and_normalisation_preserve_partial_marker_observations(self):
-        self.assertEqual(default_dot_calibration(), {"targets": [], "active_target_id": None, "last_solution": None})
+        self.assertEqual(default_dot_calibration(), {"targets": [], "active_target_id": None, "last_solution": None, "world_candidate": None})
         data = {
             "targets": [target_with([
                 observation("O1", points=BASE_POINTS),
@@ -399,6 +410,32 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
         await store.update_axis_config(profile_id, "pan", {"source": "quadrature_gpio", "source_config": {"line_a": 17, "line_b": 27}})
         await store.update_axis_config(profile_id, "tilt", {"source": "quadrature_gpio", "source_config": {"line_a": 22, "line_b": 23}})
 
+    async def test_lens_fov_preferences_persist_but_endpoint_counts_do_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=self.make_store(directory)
+            await store.save_zoom_lens_fov("wide",67.5)
+            await store.save_zoom_lens_fov("tight",13.2)
+            reloaded=self.make_store(directory)
+            self.assertAlmostEqual(reloaded.zoom_fov_mapping["saved_wide_fov"],67.5)
+            self.assertAlmostEqual(reloaded.zoom_fov_mapping["saved_tight_fov"],13.2)
+            self.assertIsNone(reloaded.zoom_fov_mapping["wide"])
+            self.assertIsNone(reloaded.zoom_fov_mapping["tight"])
+
+    async def test_world_preview_does_not_modify_live_camera_or_world_solution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=self.make_store(directory)
+            await self.configure_angle_axes(store)
+            store.sample_tick({"pan":self.axis_sample("P1"),"tilt":self.axis_sample("T1")})
+            target=target_with([observation("O1",points=BASE_POINTS,refs={"pan":"P1","tilt":"T1","zoom":None}),observation("O2",pan_raw=150,points=BASE_POINTS,refs={"pan":"P1","tilt":"T1","zoom":None})],type="rectangle",width_m=1.34,height_m=1.17,bottom_height_m=.35)
+            await store.update_dot_calibration({"targets":[target],"active_target_id":target["id"]})
+            before=deepcopy(store.world_calibration.get("solution"))
+            fake={"solution":{"converged":True,"rms_pixel_error":3.4,"max_pixel_error":8.1,"view_count":2,"quality":"FAIR","precision_ready":False,"solved_at":"2026-11-11T00:00:00Z"}}
+            with patch("app.state.solve_dot_world_reference",return_value=fake):
+                proposal=await store.preview_dot_world_reference(target["id"])
+            self.assertTrue(proposal["valid"])
+            self.assertEqual(store.world_calibration.get("solution"),before)
+            self.assertEqual(proposal["observation_ids"],["O1","O2"])
+
     async def test_overlay_is_session_only_but_saved_target_persists(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)
@@ -576,6 +613,8 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
                 "tight": None, "curvature": 0.0,
             })
             await store.update_dot_calibration(data)
+            self.assertIsNone(store.world_calibration["dot_calibration"]["last_solution"])
+            store.world_calibration["dot_calibration"]["last_solution"] = deepcopy(data["last_solution"])
             self.assertEqual(store.world_calibration["dot_calibration"]["targets"][0]["model_points"]["M1"]["y"], 10.0)
             result = await store.apply_dot_calibration_solution()
             self.assertAlmostEqual(result["pan_ratio"], 3.6)
@@ -608,7 +647,7 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             target = target_with([first, latest], type="rectangle", width_m=1.3415,
                                  height_m=1.1685, approx_distance_m=5.715)
             base = store.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]
-            await store.update_dot_calibration({
+            payload = {
                 "targets": [target], "active_target_id": target["id"],
                 "last_solution": {
                     "solved": True, "apply_allowed": True, "parameters": ["pan_ratio"],
@@ -618,13 +657,34 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
                                      "tilt": "TILT-REF", "zoom": None}},
                     "target_models": {target["id"]: {"M1": {"x": 1.0, "y": 50.0, "z": 4.0}}},
                 },
-            })
+            }
+            await store.update_dot_calibration(payload)
+            self.assertIsNone(store.world_calibration["dot_calibration"]["last_solution"])
+            store.world_calibration["dot_calibration"]["last_solution"] = deepcopy(payload["last_solution"])
             await store.apply_dot_calibration_solution()
             model = store.world_calibration["dot_calibration"]["targets"][0]["model_points"]
             for marker_id, gold in latest["points"].items():
                 projected = _project(model[marker_id], store.camera)
                 self.assertAlmostEqual(projected["x"], gold["x"], places=7)
                 self.assertAlmostEqual(projected["y"], gold["y"], places=7)
+
+    async def test_observation_patch_never_trusts_client_solver_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            target = target_with([])
+            payload = {"targets": [target], "active_target_id": target["id"]}
+            await store.update_dot_calibration(payload)
+            payload["last_solution"] = {"solved": True, "apply_allowed": True, "proposed": {"pan_ratio": 0.0001}}
+            payload["world_candidate"] = {"valid": True, "rms_pixel_error": 0}
+            await store.update_dot_calibration(payload)
+            saved = store.world_calibration["dot_calibration"]
+            self.assertIsNone(saved["last_solution"])
+            self.assertIsNone(saved["world_candidate"])
+            saved["last_solution"] = {"solved": True, "apply_allowed": False}
+            saved["world_candidate"] = {"valid": False}
+            await store.update_dot_calibration(payload)
+            self.assertEqual(store.world_calibration["dot_calibration"]["last_solution"], {"solved": True, "apply_allowed": False})
+            self.assertEqual(store.world_calibration["dot_calibration"]["world_candidate"], {"valid": False})
 
     async def test_review_only_refinement_cannot_be_applied(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -646,6 +706,8 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
                 },
             }
             await store.update_dot_calibration(data)
+            self.assertIsNone(store.world_calibration["dot_calibration"]["last_solution"])
+            store.world_calibration["dot_calibration"]["last_solution"] = deepcopy(data["last_solution"])
             before = store.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]
             with self.assertRaisesRegex(DotCalibrationError, "review-only"):
                 await store.apply_dot_calibration_solution()

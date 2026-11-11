@@ -21,7 +21,7 @@ from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
 from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, acquisition_signature, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
-from .dot_calibration import DotCalibrationError, default_dot_calibration, metric_rectangle_model_points, model_points_from_saved_observation, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
+from .dot_calibration import DotCalibrationError, default_dot_calibration, metric_rectangle_model_points, model_points_from_saved_history, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -151,10 +151,14 @@ class StateStore:
             "calibration_confidence": "UNAVAILABLE", "warnings": [],
             "required_axes": list(REQUIRED_AXES),
         }
+        self.zoom_lens_profiles: dict[str, Any] = self._load("zoom_lens_profiles.json", {})
+        saved_lens = self.zoom_lens_profiles.get(self.profile_index["active_id"]) or {}
         self.zoom_fov_mapping: dict[str, Any] = {
             "wide": None, "tight": None, "curvature": 0.0, "active": False,
             "status": "NOT CALIBRATED", "reference_id": None,
             "fov_source": "Manual / Profile", "live_fov": float(self.profile.get("camera", {}).get("fov", 60.0)),
+            "saved_wide_fov": float(saved_lens.get("wide_fov", self.profile.get("camera", {}).get("fov", 60.0))),
+            "saved_tight_fov": float(saved_lens.get("tight_fov", 10.0)),
         }
         # Calibration overlay is deliberately session-only and defaults OFF so
         # calibration markers cannot accidentally survive a service restart.
@@ -648,6 +652,56 @@ class StateStore:
         if sample:
             self._refresh_pose_reference_and_sample()
 
+    def _saved_lens_fovs(self) -> dict[str, float]:
+        stored = self.zoom_lens_profiles.get(self.profile_index["active_id"]) or {}
+        return {
+            "wide_fov": float(stored.get("wide_fov", self.profile.get("camera", {}).get("fov", 60.0))),
+            "tight_fov": float(stored.get("tight_fov", 10.0)),
+        }
+
+    def _reset_zoom_lens_for_profile(self) -> None:
+        saved = self._saved_lens_fovs()
+        self.zoom_fov_mapping.update({
+            "wide": None, "tight": None, "curvature": 0.0, "active": False,
+            "status": "SET ZOOM POSITION AND CAPTURE ENDPOINTS", "reference_id": None,
+            "saved_wide_fov": saved["wide_fov"], "saved_tight_fov": saved["tight_fov"],
+        })
+
+    def _invalidate_world_for_zoom_change(self) -> None:
+        if self.world_calibration.get("valid"):
+            self.world_calibration.update({"valid": False, "status": "LENS FOV MAPPING CHANGED — RE-SOLVE WORLD"})
+            self._write_active_world_calibration_locked()
+            self.pose_history.reset("zoom lens calibration changed")
+
+    async def save_zoom_lens_fov(self, point: str, fov: float) -> dict[str, Any]:
+        """Save a lens FOV without changing the physical Zoom reference/count."""
+        if point not in {"wide", "tight"}:
+            raise ValueError("Zoom endpoint must be wide or tight")
+        try:
+            fov = float(fov)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Zoom FOV must be numeric") from exc
+        if not math.isfinite(fov) or not 5.0 <= fov <= 160.0:
+            raise ValueError("Zoom FOV must be between 5 and 160 degrees")
+        async with self.lock:
+            saved = self._saved_lens_fovs()
+            saved[f"{point}_fov"] = fov
+            if saved["wide_fov"] <= saved["tight_fov"]:
+                raise ValueError("Wide FOV must remain greater than Tight FOV")
+            self.zoom_lens_profiles[self.profile_index["active_id"]] = saved
+            self._save("zoom_lens_profiles.json", self.zoom_lens_profiles)
+            self.zoom_fov_mapping[f"saved_{point}_fov"] = fov
+            if self.zoom_fov_mapping.get(point):
+                old_fov = float(self.zoom_fov_mapping[point]["fov"])
+                self.zoom_fov_mapping[point]["fov"] = fov
+                if not math.isclose(old_fov, fov, abs_tol=1e-9):
+                    self._invalidate_world_for_zoom_change()
+            self._refresh_camera_from_tracking()
+            result = deepcopy(self.zoom_fov_mapping)
+        self.debug.app("zoom_lens_fov_saved", point=point, fov=fov)
+        await self.broadcast_state()
+        return result
+
     def _refresh_zoom_fov_mapping(self) -> None:
         manual_fov = float(self.profile.get("camera", {}).get("fov", 60.0))
         zoom = self.tracking["axes"].get("zoom", {})
@@ -718,6 +772,11 @@ class StateStore:
                     int(tight["relative_count"]), float(tight["fov"]), float(candidate.get("curvature", 0.0)),
                 )
             self.zoom_fov_mapping = candidate
+            saved = self._saved_lens_fovs()
+            saved[f"{point}_fov"] = fov
+            self.zoom_lens_profiles[self.profile_index["active_id"]] = saved
+            self._save("zoom_lens_profiles.json", self.zoom_lens_profiles)
+            self.zoom_fov_mapping[f"saved_{point}_fov"] = fov
             self._refresh_camera_from_tracking()
             result = deepcopy(self.zoom_fov_mapping)
         await self.broadcast_state()
@@ -748,6 +807,11 @@ class StateStore:
                     int(tight["relative_count"]), float(tight["fov"]), float(candidate.get("curvature", 0.0)),
                 )
             self.zoom_fov_mapping = candidate
+            saved = self._saved_lens_fovs()
+            saved[f"{point}_fov"] = fov
+            self.zoom_lens_profiles[self.profile_index["active_id"]] = saved
+            self._save("zoom_lens_profiles.json", self.zoom_lens_profiles)
+            self.zoom_fov_mapping[f"saved_{point}_fov"] = fov
             self._refresh_camera_from_tracking()
             result = deepcopy(self.zoom_fov_mapping)
         await self.broadcast_state()
@@ -1110,6 +1174,18 @@ class StateStore:
     async def update_dot_calibration(self, values: dict[str, Any]) -> dict[str, Any]:
         candidate = normalise_dot_calibration(values)
         async with self.lock:
+            old = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            input_fields = ("id", "type", "approx_distance_m", "width_m", "height_m", "bottom_height_m", "edge_midpoints", "markers", "observations", "model_points")
+            old_input = [{k: t.get(k) for k in input_fields} for t in old["targets"]]
+            new_input = [{k: t.get(k) for k in input_fields} for t in candidate["targets"]]
+            if old_input != new_input:
+                candidate["last_solution"] = None
+                candidate["world_candidate"] = None
+            else:
+                # A client must not install a fabricated or stale solver result.
+                # Preserve only results generated by the backend itself.
+                candidate["last_solution"] = deepcopy(old.get("last_solution"))
+                candidate["world_candidate"] = deepcopy(old.get("world_candidate"))
             self.world_calibration["dot_calibration"] = candidate
             self._write_active_world_calibration_locked()
             result = deepcopy(candidate)
@@ -1148,6 +1224,57 @@ class StateStore:
         self.debug.app("dot_calibration_solved", rms_before=result.get("rms_before_px"), rms_after=result.get("rms_after_px"), points=result.get("matched_points"))
         await self.broadcast_state()
         return result
+
+    async def preview_dot_world_reference(self, target_id: str | None = None) -> dict[str, Any]:
+        """Recompute a candidate in a worker thread; never mutate the live pose.
+
+        Persist only if observations, reference IDs and profile are unchanged
+        since the snapshot. Tracking and web sockets are not blocked by fitting.
+        """
+        if not self.tracking["valid"]:
+            raise DotCalibrationError("Valid Pan and Tilt tracking is required to preview the venue/world")
+        async with self.lock:
+            dot_data = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            target = next((t for t in dot_data["targets"] if t["id"] == (target_id or dot_data.get("active_target_id"))), None)
+            if target is None:
+                raise DotCalibrationError("Select a Dot calibration target first")
+            refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+            for observation in target.get("observations") or []:
+                saved = observation.get("references") or {}
+                for axis in ("pan", "tilt"):
+                    if saved.get(axis) != refs.get(axis):
+                        raise DotCalibrationError("Old encoder reference in observations — refresh or remove the incompatible observations")
+                if saved.get("zoom") is not None and saved.get("zoom") != refs.get("zoom"):
+                    raise DotCalibrationError("Old Zoom encoder reference in observations — refresh or remove the incompatible observations")
+            captured_profile = deepcopy(self.profile)
+            captured_zoom = deepcopy(self.zoom_fov_mapping)
+            target_snapshot = deepcopy(target)
+        result = await asyncio.to_thread(solve_dot_world_reference, captured_profile, dot_data, captured_zoom, target_id=target["id"])
+        solution = result["solution"]
+        rms = float(solution.get("rms_pixel_error", float("inf")))
+        maximum = float(solution.get("max_pixel_error", float("inf")))
+        good = bool(solution.get("converged") and math.isfinite(rms) and rms <= 6.0 and maximum <= 18.0)
+        candidate = {
+            "target_id": target["id"], "observation_ids": [obs["id"] for obs in target_snapshot.get("observations") or []],
+            "references": refs, "tracking_fingerprint": tracking_fingerprint(captured_profile),
+            "rig_geometry_fingerprint": rig_geometry_fingerprint(captured_profile.get("camera", {}).get("rig_offset")),
+            "valid": good, "precision_ready": bool(solution.get("precision_ready")),
+            "rms_pixel_error": rms, "max_pixel_error": maximum,
+            "view_count": solution.get("view_count"), "quality": solution.get("quality"),
+            "calculated_at": solution.get("solved_at"),
+        }
+        async with self.lock:
+            latest = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            now_target = next((t for t in latest["targets"] if t["id"] == candidate["target_id"]), None)
+            now_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+            if now_target != target_snapshot or now_refs != refs or self.profile != captured_profile or self.zoom_fov_mapping != captured_zoom:
+                raise DotCalibrationError("Calibration changed while solving — latest candidate discarded; save or recalculate again")
+            latest["world_candidate"] = candidate
+            self.world_calibration["dot_calibration"] = latest
+            self._write_active_world_calibration_locked()
+        self.debug.app("dot_world_preview_solved", target_id=candidate["target_id"], rms_px=rms, valid=good)
+        await self.broadcast_state()
+        return candidate
 
     async def apply_dot_calibration_solution(self) -> dict[str, Any]:
         async with self.lock:
@@ -1213,8 +1340,8 @@ class StateStore:
                 observations = target.get("observations") or []
                 if observations:
                     try:
-                        target["model_points"] = model_points_from_saved_observation(
-                            target, observations[-1], self.profile, self.zoom_fov_mapping
+                        target["model_points"] = model_points_from_saved_history(
+                            target, self.profile, self.zoom_fov_mapping
                         )
                     except (DotCalibrationError, ValueError, KeyError) as exc:
                         self.debug.error("dot_anchor_rebuild_failed", target_id=target.get("id"), error=str(exc))
@@ -1222,6 +1349,8 @@ class StateStore:
                             target["model_points"] = deepcopy(models[target["id"]])
                 elif target.get("id") in models:
                     target["model_points"] = deepcopy(models[target["id"]])
+            dot_data["last_solution"] = None
+            dot_data["world_candidate"] = None
             self.world_calibration["dot_calibration"] = dot_data
             self._write_active_world_calibration_locked()
             self.pose_history.reset("dot calibration mapping applied")
@@ -1282,6 +1411,7 @@ class StateStore:
             }
             self.world_calibration["horizontal_fov"] = float(self.profile.get("camera", {}).get("fov", solution.get("horizontal_fov", 60.0)))
             dot_data["last_solution"] = None
+            dot_data["world_candidate"] = None
             for dot_target in dot_data.get("targets") or []:
                 if dot_target.get("id") == target.get("id"):
                     dot_target["model_points"] = metric_rectangle_model_points(dot_target)
@@ -1383,6 +1513,7 @@ class StateStore:
             self.profile_index["profiles"].append(meta)
             self.profile_index["active_id"] = profile_id
             self.profile = profile
+            self._reset_zoom_lens_for_profile()
             self._write_profile_index()
             self._sync_calibration_from_profile()
             self._save("calibration.json", self.calibration)
@@ -1398,6 +1529,7 @@ class StateStore:
                 return None
             self.profile = self._read_profile(profile_id)
             self.profile_index["active_id"] = profile_id
+            self._reset_zoom_lens_for_profile()
             self._write_profile_index()
             self._sync_calibration_from_profile()
             self._save("calibration.json", self.calibration)
@@ -1440,6 +1572,7 @@ class StateStore:
             self.profile_index["profiles"].append(meta)
             self.profile_index["active_id"] = new_id
             self.profile = profile
+            self._reset_zoom_lens_for_profile()
             self._write_profile_index()
             self._sync_calibration_from_profile()
             self._save("calibration.json", self.calibration)

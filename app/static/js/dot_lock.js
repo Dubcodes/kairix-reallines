@@ -8,6 +8,14 @@ const scale=(value,factor)=>({x:value.x*factor,y:value.y*factor,z:value.z*factor
 const dot=(a,b)=>a.x*b.x+a.y*b.y+a.z*b.z;
 const normalize=value=>{const length=Math.hypot(value.x,value.y,value.z);return scale(value,1/length);};
 
+export function nudgeDotPointPx(point,key,{shiftKey=false,ctrlKey=false,metaKey=false}={}){
+  const amount=(ctrlKey||metaKey)?0.25:shiftKey?10:1;
+  const directions={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+  const direction=directions[key];if(!direction)return null;
+  const clamp=v=>Math.max(-0.25,Math.min(1.25,v));
+  return{x:clamp(Number(point.x)+direction[0]*amount/1920),y:clamp(Number(point.y)+direction[1]*amount/1080)};
+}
+
 export function normalizedScreenPoint(point,width,height){
   return{x:Number(point.x)*width,y:Number(point.y)*height};
 }

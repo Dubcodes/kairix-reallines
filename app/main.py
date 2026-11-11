@@ -431,6 +431,14 @@ async def clear_encoder_reference(axis: str):
     return {"ok": True}
 
 
+@app.patch("/api/tracking/zoom/lens-fov/{point}")
+async def save_zoom_lens_fov(point: str, body: ZoomFovCapture):
+    try:
+        return await store.save_zoom_lens_fov(point, body.fov)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.post("/api/tracking/zoom/fov-points/{point}")
 async def capture_zoom_fov_point(point: str, body: ZoomFovCapture):
     try:
@@ -476,6 +484,14 @@ async def apply_dot_calibration():
     try:
         return await store.apply_dot_calibration_solution()
     except (DotCalibrationError, TrackingConfigError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/world-calibration/dot-calibration/preview-world")
+async def preview_dot_world_reference(body: DotCalibrationUpdate):
+    try:
+        return await store.preview_dot_world_reference((body.values or {}).get("target_id"))
+    except (DotCalibrationError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -741,7 +757,7 @@ async def debug_toggle(enabled: bool):
 
 @app.get("/api/diagnostics/bundle")
 async def diagnostic_bundle():
-    files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "sync.json", DATA_DIR / "imu.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
+    files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "zoom_lens_profiles.json", DATA_DIR / "sync.json", DATA_DIR / "imu.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
     bundle = debug.create_bundle(files)
     return FileResponse(bundle, filename=bundle.name, media_type="application/zip")
 

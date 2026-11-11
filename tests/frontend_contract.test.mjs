@@ -18,7 +18,7 @@ import {
 
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
-import {withoutObservation} from '../app/static/js/dot_lock.js';
+import {withoutObservation,nudgeDotPointPx} from '../app/static/js/dot_lock.js';
 
 test('deleting one saved observation preserves the other observations and original history', () => {
   const observations=[{id:'A',points:{M1:{x:.1,y:.2}}},{id:'B',points:{M1:{x:.3,y:.4}}},{id:'C',points:{M1:{x:.5,y:.6}}}];
@@ -196,4 +196,13 @@ test('known-angle movement calibration computes gearing and direction', () => {
   assert.throws(()=>calculateMovementCalibration({start_count:1,end_count:1,actual_angle:90,ppr:600,multiplier:4}),/Move/);
   assert.throws(()=>calculateMovementCalibration({start_count:1,end_count:2,actual_angle:0,ppr:600,multiplier:4}),/non-zero/);
   assert.throws(()=>calculateMovementCalibration({start_count:null,end_count:2,actual_angle:90,ppr:600,multiplier:4}),/required/);
+});
+
+
+test('Dot marker keyboard nudge is resolution-independent and bounded',()=>{
+  const start={x:.5,y:.5};
+  assert.deepEqual(nudgeDotPointPx(start,'ArrowRight'),{x:.5+1/1920,y:.5});
+  assert.deepEqual(nudgeDotPointPx(start,'ArrowDown',{shiftKey:true}),{x:.5,y:.5+10/1080});
+  assert.deepEqual(nudgeDotPointPx(start,'ArrowLeft',{ctrlKey:true}),{x:.5-.25/1920,y:.5});
+  assert.equal(nudgeDotPointPx(start,'Enter'),null);
 });

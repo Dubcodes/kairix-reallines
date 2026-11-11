@@ -44,8 +44,8 @@ function axisMarkup(axis,config){
   const prototypeMode=supportsPrototypePolicy(axis,config.source)&&sc.integrity_policy==='prototype';
   const mapping=config.mapping;
   const zoomFov=state?.zoom_fov||{};
-  const wideFov=zoomFovDraftValue(zoomFovDrafts,'wide',zoomFov.wide?.fov??state?.profiles?.active?.camera?.fov??60);
-  const tightFov=zoomFovDraftValue(zoomFovDrafts,'tight',zoomFov.tight?.fov??10);
+  const wideFov=zoomFovDraftValue(zoomFovDrafts,'wide',zoomFov.wide?.fov??zoomFov.saved_wide_fov??state?.profiles?.active?.camera?.fov??60);
+  const tightFov=zoomFovDraftValue(zoomFovDrafts,'tight',zoomFov.tight?.fov??zoomFov.saved_tight_fov??10);
   const degreesPerCount=360/(Number(mapping.ppr)*Number(mapping.quadrature_multiplier)*Number(mapping.encoder_revs_per_camera_rev));
   const sourceOptions=sourceChoicesFor(axis).map(choice=>`<option value="${choice.value}"${config.source===choice.value?' selected':''}${choice.enabled?'':' disabled'}>${choice.label}</option>`).join('');
   const gpioDraft=`<details class="technical-details"${gpioEncoder?'':' hidden'}><summary>Advanced GPIO settings</summary><div class="gpio-draft">
@@ -88,10 +88,11 @@ function axisMarkup(axis,config){
       <div class="kv"><div>Current relative count</div><div data-runtime="zoom-fov-count">—</div><div>Current live FOV</div><div data-runtime="zoom-live-fov">—</div><div>FOV source</div><div data-runtime="zoom-fov-source">Manual / Profile</div><div>Wide captured</div><div data-runtime="zoom-wide-point">—</div><div>Tight captured</div><div data-runtime="zoom-tight-point">—</div><div>Curve correction</div><div data-runtime="zoom-curve">0.000</div></div>
       <label>Wide FOV — temporary test value (°)<input data-zoom-fov-input="wide" type="text" inputmode="decimal" autocomplete="off" value="${wideFov}"></label>
       <div class="row compact-actions">${[-1,-.1,.1,1].map(step=>`<button data-zoom-fov-step="wide" data-step="${step}" type="button"${zoomFov.wide?'':' disabled'}>${step>0?'+':''}${step.toFixed(1)}</button>`).join('')}</div>
-      <button data-zoom-fov-capture="wide" type="button">Capture current Zoom position as WIDE</button>
+      <div class="row"><button data-zoom-fov-save="wide" type="button">Save Wide FOV</button><button data-zoom-fov-capture="wide" type="button">Capture position as WIDE</button></div>
       <label>Tight FOV — temporary test value, not measured lens truth (°)<input data-zoom-fov-input="tight" type="text" inputmode="decimal" autocomplete="off" value="${tightFov}"></label>
       <div class="row compact-actions">${[-1,-.1,.1,1].map(step=>`<button data-zoom-fov-step="tight" data-step="${step}" type="button"${zoomFov.tight?'':' disabled'}>${step>0?'+':''}${step.toFixed(1)}</button>`).join('')}</div>
-      <button data-zoom-fov-capture="tight" type="button">Capture current Zoom position as TIGHT</button>
+      <div class="row"><button data-zoom-fov-save="tight" type="button">Save Tight FOV</button><button data-zoom-fov-capture="tight" type="button">Capture position as TIGHT</button></div>
+      <p class="small">Saved FOV values persist per setup profile. Encoder counts remain session-only: reference Zoom and capture both physical endpoints again after restarting.</p>
       <strong data-runtime="zoom-fov-status" class="status-warn">NOT CALIBRATED</strong>
     </section>${encoderDiagnostics}
   </div>`:'';
@@ -194,7 +195,14 @@ function bindAxisCards(){
     });
     card.querySelectorAll('[data-zoom-fov-input]').forEach(input=>{
       input.addEventListener('input',()=>setZoomFovDraft(zoomFovDrafts,input.dataset.zoomFovInput,input.value));
-      input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();input.blur();}});
+      input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();card.querySelector(`[data-zoom-fov-save="${input.dataset.zoomFovInput}"]`)?.click();input.blur();}});
+    });
+    card.querySelectorAll('[data-zoom-fov-save]').forEach(button=>button.onclick=async()=>{
+      const point=button.dataset.zoomFovSave;
+      const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),fov=parseDecimal(input.value);
+      if(fov===null||fov<5||fov>160){setAxisError(card,'Enter a valid horizontal FOV between 5° and 160°');return;}
+      const result=await safe(()=>api(`/api/tracking/zoom/lens-fov/${point}`,{method:'PATCH',body:JSON.stringify({fov})}));
+      if(result){state.zoom_fov=result;acceptZoomFovDraft(zoomFovDrafts,point,fov);axesKey='';renderAxes();setAxisError(card,'SAVED FOV — physical position was not changed');}
     });
     card.querySelectorAll('[data-zoom-fov-capture]').forEach(button=>button.onclick=async()=>{
       const point=button.dataset.zoomFovCapture;
@@ -244,6 +252,8 @@ function renderEncoderDiagnostics(axis,card,runtime){
   diagnostics.innerHTML=`${sourceDetails}<div>Raw count</div><div>${runtime.raw_count??'—'}</div><div>Reference count</div><div>${runtime.reference_count??'—'}</div>${positionDetails}<div>Reference ID</div><div title="${escapeHtml(runtime.reference_id||'')}">${referenceId}</div><div>Direction value</div><div>${state.profiles.active.axes[axis].mapping.direction>0?'+1':'-1'}</div><div>Events/sec</div><div>${format(d.event_rate_hz??0,1)}</div><div>Peak events/sec</div><div>${format(d.peak_event_rate_hz??0,1)}</div><div>Total movement events</div><div>${d.events??0}</div><div>Counts/sec</div><div>${format(d.counts_per_second??0,1)}</div>${angularRate}<div>Integrity policy</div><div>${(runtime.integrity_policy||'strict').toUpperCase()}</div><div>Integrity warning events</div><div>${d.integrity_fault_events??d.integrity_loss_events??0}</div><div>Warnings tolerated since reference</div><div>${d.warnings_tolerated_since_reference??0}</div><div>Integrity</div><div>${runtime.integrity||d.integrity_status||'—'}</div><div>Calibration confidence</div><div>${runtime.calibration_confidence||'—'}</div><div>Last event age</div><div>${lastEdge}</div><div>Driver restarts</div><div>${d.restarts??0}</div><div>Driver status</div><div>${escapeHtml(runtime.status||'—')}</div><div>Last driver error</div><div>${escapeHtml(d.last_error||'—')}</div>`;
   const alert=card.querySelector('[data-runtime="encoder-alert"]');
   if(!alert)return;
+  const globalOnly=Number(d.global_only_sequence_gaps||0)>0&&Number(d.line_sequence_gaps||0)===0;
+  if(globalOnly)card.title=`Global-only event discontinuities detected (${d.global_only_sequence_gaps}). No per-line gaps were recorded: investigate wiring and kernel event order before assuming every discontinuity lost a quadrature count.`;
   const prototype=runtime.source==='quadrature_gpio'&&runtime.integrity_policy==='prototype';
   alert.textContent=runtime.health==='ERROR'
     ? `Encoder hardware error: ${runtime.status||'check the connection and driver.'}`
@@ -256,6 +266,7 @@ function renderEncoderDiagnostics(axis,card,runtime){
         : runtime.integrity==='SUSPECT'
           ? `${axis.toUpperCase()}: ${runtime.integrity_reason||'Possible encoder count loss'}. Tracking is still operating, but the absolute angle may be wrong. Verify and set the camera position again to restore confidence.`
           : prototype?'PROTOTYPE TOLERANCE ON — tracking continues through encoder warnings; verify position before final calibration.':'';
+  if(globalOnly)alert.textContent+=` Kernel global-only discontinuities (${d.global_only_sequence_gaps}) were recorded without per-line sequence gaps; these are not proof of the same number of lost encoder counts.`;
 }
 function renderAxes(){
   const configKey=state.profiles.active_id+JSON.stringify(state.profiles.active.axes);
@@ -284,7 +295,7 @@ function renderAxes(){
       const status=card.querySelector('[data-runtime="zoom-fov-status"]');status.textContent=zoomFov.status||'NOT CALIBRATED';status.className=zoomFov.active?'status-ok':'status-warn';
       const curve=card.querySelector('[data-runtime="zoom-curve"]');if(curve)curve.textContent=format(zoomFov.curvature??0,4);
       for(const point of ['wide','tight']){
-        const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),server=zoomFov[point]?.fov??(point==='wide'?state.profiles.active.camera.fov:10),draft=zoomFovDrafts[point];
+        const input=card.querySelector(`[data-zoom-fov-input="${point}"]`),server=zoomFov[point]?.fov??(point==='wide'?zoomFov.saved_wide_fov??state.profiles.active.camera.fov:zoomFov.saved_tight_fov??10),draft=zoomFovDrafts[point];
         if(!draft?.dirty&&input!==document.activeElement)input.value=zoomFovDraftValue(zoomFovDrafts,point,server);
       }
     }
@@ -305,11 +316,13 @@ function renderSetupStatus(){
   else if(!state.tracking.valid)message='Camera tracking needs setup. Check the Pan and Tilt status below.';
   else if(!state.camera.world_valid)message='Camera movement is working. Finish camera/world calibration.';
   else message='Camera tracking is ready.';
+  const suspicious=['pan','tilt','zoom'].filter(axis=>state.tracking.axes[axis]?.integrity==='SUSPECT');
+  if(suspicious.length)message+=` VERIFY ENCODER COUNTS: ${suspicious.map(axis=>axis.toUpperCase()).join(', ')} flagged SUSPECT.`;
   byId('setupSummary').textContent=message;
   const stages={
-    setupHardware:drivers?{label:'Ready',status:'ok'}:{label:'Next step',status:'warn'},
-    setupReference:referenced?{label:'Ready',status:'ok'}:{label:'Next step',status:'warn'},
-    setupCalibration:state.camera.world_valid?{label:'Ready',status:'ok'}:{label:'Next step',status:'warn'},
+    setupHardware:drivers?(suspicious.length?{label:'VERIFY',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
+    setupReference:referenced?(suspicious.length?{label:'VERIFY COUNTS',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
+    setupCalibration:state.camera.world_valid?(suspicious.length?{label:'VERIFY ENCODERS',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
     setupGraphics:{label:'Available',status:'ok'},
     setupOutput:state.camera.world_valid||state.engineering.allow_provisional_gfx?{label:'Ready',status:'ok'}:{label:'Waiting',status:'warn'},
   };
