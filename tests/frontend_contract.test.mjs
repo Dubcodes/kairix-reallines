@@ -43,6 +43,14 @@ test('deleting one saved observation preserves the other observations and origin
   assert.deepEqual(withoutObservation(observations,'missing'),observations);
 });
 
+test('Pico UART source is available for Pan Tilt Zoom at fixed x4', () => {
+  for (const axis of ['pan', 'tilt', 'zoom']) {
+    assert.equal(sourceChoicesFor(axis).find(item=>item.value==='pico_uart').enabled, true);
+  }
+  assert.equal(sourceChoicesFor('focus').find(item=>item.value==='pico_uart').enabled, false);
+  assert.deepEqual(buildSourceUpdate('pico_uart'), {source:'pico_uart',mapping:{quadrature_multiplier:4}});
+});
+
 test('prototype tolerance is exposed only for Direct GPIO Pan Tilt and Zoom', () => {
   for (const axis of ['pan','tilt','zoom']) assert.equal(supportsPrototypePolicy(axis,'quadrature_gpio'), true);
   assert.equal(supportsPrototypePolicy('focus','quadrature_gpio'), false);

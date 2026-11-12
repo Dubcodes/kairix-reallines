@@ -10,6 +10,7 @@ export const SOURCE_CHOICES = Object.freeze([
   Object.freeze({value:'disabled', label:'Off', implemented:true}),
   Object.freeze({value:'quadrature_gpio', label:'Direct GPIO Encoder — Advanced', implemented:true, axes:['pan', 'tilt', 'zoom']}),
   Object.freeze({value:'linux_rotary', label:'Raspberry Pi Encoder — Recommended', implemented:true, axes:['pan', 'tilt']}),
+  Object.freeze({value:'pico_uart', label:'Pico UART — Recommended', implemented:true, axes:['pan', 'tilt', 'zoom']}),
   Object.freeze({value:'imu', label:'IMU — Future', implemented:false}),
   Object.freeze({value:'external', label:'External Tracker — Future', implemented:false}),
 ]);
@@ -59,7 +60,7 @@ export function buildEncoderSourceConfig(draft) {
 }
 
 export function buildSourceUpdate(source) {
-  return source === 'linux_rotary'
+  return ['linux_rotary','pico_uart'].includes(source)
     ? {source, mapping:{quadrature_multiplier:4}}
     : {source};
 }

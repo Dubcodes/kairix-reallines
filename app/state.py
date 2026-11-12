@@ -521,7 +521,7 @@ class StateStore:
             "status": "Disabled" if source == "disabled" else f"{source.replace('_', ' ').title()} is not implemented",
             "updated_mono": previous.get("updated_mono", 0.0),
             "update_hz": previous.get("update_hz"),
-            "expects_periodic_samples": source not in {"simulator", "disabled", *ENCODER_SOURCES},
+            "expects_periodic_samples": source == "pico_uart" or source not in {"simulator", "disabled", *ENCODER_SOURCES},
             "availability": "DISABLED" if source == "disabled" else "UNAVAILABLE",
             "integrity": "UNKNOWN",
             "integrity_reason": None,
@@ -564,7 +564,7 @@ class StateStore:
                 "integrity_reason": previous.get("integrity_reason"),
                 "calibration_confidence": previous.get("calibration_confidence", "UNREFERENCED"),
                 "health": "UNCONFIGURED" if not configured else "REFERENCE_REQUIRED",
-                "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for encoder driver",
+                "status": "Select a gpiochip and A/B line offsets" if not configured else "Waiting for Pico UART" if source == "pico_uart" else "Waiting for encoder driver",
             })
             if axis in POSITION_ENCODER_AXES:
                 runtime.pop("reference_angle", None)
@@ -715,7 +715,7 @@ class StateStore:
             })
         wide, tight = self.zoom_fov_mapping.get("wide"), self.zoom_fov_mapping.get("tight")
         active = bool(
-            self.profile["axes"]["zoom"]["source"] == "quadrature_gpio"
+            self.profile["axes"]["zoom"]["source"] in {"quadrature_gpio", "pico_uart"}
             and zoom.get("referenced") and zoom.get("relative_count") is not None
             and wide and tight and wide.get("reference_id") == current_reference == tight.get("reference_id")
         )
@@ -755,8 +755,8 @@ class StateStore:
             raise ValueError("Zoom FOV must be greater than 0 and less than 180 degrees")
         async with self.lock:
             zoom = self.tracking["axes"].get("zoom", {})
-            if self.profile["axes"]["zoom"]["source"] != "quadrature_gpio" or not zoom.get("referenced") or zoom.get("relative_count") is None or not zoom.get("reference_id"):
-                raise ValueError("Reference the Direct GPIO Zoom encoder before capturing FOV points")
+            if self.profile["axes"]["zoom"]["source"] not in {"quadrature_gpio", "pico_uart"} or not zoom.get("referenced") or zoom.get("relative_count") is None or not zoom.get("reference_id"):
+                raise ValueError("Reference the physical Zoom encoder before capturing FOV points")
             candidate = deepcopy(self.zoom_fov_mapping)
             candidate[point] = {
                 "relative_count": int(zoom["relative_count"]), "fov": fov,
@@ -872,7 +872,7 @@ class StateStore:
                 "integrity_reason": sample.get("integrity_reason"),
                 "calibration_confidence": sample.get("calibration_confidence", "UNREFERENCED"),
                 "integrity_policy": sample.get("integrity_policy", "strict"),
-                "updated_mono": now,
+                "updated_mono": float(sample.get("sample_mono") or 0.0) if self.profile["axes"][axis]["source"] == "pico_uart" else now,
                 "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "health", "status"}},
             })
             if axis in POSITION_ENCODER_AXES:
@@ -1041,7 +1041,7 @@ class StateStore:
         else:
             world["effective_status"] = world.get("status")
         world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
-        return {"camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
+        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": []}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -1704,7 +1704,7 @@ class StateStore:
             used_lines: dict[tuple[str, int], str] = {}
             prospective = {name: (candidate if name == axis else self.profile["axes"][name]) for name in AXES}
             for other_axis, other in prospective.items():
-                if other["source"] not in ENCODER_SOURCES:
+                if other["source"] not in ENCODER_SOURCES or other["source"] == "pico_uart":
                     continue
                 source_config = other.get("source_config") or {}
                 chip = str(source_config.get("chip") or "/dev/gpiochip0") if other["source"] == "quadrature_gpio" else "/dev/gpiochip0"

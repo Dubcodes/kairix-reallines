@@ -9,9 +9,9 @@ from typing import Any
 AXES = ("pan", "tilt", "zoom", "focus")
 ANGULAR_ENCODER_AXES = ("pan", "tilt")
 POSITION_ENCODER_AXES = ("zoom",)
-SOURCE_TYPES = ("simulator", "disabled", "quadrature_gpio", "linux_rotary", "imu", "external")
+SOURCE_TYPES = ("simulator", "disabled", "quadrature_gpio", "linux_rotary", "pico_uart", "imu", "external")
 REQUIRED_AXES = ("pan", "tilt")
-ENCODER_SOURCES = ("quadrature_gpio", "linux_rotary")
+ENCODER_SOURCES = ("quadrature_gpio", "linux_rotary", "pico_uart")
 ALLOWED_DECODE_MULTIPLIERS = (1, 2, 4)
 INTEGRITY_POLICIES = ("strict", "prototype")
 DEFAULT_GPIO_BY_AXIS = {
@@ -133,6 +133,11 @@ def validate_axis_config(axis: str, config: dict[str, Any]) -> None:
             raise TrackingConfigError("Zoom encoder requires quadrature multiplier ×4")
         if source == "linux_rotary" and mapping.get("quadrature_multiplier") != 4:
             raise TrackingConfigError("Linux rotary encoder requires quadrature multiplier ×4")
+        if source == "pico_uart":
+            if axis not in ("pan", "tilt", "zoom"):
+                raise TrackingConfigError("Pico UART supports Pan, Tilt and Zoom; Focus is reserved")
+            if mapping.get("quadrature_multiplier") != 4:
+                raise TrackingConfigError("Pico PIO counts full quadrature ×4")
     if source == "quadrature_gpio":
         source_config = config.get("source_config") or {}
         integrity_policy = source_config.get("integrity_policy", "strict")
@@ -189,6 +194,8 @@ def merge_axis_update(axis: str, current: dict[str, Any], updates: dict[str, Any
         candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
     if axis in POSITION_ENCODER_AXES and current.get("source") != "quadrature_gpio" and candidate.get("source") == "quadrature_gpio":
         candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
+    if candidate.get("source") == "pico_uart":
+        candidate.setdefault("mapping", {})["quadrature_multiplier"] = 4
     if current.get("source") == "quadrature_gpio" and candidate.get("source") != "quadrature_gpio":
         candidate.setdefault("source_config", {})["integrity_policy"] = "strict"
     validate_axis_config(axis, candidate)
@@ -210,6 +217,8 @@ def acquisition_signature(config: dict[str, Any]) -> tuple[Any, ...]:
             source_config.get("integrity_policy", "strict"),
             int(mapping.get("quadrature_multiplier", 4)),
         )
+    if source == "pico_uart":
+        return ("pico_uart", "KRP1", 1, 4)
     if source == "linux_rotary":
         return (
             source,
@@ -281,6 +290,9 @@ def tracking_fingerprint(profile: dict[str, Any]) -> str:
             },
             "reference_semantics": "session_count_plus_absolute_angle_v1",
         }
+        if config.get("source") == "pico_uart":
+            axes[axis]["gpio"] = {}  # Historical GPIO settings are not Pico geometry.
+            axes[axis]["pico"] = {"protocol": "KRP1", "quadrature_multiplier": 4}
         if config.get("source") == "linux_rotary":
             axes[axis]["linux_rotary"] = {
                 "driver": "rotary-encoder",

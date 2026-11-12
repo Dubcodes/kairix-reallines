@@ -306,7 +306,7 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("×4 quarter-period", engineering)
         self.assertIn("device-tree overlay", engineering)
         self.assertIn("SYN_DROPPED", engineering)
-        self.assertIn("rotaryEncoder?' disabled'", engineering)
+        self.assertIn("rotaryEncoder||picoEncoder?' disabled'", engineering)
         self.assertIn("'linux_rotary'", calibration)
 
     def test_zoom_gpio_ui_uses_raw_position_not_camera_angle_semantics(self):

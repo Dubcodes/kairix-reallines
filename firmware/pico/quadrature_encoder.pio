@@ -1,0 +1,67 @@
+;
+; Copyright (c) 2023 Raspberry Pi (Trading) Ltd.
+; SPDX-License-Identifier: BSD-3-Clause
+; PIO full x4 quadrature decoder based on the Raspberry Pi pico-examples
+; quadrature_encoder implementation (BSD-3-Clause).
+;
+.pio_version 0
+.program quadrature_encoder
+.origin 0
+    JMP update      ; 00 -> 00
+    JMP decrement   ; 00 -> 01
+    JMP increment   ; 00 -> 10
+    JMP update      ; 00 -> 11 (invalid double change)
+    JMP increment   ; 01 -> 00
+    JMP update      ; 01 -> 01
+    JMP update      ; 01 -> 10 (invalid double change)
+    JMP decrement   ; 01 -> 11
+    JMP decrement   ; 10 -> 00
+    JMP update      ; 10 -> 01 (invalid double change)
+    JMP update      ; 10 -> 10
+    JMP increment   ; 10 -> 11
+    JMP update      ; 11 -> 00 (invalid double change)
+    JMP increment   ; 11 -> 01
+ decrement:
+    JMP Y--, update  ; 11 -> 10
+.wrap_target
+ update:
+    MOV ISR, Y
+    PUSH noblock
+    OUT ISR, 2
+    IN PINS, 2
+    MOV OSR, ISR
+    MOV PC, ISR
+ increment:
+    MOV Y, ~Y
+    JMP Y--, increment_cont
+ increment_cont:
+    MOV Y, ~Y
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+static inline void quadrature_encoder_program_init(PIO pio, uint sm, uint pin, int max_step_rate) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 2, false);
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, pin + 1);
+    gpio_pull_up(pin);
+    gpio_pull_up(pin + 1);
+    pio_sm_config c = quadrature_encoder_program_get_default_config(0);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    sm_config_set_in_shift(&c, false, false, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_NONE);
+    float div = max_step_rate == 0 ? 1.0f : (float)clock_get_hz(clk_sys) / (10 * max_step_rate);
+    sm_config_set_clkdiv(&c, div);
+    pio_sm_init(pio, sm, 0, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+static inline int32_t quadrature_encoder_get_count(PIO pio, uint sm) {
+    uint ret = 0;
+    int n = pio_sm_get_rx_fifo_level(pio, sm) + 1;
+    while (n-- > 0) ret = pio_sm_get_blocking(pio, sm);
+    return (int32_t)ret;
+}
+%}

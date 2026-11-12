@@ -33,13 +33,14 @@ function setError(message=''){byId('profileError').textContent=message;}
 async function safe(action){try{setError();return await action();}catch(error){setError(String(error));logFrontend('engineering','tracking_ui_error',{error:String(error)});return null;}}
 
 function renderProfiles(){const select=byId('profileSelect'),active=state.profiles.active_id;select.disabled=false;byId('profileName').disabled=false;for(const id of ['newProfile','duplicateProfile','renameProfile'])byId(id).disabled=false;if(select!==document.activeElement){select.replaceChildren(...state.profiles.items.map(meta=>{const option=document.createElement('option');option.value=meta.id;option.textContent=meta.name;option.selected=meta.id===active;return option;}));}if(byId('profileName')!==document.activeElement)byId('profileName').value=state.profiles.active.name;byId('deleteProfile').disabled=state.profiles.items.length<=1;}
-function sourceHelp(source){return({linux_rotary:'Uses the Raspberry Pi kernel encoder driver at full ×4 resolution.',quadrature_gpio:'Reads every encoder edge directly in RealLines. Useful for testing and diagnostics.',simulator:'Software movement for setup and testing; no tracking hardware is used.',disabled:'This axis is off.'})[source]||'';}
+function sourceHelp(source){return({pico_uart:'RP2040 Pico PIO counts Pan/Tilt/Zoom; sends cumulative snapshots at 500 Hz over 1 Mbit/s UART. Re-reference after Pico resets.',linux_rotary:'Uses the Raspberry Pi kernel encoder driver at full ×4 resolution.',quadrature_gpio:'Reads every encoder edge directly in RealLines. Useful for testing and diagnostics.',simulator:'Software movement for setup and testing; no tracking hardware is used.',disabled:'This axis is off.'})[source]||'';}
 function axisMarkup(axis,config){
   const isAngle=axis==='pan'||axis==='tilt';
   const gpioEncoder=config.source==='quadrature_gpio';
   const rotaryEncoder=config.source==='linux_rotary';
-  const encoder=gpioEncoder||rotaryEncoder;
-  const zoomPosition=axis==='zoom'&&gpioEncoder;
+  const picoEncoder=config.source==='pico_uart';
+  const encoder=gpioEncoder||rotaryEncoder||picoEncoder;
+  const zoomPosition=axis==='zoom'&&(gpioEncoder||picoEncoder);
   const sc=config.source_config||{};
   const prototypeMode=supportsPrototypePolicy(axis,config.source)&&sc.integrity_policy==='prototype';
   const mapping=config.mapping;
@@ -69,7 +70,7 @@ function axisMarkup(axis,config){
     <div class="encoder-config"${encoder?'':' hidden'}>
       <label>Encoder pulses per revolution (PPR)<input data-mapping="ppr" type="number" min="1" step="1" value="${mapping.ppr}"></label>
       <div class="small">For the RealLines 600 PPR encoders, enter 600.</div>
-      <label>Encoder resolution<select data-mapping="quadrature_multiplier"${rotaryEncoder?' disabled':''}>${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}${value===4?' — Full resolution':''}</option>`).join('')}</select></label>
+      <label>Encoder resolution<select data-mapping="quadrature_multiplier"${rotaryEncoder||picoEncoder?' disabled':''}>${[1,2,4].map(value=>`<option value="${value}"${mapping.quadrature_multiplier===value?' selected':''}>×${value}${value===4?' — Full resolution':''}</option>`).join('')}</select></label>
       <label>Gear ratio — encoder turns per full camera turn<input data-mapping="encoder_revs_per_camera_rev" type="number" min="0.0001" step="0.01" value="${cleanNumber(mapping.encoder_revs_per_camera_rev,9)}"></label>
       <div class="row compact-actions">${[-.1,-.01,-.001,.001,.01,.1].map(step=>`<button data-mapping-step="encoder_revs_per_camera_rev" data-step="${step}" type="button">${cleanStepLabel(step)}</button>`).join('')}</div>
       <div class="small">Example: 10 means the encoder turns 10 times while the camera turns 360°.</div>
@@ -241,7 +242,9 @@ function renderEncoderDiagnostics(axis,card,runtime){
   const d=runtime.diagnostics||{},rotary=runtime.source==='linux_rotary',positionAxis=axis==='zoom';
   const edgeAge=d.last_event_age_ms??d.last_edge_age_ms,lastEdge=edgeAge===null||edgeAge===undefined?'—':`${format(edgeAge,1)} ms`;
   const referenceId=runtime.reference_id?escapeHtml(String(runtime.reference_id).slice(0,12)):'—';
-  const sourceDetails=rotary
+  const sourceDetails=runtime.source==='pico_uart'
+    ? `<div>Controller</div><div>Pico PIO UART</div><div>Session</div><div>${d.pico_session??'—'}</div><div>Packet sequence</div><div>${d.packet_seq??'—'}</div><div>Packet age</div><div>${format(d.packet_age_ms??0,1)} ms</div><div>Skipped UART packets (counts preserved)</div><div>${d.packet_gaps??0}</div><div>CRC errors</div><div>${d.crc_errors??0}</div>`
+    : rotary
     ? `<div>Kernel driver</div><div>${escapeHtml(d.kernel_driver||'rotary-encoder')}</div><div>Resolution mode</div><div>×4 quarter-period</div><div>REL axis</div><div>${escapeHtml(d.rel_axis||'—')}</div><div>Device identity</div><div>${escapeHtml(d.device_identity||'—')}</div><div>Resolved device</div><div>${escapeHtml(d.resolved_event_device||'—')}</div><div>SYN_DROPPED</div><div>${d.evdev_dropped_events??0}</div>`
     : `<div>A state</div><div>${d.a_state??'—'}</div><div>B state</div><div>${d.b_state??'—'}</div><div>Requested GPIO event buffer</div><div>${d.kernel_event_buffer_size??'—'} (actual kernel capacity may be lower/capped)</div><div>Read batch size</div><div>${d.read_batch_size??'—'}</div><div>Confirmed global gaps</div><div>${d.confirmed_global_gaps??d.global_sequence_gaps??0}</div><div>Global-only gaps</div><div>${d.global_only_sequence_gaps??0}</div><div>Global out-of-order</div><div>${d.global_out_of_order_events??0}</div><div>Line sequence gaps</div><div>${d.line_sequence_gaps??0}</div><div>Line out-of-order</div><div>${d.line_out_of_order_events??0}</div><div>Illegal transitions</div><div>${d.illegal_transitions??0}</div>`;
   const positionDetails=positionAxis
@@ -286,7 +289,7 @@ function renderAxes(){
         : runtime.referenced?'<strong>POSITION SET</strong><span>RealLines knows this camera angle.</span>':'<strong>SET CAMERA POSITION</strong><span>RealLines knows the encoder is moving but does not yet know the camera’s current angle.</span>';
     }
     renderEncoderDiagnostics(axis,card,runtime);
-    if(axis==='zoom'&&runtime.source==='quadrature_gpio'){
+    if(axis==='zoom'&&['quadrature_gpio','pico_uart'].includes(runtime.source)){
       const zoomFov=state.zoom_fov||{};
       card.querySelector('[data-runtime="zoom-fov-count"]').textContent=formatSignedCount(runtime.relative_count);
       card.querySelector('[data-runtime="zoom-live-fov"]').textContent=`${format(state.camera.fov,2)}°`;
@@ -302,9 +305,35 @@ function renderAxes(){
     card.title=runtime.status||'';
   }
 }
+function renderPicoController(){
+  const node=byId('picoControllerState');if(!node)return;
+  const p=state.pico_controller||{},axes=p.enabled_axes||[];
+  const rows={
+    'Source':axes.length?axes.join(', ').toUpperCase():'Inactive (Direct GPIO and simulator still available)',
+    'UART':p.device||'/dev/serial0',
+    'Link':p.connected?'RECEIVING':p.port_open?'OPEN — WAITING':'NOT RECEIVING',
+    'Last packet':p.last_packet_ms==null?'—':`${format(p.last_packet_ms,1)} ms`,
+    'Count session':p.session_id??'—',
+    'Packet sequence':p.sequence??'—',
+    'Packets received':p.received_packets??0,
+    'Missed UART packets (counts unaffected)':p.packet_gaps??0,
+    'CRC errors':p.crc_errors??0,
+    'Out-of-order':p.out_of_order_packets??0,
+    'Controller restarts':p.restarts??0,
+    'Button presses (1, 2, 3)':(p.button_presses||[0,0,0]).join(', '),
+    'Fault flags':p.fault_flags??'—',
+    'Firmware protocol':p.firmware_protocol??'—',
+    'Controller uptime':p.uptime_ms==null?'—':`${format(p.uptime_ms/1000,1)} s`,
+    'Error':p.last_error||'—',
+  };
+  node.replaceChildren(...Object.entries(rows).flatMap(([label,value])=>{
+    const a=document.createElement('div'),b=document.createElement('div');
+    a.textContent=label;b.textContent=String(value);return [a,b];
+  }));
+}
 function renderSync(){const sync=state.sync,live=state.camera,render=state.render_camera,rows={'Acquisition target':'200 Hz','Measured history rate':sync.sample_rate_hz===null?'—':`${format(sync.sample_rate_hz,1)} Hz`,'Pose transport target':'50 Hz','Configured delay':`${sync.graphics_delay_ms} ms`,'History depth':`${sync.history_duration_seconds} s`,'Stored samples':sync.sample_count,'Oldest sample age':sync.oldest_age_ms===null?'—':`${format(sync.oldest_age_ms,1)} ms`,'Newest sample age':sync.newest_age_ms===null?'—':`${format(sync.newest_age_ms,1)} ms`,'Requested render age':`${sync.requested_render_age_ms} ms`,'Interpolation':sync.interpolation,'Live Pan / Tilt':`${format(live.pan,3)}° / ${format(live.tilt,3)}°`,'Render Pan / Tilt':`${format(render.pan,3)}° / ${format(render.tilt,3)}°`,'Effective difference':sync.effective_difference_ms===null?'—':`${format(sync.effective_difference_ms,1)} ms`};byId('syncDiagnostics').replaceChildren(...Object.entries(rows).flatMap(([key,value])=>{const label=document.createElement('div'),content=document.createElement('div');label.textContent=key;content.textContent=value;return[label,content];}));}
 function renderSetupStatus(){
-  const required=['pan','tilt'],hardwareSources=['linux_rotary','quadrature_gpio'];
+  const required=['pan','tilt'],hardwareSources=['linux_rotary','quadrature_gpio','pico_uart'];
   const hardware=required.every(axis=>hardwareSources.includes(state.profiles.active.axes[axis].source));
   const drivers=hardware&&required.every(axis=>state.tracking.axes[axis].driver_alive);
   const referenced=drivers&&required.every(axis=>state.tracking.axes[axis].referenced);
@@ -333,7 +362,7 @@ function renderSetupStatus(){
 
 const simulatorIds=['pan','tilt','fov','height'];
 function showSlider(id,value){byId(id+'Out').textContent=format(value,id==='height'?2:1)+(id==='height'?' m':id==='fov'?'°':' raw');}
-function sourceLabel(source){return({quadrature_gpio:'Direct GPIO Encoder',linux_rotary:'Raspberry Pi Encoder',simulator:'Simulator',disabled:'Off',imu:'IMU',external:'External Tracker'})[source]||source;}
+function sourceLabel(source){return({pico_uart:'Pico UART',quadrature_gpio:'Direct GPIO Encoder',linux_rotary:'Raspberry Pi Encoder',simulator:'Simulator',disabled:'Off',imu:'IMU',external:'External Tracker'})[source]||source;}
 for(const id of simulatorIds){const input=byId(id),eventName=id==='pan'||id==='tilt'?'input':'change';input.addEventListener('input',()=>showSlider(id,input.value));input.addEventListener(eventName,()=>{showSlider(id,input.value);if(!applying)safe(()=>api('/api/camera',{method:'POST',body:JSON.stringify({[id]:+input.value})}));});showSlider(id,input.value);}
 
 byId('profileSelect').onchange=event=>safe(()=>api(`/api/profiles/${event.target.value}/select`,{method:'POST'}));
@@ -375,7 +404,7 @@ function renderState(incoming,event){
     byId('trackingStatus').textContent=state.tracking.valid?(state.camera.world_valid?'Camera tracking ready':'Venue calibration required'):'Camera tracking needs setup';
     byId('trackingStatus').className=state.tracking.valid?(state.camera.world_valid?'status-ok':'status-warn'):'status-bad';
     if(event?.type!=='pose')renderProfiles();
-    renderAxes();renderSync();renderSetupStatus();
+    renderAxes();renderSync();renderSetupStatus();renderPicoController();
     const world=state.world_calibrations.active,solution=world.solution;
     byId('live').innerHTML=`<div>Profile</div><div>${escapeHtml(state.profiles.active.name)}</div><div>World calibration</div><div>${escapeHtml(world.name)} · ${state.camera.world_valid?'VALID':'NOT VALID'}</div><div>RMS</div><div>${solution?`${format(solution.rms_angular_error,4)}°`:'—'}</div><div>Camera XYZ</div><div>${format(state.camera.x,2)}, ${format(state.camera.y,2)}, ${format(state.camera.z,2)} m</div><div>Pan</div><div>${format(state.camera.pan,3)}°</div><div>Tilt</div><div>${format(state.camera.tilt,3)}°</div><div>FOV</div><div>${format(state.camera.fov,2)}°</div><div>Clients</div><div>${state.clients}</div>`;
     byId('debugState').textContent=`Debug: ${state.engineering.debug_enabled?'enabled':'disabled'}`;

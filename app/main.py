@@ -40,6 +40,7 @@ acquisition_task: asyncio.Task | None = None
 publication_task: asyncio.Task | None = None
 imu_status_task: asyncio.Task | None = None
 source_manager = TrackingSourceManager()
+store.pico_source_manager = source_manager
 
 
 class CameraUpdate(BaseModel):
@@ -403,6 +404,11 @@ async def update_camera_rig(profile_id: str, body: AxisConfigUpdate):
     # Rig geometry does not alter encoder acquisition or reference semantics,
     # so the GPIO source manager is deliberately not reconfigured here.
     return rig_offset
+
+
+@app.get("/api/pico/status")
+async def pico_controller_status():
+    return source_manager.pico_status()
 
 
 @app.post("/api/tracking/{axis}/reference")
