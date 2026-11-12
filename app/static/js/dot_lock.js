@@ -2,6 +2,9 @@ import {cameraRayForScreen} from './editor.js';
 import {projectPoint} from './render.js';
 
 export const withoutObservation=(observations,observationId)=>(observations||[]).filter(obs=>obs.id!==observationId);
+export const replaceObservation=(observations,updated)=>(observations||[]).map(obs=>
+  obs.id===updated.id?{...obs,points:structuredClone(updated.points)}:obs
+);
 
 const add=(a,b)=>({x:a.x+b.x,y:a.y+b.y,z:a.z+b.z});
 const scale=(value,factor)=>({x:value.x*factor,y:value.y*factor,z:value.z*factor});

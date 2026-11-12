@@ -30,9 +30,10 @@ function renderCalibration(){
   byId('activeProfile').textContent=state.profiles.active.name;
   const identityMatch=collection.profile_match&&collection.fingerprint_match&&collection.rig_match;
   const worldReady=calibration.valid&&identityMatch&&collection.reference_match;
+  const experimental=worldReady&&solution?.experimental_review_only===true;
   const mismatchReason=!collection.profile_match?'This venue calibration belongs to a different setup profile.':!collection.fingerprint_match?'Tracking settings changed; update this venue calibration.':!collection.rig_match?'The camera position on the tripod changed; calculate this calibration again.':!collection.reference_match?'The camera position reference changed; update this calibration.':!calibration.valid?'Venue calibration has not been calculated.':'';
-  byId('profileMatch').textContent=worldReady?'Camera tracking and venue calibration are ready.':state.tracking.valid?`Camera tracking ready. ${mismatchReason} Camera + Graphics Preview can use the provisional camera position; venue calibration enables accurate Graphics Output.`:`Camera tracking needs setup. ${mismatchReason||'Pan or Tilt needs attention.'}`;
-  byId('profileMatch').className=worldReady?'small status-ok':state.tracking.valid?'small status-warn':'form-error';
+  byId('profileMatch').textContent=experimental?'EXPERIMENTAL WORLD ACTIVE — this review-only model is for development testing and is not production-ready. Restore the previous world if worse.':worldReady?'Camera tracking and venue calibration are ready.':state.tracking.valid?`Camera tracking ready. ${mismatchReason} Camera + Graphics Preview can use the provisional camera position; venue calibration enables accurate Graphics Output.`:`Camera tracking needs setup. ${mismatchReason||'Pan or Tilt needs attention.'}`;
+  byId('profileMatch').className=experimental?'small status-warn':worldReady?'small status-ok':state.tracking.valid?'small status-warn':'form-error';
   const select=byId('worldCalibrationSelect');
   if(select!==document.activeElement)select.replaceChildren(...collection.items.map(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.name;option.selected=item.id===collection.active_id;return option;}));
   if(byId('worldCalibrationName')!==document.activeElement)byId('worldCalibrationName').value=calibration.name;
@@ -43,8 +44,8 @@ function renderCalibration(){
   for(const key of ['right_m','forward_m','up_m'])setInput(`[data-rig-offset="${key}"]`,currentRig[key]*1000);
   setInput('#worldFov',calibration.horizontal_fov);
   setInput('#worldRoll',calibration.fixed_roll);
-  byId('status').textContent=worldReady?'Ready':state.tracking.valid?'Venue calibration required':'Camera tracking needs setup';
-  byId('status').className=worldReady?'status-ok':state.tracking.valid?'status-warn':'status-bad';
+  byId('status').textContent=experimental?'Experimental world':worldReady?'Ready':state.tracking.valid?'Venue calibration required':'Camera tracking needs setup';
+  byId('status').className=experimental?'status-warn':worldReady?'status-ok':state.tracking.valid?'status-warn':'status-bad';
   byId('targetSteps').replaceChildren(...targets.map((target,index)=>{const button=document.createElement('button');button.className=`target-step${target===calibration.current_target?' active':''}${calibration.observations[target]?' marked':''}`;button.textContent=`${index+1}. ${targetLabel(target)} — ${calibration.observations[target]?'MARKED':'NOT MARKED'}`;button.onclick=()=>safe(()=>api('/api/world-calibration/target',{method:'POST',body:JSON.stringify({target})}));return button;}));
   const current=calibration.current_target,observation=calibration.observations[current];
   byId('overlayTarget').textContent=targetLabel(current);

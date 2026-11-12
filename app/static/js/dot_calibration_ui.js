@@ -2,7 +2,7 @@ import {api,logFrontend} from './common.js?v=world-media1';
 import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
-  rectangleTemplatePoints,rmsOverlayError,withoutObservation,nudgeDotPointPx,
+  rectangleTemplatePoints,rmsOverlayError,withoutObservation,replaceObservation,nudgeDotPointPx,
 } from './dot_lock.js?v=world-media1';
 
 const clone=value=>structuredClone(value);
@@ -19,6 +19,8 @@ export class DotCalibrationUi {
     this.data={targets:[],active_target_id:null,last_solution:null};
     this.editor={editing:false,draft:{},enabled:new Set(),selected:null,dragging:false,adding:false,capture:null};
     this.anchorObservationId=null;
+    this.selectedObservationId=null;
+    this.editingObservationId=null;
     this.lastOverlayAnchorId=undefined;
     this.overlayTimer=null;
     this.controlsBound=false;
@@ -82,6 +84,8 @@ export class DotCalibrationUi {
   anchorObservation(){
     const target=this.activeTarget();if(!target||this.editor.editing)return null;
     const observations=target.observations||[];
+    const selected=observations.find(obs=>obs.id===this.selectedObservationId);
+    if(selected)return selected; // Explicit review: gold points are historical until the pose matches.
     const preferred=observations.find(obs=>obs.id===this.anchorObservationId);
     if(preferred&&this.observationMatchesCurrentPose(preferred))return preferred;
     return observations.find(obs=>this.observationMatchesCurrentPose(obs))||null;
@@ -96,7 +100,9 @@ export class DotCalibrationUi {
           target_id:this.data.active_target_id,
           editing:this.editor.editing,
           draft_points:this.editor.editing?this.editor.draft:{},
-          reference_points:anchor?.points||{},
+          // Do not draw misleading historical error arrows on GFX if the
+          // physical camera is no longer at this observation's encoder pose.
+          reference_points:anchor&&this.observationMatchesCurrentPose(anchor)?anchor.points:{},
           reference_observation_id:anchor?.id??null,
           selected_marker:this.editor.selected,
         }})});
@@ -117,12 +123,13 @@ export class DotCalibrationUi {
     id('newFreeDotTarget').onclick=()=>this.newTarget('free');
     id('newRectangleDotTarget').onclick=()=>this.newTarget('rectangle');
     id('deleteDotTarget').onclick=()=>this.deleteTarget();
-    id('dotTargetSelect').onchange=async event=>{this.data.active_target_id=event.target.value||null;this.cancelEdit();await this.persist();this.render();};
+    id('dotTargetSelect').onchange=async event=>{this.data.active_target_id=event.target.value||null;this.selectedObservationId=null;this.editingObservationId=null;this.cancelEdit();await this.persist();this.render();};
     id('addDotLock').onclick=()=>{if(!this.activeTarget())return;this.editor.adding=true;this.editor.editing=true;this.setStatus('CLICK THE VIEWPORT TO PLACE THE NEW MARKER');this.render();};
     id('deleteDotLock').onclick=()=>this.deleteSelectedMarker();
     id('prepareDotObservation').onclick=()=>this.prepareObservation();
     id('saveDotObservation').onclick=()=>this.saveObservation();
     id('clearDotDraft').onclick=()=>this.cancelEdit();
+    id('recalculateDotWorld').onclick=()=>this.recalculateAll();
     id('solveDotCalibration').onclick=()=>this.solve();
     id('applyDotCalibration').onclick=()=>this.apply();
     id('dotOverlayGfx').onchange=async event=>{
@@ -151,6 +158,10 @@ export class DotCalibrationUi {
     };
     for(const field of ['dotTargetName','dotLockDistance','dotTargetWidth','dotTargetHeight','dotTargetBottomHeight'])id(field).addEventListener('change',()=>this.commitTargetFields());
     id('solveDotWorldReference').onclick=()=>this.solveWorldReference();
+    id('acceptReviewDotWorld').onclick=()=>this.solveWorldReference(true);
+    id('restorePreviousDotWorld').onclick=()=>this.restorePreviousWorld();
+    id('editSavedDotObservation').onclick=()=>this.editSelectedObservation();
+    id('clearSavedDotReview').onclick=()=>this.selectObservation(null);
     id('dotEdgeMidpoints').addEventListener('change',()=>this.toggleEdgeMidpoints());
     const canvas=id('dotLockCanvas');
     canvas.addEventListener('pointerdown',event=>this.pointerDown(event));
@@ -167,7 +178,7 @@ export class DotCalibrationUi {
       approx_distance_m:10,width_m:null,height_m:null,bottom_height_m:0,edge_midpoints:false,
       markers:[],observations:[],model_points:{},
     };
-    this.data.targets.push(target);this.data.active_target_id=target.id;this.data.last_solution=null;this.anchorObservationId=null;
+    this.data.targets.push(target);this.data.active_target_id=target.id;this.data.last_solution=null;this.anchorObservationId=null;this.selectedObservationId=null;this.editingObservationId=null;
     this.editor={editing:true,draft:{},enabled:new Set(),selected:null,dragging:false,adding:type==='free',capture:this.captureContext()};
     if(type==='rectangle')this.installRectangleMarkers(target,false);
     await this.persist();await this.updateOverlay(true);this.render();
@@ -221,6 +232,7 @@ export class DotCalibrationUi {
 
   prepareObservation(){
     const target=this.activeTarget();if(!target){this.setStatus('CREATE OR SELECT A TARGET FIRST','bad');return;}
+    this.editingObservationId=null;
     this.editor.editing=true;this.editor.adding=target.type==='free'&&!target.markers.length;this.editor.capture=this.captureContext();this.editor.draft={};this.editor.enabled=new Set();
     if(!target.observations.length){
       if(target.type==='rectangle'&&!target.markers.length)this.installRectangleMarkers(target,target.edge_midpoints);
@@ -235,6 +247,7 @@ export class DotCalibrationUi {
   }
 
   cancelEdit(update=true){
+    this.editingObservationId=null;
     this.editor={editing:false,draft:{},enabled:new Set(),selected:null,dragging:false,adding:false,capture:null};
     if(update)this.updateOverlay();this.render();
   }
@@ -315,6 +328,37 @@ export class DotCalibrationUi {
     return Object.fromEntries([...this.editor.enabled].filter(id=>this.editor.draft[id]).map(id=>[id,{x:Number(this.editor.draft[id].x),y:Number(this.editor.draft[id].y)}]));
   }
 
+  selectedSavedObservation(){
+    return this.activeTarget()?.observations?.find(obs=>obs.id===this.selectedObservationId)||null;
+  }
+
+  selectObservation(observationId){
+    if(this.editor.editing){this.setStatus('FINISH OR CANCEL THE CURRENT EDIT FIRST','warn');return;}
+    const obs=this.activeTarget()?.observations?.find(item=>item.id===observationId)||null;
+    this.selectedObservationId=obs?.id??null;
+    this.anchorObservationId=obs?.id??null;
+    this.updateOverlay(true);this.render();
+    if(obs&&!this.observationMatchesCurrentPose(obs)){
+      this.setStatus('HISTORICAL VIEW SELECTED — MOVE THE CAMERA TO ITS SAVED PAN/TILT/ZOOM COUNTS BEFORE CHECKING ALIGNMENT','warn');
+    }
+  }
+
+  editSelectedObservation(){
+    const obs=this.selectedSavedObservation();
+    if(!obs){this.setStatus('SELECT A SAVED OBSERVATION FIRST','warn');return;}
+    if(!this.observationMatchesCurrentPose(obs)){
+      this.setStatus('CANNOT EDIT A DIFFERENT CAMERA POSE — RETURN TO THE SAVED PAN/TILT/ZOOM COUNTS','bad');return;
+    }
+    this.editingObservationId=obs.id;
+    this.editor={
+      editing:true,adding:false,dragging:false,capture:clone(obs),
+      draft:clone(obs.points),enabled:new Set(Object.keys(obs.points)),
+      selected:Object.keys(obs.points)[0]??null,
+    };
+    this.updateOverlay(true);this.render();
+    this.setStatus('EDITING SAVED VIEW — CORRECT GOLD MARKERS; SAVE UPDATES THIS OBSERVATION WITHOUT CHANGING ITS ENCODER POSE','warn');
+  }
+
   async saveObservation(){
     const target=this.activeTarget();if(!target||!this.editor.editing||!this.editor.capture){this.setStatus('PRESS “ADJUST THIS VIEW” BEFORE SAVING AN OBSERVATION','bad');return;}
     const points=this.observationPoints(),count=Object.keys(points).length,baseline=target.observations.length===0;
@@ -328,8 +372,19 @@ export class DotCalibrationUi {
     }
     if(baseline&&count<4){this.setStatus('THE BASELINE VIEW NEEDS AT LEAST FOUR MARKERS','bad');return;}
     if(!baseline&&count<1){this.setStatus('ALIGN AT LEAST ONE VISIBLE MARKER','bad');return;}
-    const observation={id:uid('obs'),...clone(this.editor.capture),points};
-    target.observations.push(observation);this.anchorObservationId=observation.id;
+    let observation;
+    if(this.editingObservationId){
+      const existing=target.observations.find(obs=>obs.id===this.editingObservationId);
+      if(!existing){this.setStatus('THE SAVED VIEW NO LONGER EXISTS — CANCEL THE EDIT','bad');return;}
+      // Keep original capture, reference IDs and encoder counts EXACTLY intact.
+      observation={...clone(existing),points};
+      target.observations=replaceObservation(target.observations,observation);
+    }else{
+      observation={id:uid('obs'),...clone(this.editor.capture),points};
+      target.observations.push(observation);
+    }
+    this.selectedObservationId=observation.id;
+    this.anchorObservationId=observation.id;
     if(baseline){
       const size=this.canvasSize();
       target.model_points=modelPointsFromObservation({camera:observation.camera,points:Object.entries(points).map(([id,p])=>({id,...p})),targetDistance:target.approx_distance_m,width:size.width,height:size.height});
@@ -352,7 +407,9 @@ export class DotCalibrationUi {
         this.data.world_candidate=proposal;this.render();
         this.setStatus(proposal.valid
           ?`WORLD CANDIDATE READY — ${fmt(proposal.rms_pixel_error,2)} px RMS · REVIEW AND ACCEPT WHEN READY`
-          :`WORLD CANDIDATE REVIEW ONLY — ${fmt(proposal.rms_pixel_error,2)} px RMS · ACTIVE CAMERA UNCHANGED`,proposal.valid?'ok':'warn');
+          :proposal.review_only_eligible
+            ?`WORLD TRIAL AVAILABLE — new model ${fmt(proposal.rms_pixel_error,2)} px vs accepted ${fmt(proposal.current_fit?.rms_pixel_error,2)} px ON THE SAME VIEWS · DEVELOPMENT ONLY`
+            :`WORLD CANDIDATE REVIEW ONLY — ${fmt(proposal.rms_pixel_error,2)} px RMS (limit 6.0 px) · ACTIVE CAMERA UNCHANGED`,proposal.valid?'ok':'warn');
       }catch(error){
         this.data.world_candidate=null;this.render();
         this.setStatus(`WORLD CANDIDATE NOT READY — ${String(error).replace(/^Error:\s*/,'')}`,'warn');
@@ -389,7 +446,7 @@ export class DotCalibrationUi {
     }catch(error){this.setStatus(String(error),'bad');}
   }
 
-  async solveWorldReference(){
+  async solveWorldReference(acceptReviewOnly=false){
     const target=this.activeTarget();if(!target)return;
     if(target.type!=='rectangle'||!target.width_m||!target.height_m){
       this.setStatus('ENTER THE REAL RECTANGLE WIDTH AND HEIGHT BEFORE SOLVING THE VENUE/WORLD','bad');return;
@@ -397,25 +454,43 @@ export class DotCalibrationUi {
     if((target.observations?.length??0)<2){
       this.setStatus('SAVE AT LEAST TWO RECTANGLE OBSERVATIONS BEFORE SOLVING THE VENUE/WORLD','bad');return;
     }
-    if(this.data.world_candidate?.valid!==true){
+    const candidate=this.data.world_candidate;
+    if(acceptReviewOnly){
+      if(candidate?.review_only_eligible!==true){this.setStatus('NOT ELIGIBLE FOR AN EXPERIMENTAL WORLD TRIAL','bad');return;}
+      const before=fmt(candidate.current_fit?.rms_pixel_error,2),after=fmt(candidate.rms_pixel_error,2);
+      if(!window.confirm(`DEVELOPMENT-ONLY WORLD TRIAL\n\nThe new model fits the same saved views better (${before} → ${after} px RMS), but it does NOT meet the production quality limit of 6 px RMS.\n\nApply this experimental world model? You can restore the previous model afterwards.`))return;
+    }else if(candidate?.valid!==true){
       this.setStatus('NO SAFE WORLD CANDIDATE — ADD MARKERS OR VIEWS AND REVIEW THE AUTOMATIC FIT','bad');return;
     }
     try{
       this.setStatus('SOLVING CAMERA + WORLD FROM THE MEASURED RECTANGLE…','warn');
       const result=await api('/api/world-calibration/dot-calibration/solve-world',{
-        method:'POST',body:JSON.stringify({values:{target_id:target.id}}),
+        method:'POST',body:JSON.stringify({values:{target_id:target.id,accept_review_only:acceptReviewOnly}}),
       });
       const solution=result.solution||{};
       if(result.valid!==true){
         this.setStatus(`${result.status||'WORLD SOLVE NOT APPLIED'} · ${fmt(solution.rms_pixel_error,1)} px RMS · PREVIOUS CAMERA MODEL RETAINED`,'bad');
       }else{
         this.data.world_candidate=null;
-        this.setStatus(`WORLD CALIBRATION APPLIED — ${fmt(solution.rms_pixel_error,1)} px RMS · PIVOT ${fmt(solution.pivot?.x,2)}, ${fmt(solution.pivot?.y,2)}, ${fmt(solution.pivot?.z,2)} m`,'ok');
+        this.setStatus(result.experimental
+          ?`EXPERIMENTAL WORLD APPLIED — ${fmt(solution.rms_pixel_error,2)} px RMS · VERIFY TRACKING AND RESTORE IF WORSE`
+          :`WORLD CALIBRATION APPLIED — ${fmt(solution.rms_pixel_error,1)} px RMS · PIVOT ${fmt(solution.pivot?.x,2)}, ${fmt(solution.pivot?.y,2)}, ${fmt(solution.pivot?.z,2)} m`,result.experimental?'warn':'ok');
       }
     }catch(error){
       this.setStatus(String(error).replace(/^Error:\s*/,''),'bad');
       logFrontend('calibration','dot_world_solve_failed',{error:String(error)});
     }
+  }
+
+  async restorePreviousWorld(){
+    if(!window.confirm('Restore the previous accepted camera/world model? All saved gold observations will be retained.'))return;
+    try{
+      const result=await api('/api/world-calibration/dot-calibration/restore-world',{method:'POST'});
+      this.data.world_candidate=null;
+      this.render();
+      this.setStatus(`PREVIOUS CAMERA MODEL RESTORED — ${result.status}`,'warn');
+      await this.recalculateAll();
+    }catch(error){this.setStatus(`RESTORE FAILED — ${String(error)}`,'bad');}
   }
 
   async deleteObservation(targetId,observationId){
@@ -427,6 +502,7 @@ export class DotCalibrationUi {
     target.observations=withoutObservation(original,observationId);
     this.data.last_solution=null;
     if(this.anchorObservationId===observationId)this.anchorObservationId=null;
+    if(this.selectedObservationId===observationId)this.selectedObservationId=null;
     if(!target.observations.length)target.model_points={};
     try{
       this.data.world_candidate=null;
@@ -440,7 +516,7 @@ export class DotCalibrationUi {
 
   async clearObservations(){
     const target=this.activeTarget();if(!target)return;
-    target.observations=[];target.model_points={};this.data.last_solution=null;this.data.world_candidate=null;this.anchorObservationId=null;
+    target.observations=[];target.model_points={};this.data.last_solution=null;this.data.world_candidate=null;this.anchorObservationId=null;this.selectedObservationId=null;
     await this.persist();this.cancelEdit(false);await this.updateOverlay(true);this.render();
     this.setStatus('OBSERVATIONS CLEARED — 0 SAVED · TARGET MEASUREMENTS AND MARKER LAYOUT RETAINED','warn');
   }
@@ -459,6 +535,9 @@ export class DotCalibrationUi {
     id('dotEdgeMidpoints').checked=!!target?.edge_midpoints;id('dotEdgeMidpoints').disabled=!target||target.type!=='rectangle';
     id('dotTargetWidth').disabled=!target||target.type!=='rectangle';id('dotTargetHeight').disabled=!target||target.type!=='rectangle';id('dotTargetBottomHeight').disabled=!target||target.type!=='rectangle';
     id('solveDotWorldReference').disabled=!target||this.data.world_candidate?.target_id!==target.id||this.data.world_candidate?.valid!==true;
+    id('acceptReviewDotWorld').disabled=!target||this.data.world_candidate?.target_id!==target.id||this.data.world_candidate?.review_only_eligible!==true;
+    id('restorePreviousDotWorld').disabled=!this.state?.world_calibrations?.active?.previous_dot_world;
+    id('recalculateDotWorld').disabled=!target||(target.observations?.length??0)<2;
     id('deleteDotTarget').disabled=!target;id('addDotLock').disabled=!target;id('prepareDotObservation').disabled=!target;
     id('saveDotObservation').disabled=!target||!this.editor.editing;id('clearDotDraft').disabled=!this.editor.editing;
     const overlay=this.state?.calibration_overlay||{};
@@ -499,12 +578,47 @@ export class DotCalibrationUi {
   }
 
   renderObservations(){
-    const target=this.activeTarget(),root=this.byId('dotObservationList');root.replaceChildren();if(!target)return;
+    const target=this.activeTarget(),root=this.byId('dotObservationList');
+    if(!target){root.replaceChildren();root.dataset.observationKey='';return;}
+    const signature=JSON.stringify([target.id,this.editor.editing,...target.observations.map(obs=>
+      [obs.id,Object.keys(obs.points||{}).length,obs.axes?.pan?.raw_count,obs.axes?.tilt?.raw_count,obs.axes?.zoom?.relative_count]
+    )]);
+    if(root.dataset.observationKey===signature){
+      root.querySelectorAll('[data-observation-id]').forEach(chip=>
+        chip.classList.toggle('selected',chip.dataset.observationId===this.selectedObservationId)
+      );
+      return;
+    }
+    root.dataset.observationKey=signature;root.replaceChildren();
     for(const [index,obs] of target.observations.entries()){
-      const chip=document.createElement('span');chip.className='observation-chip';const axes=obs.axes||{};chip.append(document.createTextNode(`O${index+1} · ${Object.keys(obs.points||{}).length} pt · P ${axes.pan?.raw_count??'—'} · T ${axes.tilt?.raw_count??'—'} · Z ${axes.zoom?.relative_count??'—'}`));
-      const remove=document.createElement('button');remove.type='button';remove.className='observation-remove';remove.textContent='×';remove.title=`Delete observation O${index+1}`;remove.setAttribute('aria-label',remove.title);remove.disabled=this.editor.editing;remove.onclick=event=>{event.preventDefault();event.stopPropagation();this.deleteObservation(target.id,obs.id);};chip.append(remove);root.append(chip);
+      const chip=document.createElement('div');chip.className=`observation-chip${obs.id===this.selectedObservationId?' selected':''}`;chip.dataset.observationId=obs.id;
+      const axes=obs.axes||{};
+      const view=document.createElement('button');view.type='button';view.className='observation-view';
+      view.textContent=`O${index+1} · ${Object.keys(obs.points||{}).length} pt · P ${axes.pan?.raw_count??'—'} · T ${axes.tilt?.raw_count??'—'} · Z ${axes.zoom?.relative_count??'—'}`;
+      view.title=`Show saved gold points for O${index+1}`;view.disabled=this.editor.editing;
+      view.onclick=()=>this.selectObservation(obs.id);
+      const remove=document.createElement('button');remove.type='button';remove.className='observation-remove';remove.textContent='×';remove.title=`Delete observation O${index+1}`;remove.setAttribute('aria-label',remove.title);remove.disabled=this.editor.editing;remove.onclick=event=>{event.preventDefault();event.stopPropagation();this.deleteObservation(target.id,obs.id);};
+      chip.append(view,remove);root.append(chip);
     }
     if(target.observations.length){const clear=document.createElement('button');clear.type='button';clear.className='danger subtle';clear.textContent='Clear observations (keep target)';clear.onclick=()=>this.clearObservations();root.append(clear);}
+  }
+
+  renderSavedReview(){
+    const observation=this.selectedSavedObservation();
+    const label=this.byId('dotObservationReviewStatus');
+    const edit=this.byId('editSavedDotObservation');
+    const clear=this.byId('clearSavedDotReview');
+    clear.disabled=!observation||this.editor.editing;
+    const matched=observation&&this.observationMatchesCurrentPose(observation);
+    edit.disabled=!observation||!matched||this.editor.editing;
+    if(!observation){label.textContent='Click a saved observation to show its gold markers. To edit it, return to its original encoder position.';return;}
+    const obs=this.activeTarget()?.observations||[];
+    const index=obs.findIndex(view=>view.id===observation.id)+1;
+    const axes=observation.axes||{};
+    const pose=`P ${axes.pan?.raw_count??'—'} · T ${axes.tilt?.raw_count??'—'} · Z ${axes.zoom?.relative_count??'—'}`;
+    label.textContent=matched
+      ?`O${index} SELECTED — ${pose}. Camera pose matches; check the gold markers, then choose Edit selected view to correct them.`
+      :`O${index} HISTORICAL VIEW — ${pose}. Gold markers show SAVED IMAGE COORDINATES, not a live alignment. Return to these encoder counts before editing.`;
   }
 
   renderWorldCandidate(){
@@ -513,15 +627,31 @@ export class DotCalibrationUi {
     const target=this.activeTarget(),observations=target?.observations||[];
     const rows=[
       ['Saved views',String(observations.length)],
-      ['Current accepted world',active?.rms_pixel_error===undefined?'Not solved':`${fmt(active.rms_pixel_error,2)} px RMS (${active.view_count??'?'} views)`],
+      ['Accepted world (original fit)',active?.rms_pixel_error===undefined?'Not solved':`${fmt(active.rms_pixel_error,2)} px RMS (${active.view_count??'?'} views)`],
+      ['Accepted world on CURRENT observations',candidate?.current_fit?`${fmt(candidate.current_fit.rms_pixel_error,2)} px RMS (${candidate.current_fit.view_count} views)`:'—'],
+      ['New candidate on SAME observations',candidate?`${fmt(candidate.rms_pixel_error,2)} px RMS (${candidate.view_count} views)`:'Not calculated'],
+      ['Improvement vs accepted (same views)',candidate?.improvement_px!=null?`${candidate.improvement_px>=0?'+':''}${fmt(candidate.improvement_px,2)} px`:'—'],
       ['Candidate world RMS',candidate?`${fmt(candidate.rms_pixel_error,2)} px`:'Not calculated'],
       ['Candidate worst marker',candidate?`${fmt(candidate.max_pixel_error,2)} px`:'—'],
-      ['Candidate quality',candidate?`${candidate.quality||'—'} · ${candidate.valid?'VALID · manual accept':'REVIEW ONLY'}`:'—'],
+      ['Candidate quality',candidate?`${candidate.quality||'—'} · ${candidate.valid?'VALID · manual accept':candidate.review_only_eligible?'REVIEW ONLY · optional supervised trial':'REVIEW ONLY · not accepted'}`:'—'],
+      ['Duplicate views consolidated',candidate?.current_fit?.deduplicated_observations??Math.max(0,observations.length-(candidate?.view_count??observations.length))],
       ['Target coverage',`${new Set(observations.flatMap(obs=>Object.keys(obs.points||{}))).size} distinct markers retained`],
     ];
     node.replaceChildren(...rows.flatMap(([name,value])=>{
       const a=document.createElement('div'),b=document.createElement('div');a.textContent=name;b.textContent=value;return[a,b];
     }));
+    if(candidate?.candidate_views?.length){
+      const prior=new Map((candidate.current_fit?.views||[]).map(view=>[view.observation_id,view]));
+      const observationsById=new Map(observations.map((obs,index)=>[obs.id,index+1]));
+      const heading=document.createElement('div');heading.textContent='Per-view accuracy (accepted → candidate, px RMS)';heading.className='dot-compare-header';node.append(heading);
+      const entries=document.createElement('div');entries.className='dot-view-comparisons';
+      for(const view of candidate.candidate_views){
+        const line=document.createElement('div');const before=prior.get(view.observation_id);
+        line.textContent=`O${observationsById.get(view.observation_id)??'?'} · ${before?fmt(before.rms_pixel_error,2):'—'} → ${fmt(view.rms_pixel_error,2)} px · ${view.marker_count} markers`;
+        line.className=view.rms_pixel_error>6?'dot-view-warning':'dot-view-good';entries.append(line);
+      }
+      node.append(entries);
+    }
   }
 
   renderSolution(){
@@ -561,13 +691,14 @@ export class DotCalibrationUi {
     }
     const predicted=projectModelPoints(target.model_points||{},this.state.render_camera,width,height);
     const anchor=this.anchorObservation(),observed=this.editor.editing?this.editor.draft:(anchor?.points||{});
-    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers,markerScale:overlay.marker_scale??1,showLabels:overlay.show_labels!==false,showVectors:overlay.show_vectors!==false});
-    const error=rmsOverlayError(predicted,this.editor.editing?this.observationPoints():observed,1920,1080);
+    const samePose=!anchor||this.observationMatchesCurrentPose(anchor);
+    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers,markerScale:overlay.marker_scale??1,showLabels:overlay.show_labels!==false,showVectors:samePose&&overlay.show_vectors!==false});
+    const error=samePose?rmsOverlayError(predicted,this.editor.editing?this.observationPoints():observed,1920,1080):null;
     if(error!==null){ctx.save();ctx.fillStyle='rgba(7,16,24,.84)';ctx.fillRect(10,10,260,34);ctx.fillStyle=this.editor.editing?'#ffce67':'#9fe6ff';ctx.font='700 14px system-ui';ctx.fillText(`${this.editor.editing?'Current':'Saved-view'} error ${fmt(error,1)} px RMS`,20,32);ctx.restore();}
   }
 
   render(){
-    if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSolution();this.renderWorldCandidate();
+    if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSavedReview();this.renderSolution();this.renderWorldCandidate();
     const viewport=this.byId('dotLockViewport');viewport.classList.toggle('editing',this.editor.editing);viewport.classList.toggle('dragging',this.editor.dragging);this.draw();this.renderMarkerCoordinates();
     const target=this.activeTarget();
     if(!target)this.setStatus('CREATE A FREE OR RECTANGLE TARGET','warn');

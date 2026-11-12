@@ -197,6 +197,14 @@ canvas.editor-canvas:focus { border-color:#4c6578; }
 .marker-chip.selected { border-color:#ffce67; color:#ffdf91; background:#332814; }
 .marker-chip.hidden { opacity:.45; text-decoration:line-through; }
 .observation-chip { border-radius:6px; cursor:default; display:inline-flex; align-items:center; gap:7px; }
+.observation-chip.selected { border-color:#f6c65d; box-shadow:0 0 0 1px #f6c65d55 inset; background:#2c281b; }
+.observation-view { background:transparent; color:inherit; border:0; border-radius:3px; padding:3px; cursor:pointer; text-align:left; font-size:inherit; }
+.observation-view:hover,.observation-view:focus-visible { background:#304356; color:#fff; }
+.observation-view:disabled { opacity:.6; cursor:default; }
+.dot-view-comparisons { display:flex; flex-direction:column; gap:4px; grid-column:1/-1; padding:5px 0; font-size:12px; }
+.dot-compare-header { grid-column:1/-1; margin-top:8px; font-weight:700; }
+.dot-view-warning { color:#ffd08d; }
+.dot-view-good { color:#a9e5c2; }
 .observation-remove { display:inline-flex; align-items:center; justify-content:center; width:19px; height:19px; min-width:19px; padding:0; border-radius:4px; background:transparent; color:#ff9fa5; border:1px solid transparent; font-size:17px; line-height:1; cursor:pointer; }
 .observation-remove:hover,.observation-remove:focus-visible { background:#5a252d; border-color:#d87e8a; color:#fff; }
 .observation-remove:disabled { opacity:.35; cursor:not-allowed; }

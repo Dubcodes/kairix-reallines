@@ -316,15 +316,17 @@ function renderSetupStatus(){
   else if(!state.tracking.valid)message='Camera tracking needs setup. Check the Pan and Tilt status below.';
   else if(!state.camera.world_valid)message='Camera movement is working. Finish camera/world calibration.';
   else message='Camera tracking is ready.';
+  const experimental=state.world_calibrations?.active?.solution?.experimental_review_only===true;
+  if(experimental)message+=' EXPERIMENTAL REVIEW-ONLY WORLD ACTIVE — not production-ready.';
   const suspicious=['pan','tilt','zoom'].filter(axis=>state.tracking.axes[axis]?.integrity==='SUSPECT');
   if(suspicious.length)message+=` VERIFY ENCODER COUNTS: ${suspicious.map(axis=>axis.toUpperCase()).join(', ')} flagged SUSPECT.`;
   byId('setupSummary').textContent=message;
   const stages={
     setupHardware:drivers?(suspicious.length?{label:'VERIFY',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
     setupReference:referenced?(suspicious.length?{label:'VERIFY COUNTS',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
-    setupCalibration:state.camera.world_valid?(suspicious.length?{label:'VERIFY ENCODERS',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
+    setupCalibration:state.camera.world_valid?(experimental?{label:'EXPERIMENTAL',status:'warn'}:suspicious.length?{label:'VERIFY ENCODERS',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Next step',status:'warn'},
     setupGraphics:{label:'Available',status:'ok'},
-    setupOutput:state.camera.world_valid||state.engineering.allow_provisional_gfx?{label:'Ready',status:'ok'}:{label:'Waiting',status:'warn'},
+    setupOutput:state.camera.world_valid||state.engineering.allow_provisional_gfx?(experimental?{label:'DEVELOPMENT ONLY',status:'warn'}:{label:'Ready',status:'ok'}):{label:'Waiting',status:'warn'},
   };
   for(const [id,stage] of Object.entries(stages)){const element=byId(id);element.textContent=stage.label;element.className=`status-${stage.status}`;}
 }

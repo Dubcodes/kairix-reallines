@@ -498,7 +498,18 @@ async def preview_dot_world_reference(body: DotCalibrationUpdate):
 @app.post("/api/world-calibration/dot-calibration/solve-world")
 async def solve_dot_world_reference(body: DotCalibrationUpdate):
     try:
-        return await store.solve_dot_world_reference((body.values or {}).get("target_id"))
+        values = body.values or {}
+        return await store.solve_dot_world_reference(
+            values.get("target_id"), accept_review_only=values.get("accept_review_only") is True
+        )
+    except (DotCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/world-calibration/dot-calibration/restore-world")
+async def restore_previous_dot_world():
+    try:
+        return await store.restore_previous_dot_world()
     except (DotCalibrationError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 

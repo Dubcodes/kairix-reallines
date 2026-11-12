@@ -18,7 +18,22 @@ import {
 
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
-import {withoutObservation,nudgeDotPointPx} from '../app/static/js/dot_lock.js';
+import {withoutObservation,replaceObservation,nudgeDotPointPx} from '../app/static/js/dot_lock.js';
+
+test('editing a saved observation preserves its identity, camera pose and other views', () => {
+  const original=[
+    {id:'O1',axes:{pan:{raw_count:100}},references:{pan:'ref1'},points:{M1:{x:.2,y:.3}}},
+    {id:'O2',axes:{pan:{raw_count:250}},references:{pan:'ref1'},points:{M2:{x:.4,y:.5}}},
+  ];
+  const revised=replaceObservation(original,{id:'O1',points:{M1:{x:.21,y:.32}}});
+  assert.equal(revised.length,2);
+  assert.equal(revised[0].id,'O1');
+  assert.deepEqual(revised[0].axes,original[0].axes);
+  assert.deepEqual(revised[0].references,original[0].references);
+  assert.equal(revised[0].points.M1.x,.21);
+  assert.deepEqual(revised[1],original[1]);
+  assert.equal(original[0].points.M1.x,.2);
+});
 
 test('deleting one saved observation preserves the other observations and original history', () => {
   const observations=[{id:'A',points:{M1:{x:.1,y:.2}}},{id:'B',points:{M1:{x:.3,y:.4}}},{id:'C',points:{M1:{x:.5,y:.6}}}];

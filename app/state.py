@@ -21,7 +21,7 @@ from .history import PoseHistory, PoseSample
 from .kinematics import RigGeometryError, camera_position, normalise_rig_offset, rig_geometry_fingerprint
 from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, acquisition_signature, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
-from .dot_calibration import DotCalibrationError, default_dot_calibration, metric_rectangle_model_points, model_points_from_saved_history, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
+from .dot_calibration import DotCalibrationError, default_dot_calibration, evaluate_dot_world_solution, review_only_world_eligible, metric_rectangle_model_points, model_points_from_saved_history, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -1254,6 +1254,22 @@ class StateStore:
         rms = float(solution.get("rms_pixel_error", float("inf")))
         maximum = float(solution.get("max_pixel_error", float("inf")))
         good = bool(solution.get("converged") and math.isfinite(rms) and rms <= 6.0 and maximum <= 18.0)
+        active_fit = None
+        active_solution = self.world_calibration.get("solution") or {}
+        # A three-view accepted RMS is not comparable to a five-view candidate
+        # until BOTH models are evaluated against those same five views.
+        if (self.world_calibration.get("valid") and active_solution.get("target_source") == target["id"]
+                and self.world_calibration.get("target") == result["target"]):
+            try:
+                active_fit = evaluate_dot_world_solution(
+                    captured_profile, dot_data, captured_zoom, target["id"], active_solution
+                )
+            except (DotCalibrationError, ValueError, TypeError):
+                active_fit = None
+        candidate_fit = evaluate_dot_world_solution(
+            captured_profile, dot_data, captured_zoom, target["id"], solution
+        )
+        review_eligible = review_only_world_eligible(solution, active_fit) and not good
         candidate = {
             "target_id": target["id"], "observation_ids": [obs["id"] for obs in target_snapshot.get("observations") or []],
             "references": refs, "tracking_fingerprint": tracking_fingerprint(captured_profile),
@@ -1262,6 +1278,12 @@ class StateStore:
             "rms_pixel_error": rms, "max_pixel_error": maximum,
             "view_count": solution.get("view_count"), "quality": solution.get("quality"),
             "calculated_at": solution.get("solved_at"),
+            "current_fit": active_fit,
+            "candidate_views": candidate_fit["views"],
+            "improvement_px": (active_fit["rms_pixel_error"] - rms) if active_fit else None,
+            "review_only_eligible": review_eligible,
+            "acceptance_limit_rms_px": 6.0,
+            "acceptance_limit_worst_px": 18.0,
         }
         async with self.lock:
             latest = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
@@ -1365,7 +1387,7 @@ class StateStore:
         await self.broadcast_state()
         return result
 
-    async def solve_dot_world_reference(self, target_id: str | None = None) -> dict[str, Any]:
+    async def solve_dot_world_reference(self, target_id: str | None = None, *, accept_review_only: bool = False) -> dict[str, Any]:
         if not self.tracking["valid"]:
             raise DotCalibrationError("Valid Pan and Tilt tracking is required to solve the venue/world")
         async with self.lock:
@@ -1390,10 +1412,33 @@ class StateStore:
             max_px = float(solution.get("max_pixel_error", float("inf")))
             world_valid = bool(solution.get("converged") and math.isfinite(rms_px) and rms_px <= 6.0 and max_px <= 18.0)
             precision_ready = bool(solution.get("precision_ready"))
+            experimental = False
+            if not world_valid and accept_review_only:
+                preview = dot_data.get("world_candidate") or {}
+                expected_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+                if (preview.get("target_id") != target["id"]
+                    or preview.get("observation_ids") != [obs["id"] for obs in target.get("observations") or []]
+                    or preview.get("references") != expected_refs
+                    or preview.get("tracking_fingerprint") != tracking_fingerprint(self.profile)
+                    or preview.get("rig_geometry_fingerprint") != rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset"))
+                    or not preview.get("review_only_eligible")):
+                    raise DotCalibrationError("World candidate changed or was not approved for a supervised trial — calculate again")
+                active = self.world_calibration.get("solution") or {}
+                if (not self.world_calibration.get("valid")
+                    or active.get("target_source") != target["id"]
+                    or self.world_calibration.get("target") != result["target"]):
+                    raise DotCalibrationError("A valid previous world calibration is required for a supervised trial")
+                current_fit = evaluate_dot_world_solution(self.profile, dot_data, self.zoom_fov_mapping, target["id"], active)
+                if not review_only_world_eligible(solution, current_fit):
+                    raise DotCalibrationError("New world model does not improve the existing model sufficiently over the same views")
+                experimental = True
             if world_valid and precision_ready:
                 status = f"DOT TARGET WORLD CALIBRATION VALID — {rms_px:.2f} px RMS"
             elif world_valid:
                 status = f"DOT TARGET WORLD CALIBRATION VALID — PRECISION REFINEMENT NEEDED ({rms_px:.2f} px RMS)"
+            elif experimental:
+                status = f"EXPERIMENTAL REVIEW-ONLY WORLD — NOT PRODUCTION-READY ({rms_px:.2f} px RMS)"
+                solution["experimental_review_only"] = True
             else:
                 # Leave the previous valid world calibration untouched.
                 return {
@@ -1401,6 +1446,24 @@ class StateStore:
                     "valid": False,
                     "status": f"WORLD SOLVE NOT APPLIED — {rms_px:.2f} px RMS or non-converged",
                 }
+            # Preserve one previous camera state so an experimental solve
+            # can be rolled back without deleting or changing any gold views.
+            saved_fields = (
+                "target", "camera_hint", "orientation_hint", "horizontal_fov",
+                "solution", "valid", "status", "last_solve_error",
+                "tracking_fingerprint", "rig_geometry_fingerprint", "tracking_reference_identity",
+                "fixed_roll",
+            )
+            if (self.world_calibration.get("valid")
+                and self._world_calibration_matches_tracking()
+                and self._world_calibration_matches_rig()
+                and self._world_calibration_matches_reference()):
+                self.world_calibration["previous_dot_world"] = {
+                    "fields": {name: deepcopy(self.world_calibration.get(name)) for name in saved_fields},
+                    "models": {t["id"]: deepcopy(t.get("model_points") or {}) for t in dot_data.get("targets") or []},
+                }
+            else:
+                self.world_calibration.pop("previous_dot_world", None)
             # A successful metric solve changes the coordinate frame. Rebase
             # the blue marker model to the same metric target as the camera.
             self.world_calibration["target"] = deepcopy(result["target"])
@@ -1418,7 +1481,7 @@ class StateStore:
             self.world_calibration["dot_calibration"] = dot_data
             self.world_calibration.update({
                 "solution": solution,
-                "valid": world_valid,
+                "valid": world_valid or experimental,
                 "status": status,
                 "last_solve_error": None,
                 "tracking_fingerprint": tracking_fingerprint(self.profile),
@@ -1428,7 +1491,7 @@ class StateStore:
             self._write_active_world_calibration_locked()
             self.pose_history.reset("dot target world calibration applied")
             self._refresh_camera_from_tracking()
-            saved = {"solution": deepcopy(solution), "target": deepcopy(self.world_calibration["target"]), "valid": True, "status": status}
+            saved = {"solution": deepcopy(solution), "target": deepcopy(self.world_calibration["target"]), "valid": True, "status": status, "experimental": experimental}
         self.debug.app(
             "dot_world_calibration_solved",
             calibration_id=self.world_calibration_index["active_id"],
@@ -1440,6 +1503,34 @@ class StateStore:
         )
         await self.broadcast_state()
         return saved
+
+    async def restore_previous_dot_world(self) -> dict[str, Any]:
+        """Undo last accepted dot-world camera change; keep every gold observation."""
+        async with self.lock:
+            previous = self.world_calibration.get("previous_dot_world")
+            if not previous or not previous.get("fields"):
+                raise DotCalibrationError("No previous Dot world model is available to restore")
+            fields = previous["fields"]
+            if (fields.get("tracking_fingerprint") != tracking_fingerprint(self.profile)
+                or fields.get("rig_geometry_fingerprint") != rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset"))
+                or fields.get("tracking_reference_identity") != self._current_tracking_reference_identity()):
+                raise DotCalibrationError("Cannot restore this camera model after the encoder reference or rig changed")
+            dot_data = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            for target in dot_data.get("targets") or []:
+                if target["id"] in previous.get("models", {}):
+                    target["model_points"] = deepcopy(previous["models"][target["id"]])
+            dot_data["world_candidate"] = None
+            for name, value in fields.items():
+                self.world_calibration[name] = deepcopy(value)
+            self.world_calibration["dot_calibration"] = dot_data
+            self.world_calibration.pop("previous_dot_world", None)
+            self._write_active_world_calibration_locked()
+            self.pose_history.reset("previous dot world calibration restored")
+            self._refresh_camera_from_tracking()
+            result = {"valid": bool(self.world_calibration.get("valid")), "status": self.world_calibration.get("status")}
+        self.debug.app("dot_world_calibration_restored", **result)
+        await self.broadcast_state()
+        return result
 
     async def update_sync_config(self, values: dict[str, Any]) -> dict[str, Any]:
         candidate = {**self.sync_config, **values}

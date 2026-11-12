@@ -863,6 +863,100 @@ def solve_dot_world_reference(
     }
     return {"solution": solution, "target": world_target}
 
+def evaluate_dot_world_solution(
+    profile: dict[str, Any], dot_calibration: dict[str, Any],
+    zoom_mapping: dict[str, Any], target_id: str, solution: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate an existing camera pose against every usable saved target view.
+
+    The solver and the comparator use the same measured rectangle, internal
+    marker IDs, camera axes, rig offset, FOV model, pixel scale and observation
+    de-duplication. Neither modifies observations or the active camera.
+    """
+    dot_data = normalise_dot_calibration(dot_calibration)
+    target = next((t for t in dot_data["targets"] if t["id"] == target_id), None)
+    if target is None:
+        raise DotCalibrationError("Cannot evaluate a missing Dot calibration target")
+    world_points = _rectangle_world_points(target)
+    deduped, duplicates = _deduplicated_dot_calibration({
+        "targets": [target], "active_target_id": target_id, "last_solution": None,
+    })
+    pivot = solution.get("pivot") or solution.get("camera")
+    if not isinstance(pivot, dict):
+        raise DotCalibrationError("Accepted world model has no camera pivot")
+    rig = normalise_rig_offset(profile.get("camera", {}).get("rig_offset"))
+    pan_config, tilt_config = profile["axes"]["pan"], profile["axes"]["tilt"]
+    pan_ratio = float(pan_config["mapping"]["encoder_revs_per_camera_rev"])
+    tilt_ratio = float(tilt_config["mapping"]["encoder_revs_per_camera_rev"])
+    profile_fov = float(profile.get("camera", {}).get("fov", 60.0))
+    squared = 0.0
+    count = 0
+    worst = 0.0
+    views = []
+    for observation in deduped["targets"][0]["observations"]:
+        marker_points = {mid: point for mid, point in observation["points"].items() if mid in world_points}
+        if len(marker_points) < 3:
+            continue
+        pan = (_axis_angle(observation, "pan", pan_config, pan_ratio)
+               + float(solution.get("pan_offset", 0.0)))
+        tilt = (_axis_angle(observation, "tilt", tilt_config, tilt_ratio)
+                + float(solution.get("tilt_offset", 0.0)))
+        optical = camera_position(pivot, pan, tilt, rig)
+        zoom_count = ((observation.get("axes") or {}).get("zoom") or {}).get("relative_count")
+        fov = zoom_fov_for_count(zoom_count, zoom_mapping)
+        if fov is None:
+            fov = profile_fov
+        camera = {**optical, "pan": pan, "tilt": tilt,
+                  "roll": float(solution.get("fixed_roll", 0.0)), "fov": fov}
+        view_sum = 0.0
+        view_worst = 0.0
+        for marker_id, observed in marker_points.items():
+            predicted = _project(world_points[marker_id], camera)
+            if predicted is None:
+                dx, dy = 5000.0, 5000.0
+            else:
+                dx = (predicted["x"] - float(observed["x"])) * REFERENCE_WIDTH
+                dy = (predicted["y"] - float(observed["y"])) * REFERENCE_HEIGHT
+            point_squared = dx * dx + dy * dy
+            view_sum += point_squared
+            view_worst = max(view_worst, math.sqrt(point_squared))
+        view_count = len(marker_points)
+        squared += view_sum
+        count += 2 * view_count
+        worst = max(worst, view_worst)
+        views.append({
+            "observation_id": observation["id"],
+            "rms_pixel_error": math.sqrt(view_sum / (2 * view_count)),
+            "max_pixel_error": view_worst,
+            "marker_count": view_count,
+        })
+    if not count:
+        raise DotCalibrationError("No measured marker positions are available to compare world models")
+    return {
+        "rms_pixel_error": math.sqrt(squared / count),
+        "max_pixel_error": worst,
+        "view_count": len(views),
+        "marker_count": count // 2,
+        "deduplicated_observations": duplicates,
+        "views": views,
+    }
+
+
+def review_only_world_eligible(candidate: dict[str, Any], current_fit: dict[str, Any] | None) -> bool:
+    """Permit a supervised trial ONLY for a bounded, demonstrably better fit."""
+    if not current_fit or not candidate.get("converged"):
+        return False
+    rms = float(candidate.get("rms_pixel_error", float("inf")))
+    maximum = float(candidate.get("max_pixel_error", float("inf")))
+    old_rms = float(current_fit.get("rms_pixel_error", float("inf")))
+    improvement = old_rms - rms
+    return bool(
+        math.isfinite(rms) and math.isfinite(maximum) and math.isfinite(old_rms)
+        and rms <= 10.0 and maximum <= 25.0
+        and improvement >= 0.25 and improvement / max(old_rms, 1e-6) >= 0.02
+    )
+
+
 def model_points_from_saved_observation(
     target: dict[str, Any], observation: dict[str, Any],
     profile: dict[str, Any], zoom_mapping: dict[str, Any],
