@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import select
+from collections import deque
 import threading
 import time
 import uuid
@@ -42,6 +43,8 @@ class PicoUartWorker:
         self._last_press_counts: tuple[int, int, int] | None = None
         self._press_events = [0, 0, 0]
         self._started_at = time.monotonic()
+        self._recent_packets = deque(maxlen=1024)
+        self._link_timeouts = 0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -55,6 +58,10 @@ class PicoUartWorker:
         if self._thread:
             self._thread.join(timeout=1.0)
         self._thread = None
+        with self._lock:
+            self._connected = False
+            self._received_at = None
+            self._references.clear()
 
     def _open_uart(self) -> int:
         # Import only on Linux; packet parsing/tests must also run on Windows.
@@ -96,6 +103,8 @@ class PicoUartWorker:
             except Exception as exc:
                 with self._lock:
                     self._connected = False
+                    self._received_at = None
+                    self._references.clear()  # A broken serial connection must require re-reference.
                     self._last_error = str(exc)[:300]
             finally:
                 if fd is not None:
@@ -107,6 +116,21 @@ class PicoUartWorker:
         arrival = time.monotonic() if now is None else float(now)
         with self._lock:
             for packet in self._decoder.feed(data):
+                # Long silence means the camera might have moved or reset while
+                # the host wasn't observing it. Keep measurements but invalidate
+                # pose references until deliberately re-established.
+                if self._received_at is not None and arrival - self._received_at > STALE_SECONDS:
+                    self._references.clear()
+                    self._link_timeouts += 1
+                # Even a pathological reused random session must not preserve
+                # references if the Pico time goes backwards while sequence rises.
+                if (self._packet is not None and self._session_id == packet.session_id
+                        and packet.pico_us < self._packet.pico_us
+                        and ((packet.sequence - self._packet.sequence) & 0xFFFFFFFF) < 0x80000000):
+                    self._references.clear()
+                    self._restarts += 1
+                    self._last_sequence = None
+                    self._last_press_counts = None
                 if self._session_id != packet.session_id:
                     if self._session_id is not None:
                         self._restarts += 1
@@ -124,16 +148,19 @@ class PicoUartWorker:
                 self._last_sequence = packet.sequence
                 if self._last_press_counts is not None:
                     for i, (new, old) in enumerate(zip(packet.button_presses, self._last_press_counts)):
-                        self._press_events[i] += (new - old) & 0xFFFF
+                        delta = (new - old) & 0xFFFF
+                        if delta < 0x8000:  # Longer outages are ambiguous modulo 65536.
+                            self._press_events[i] += delta
                 self._last_press_counts = packet.button_presses
                 self._packet = packet
                 self._received_at = arrival
                 self._packets += 1
+                self._recent_packets.append(arrival)
                 self._connected = True
                 self._last_error = None
 
     def _fresh(self, now: float) -> bool:
-        return self._packet is not None and self._received_at is not None and now - self._received_at <= STALE_SECONDS
+        return self._connected and self._packet is not None and self._received_at is not None and 0 <= now - self._received_at <= STALE_SECONDS
 
     def set_reference(self, axis: str, angle: float) -> str:
         if axis not in AXIS_NAMES:
@@ -158,10 +185,10 @@ class PicoUartWorker:
             reference = self._references.get(axis) or {}
             count = getattr(packet, axis) if packet else 0
             age = (now - self._received_at) * 1000 if self._received_at is not None else None
-            fault = bool(packet and packet.fault_flags)
-            integrity = "SUSPECT" if fault else "TRUSTED" if fresh else "UNKNOWN"
-            status = ("Pico reported encoder fault" if fault else
-                      "Referenced" if fresh and reference else
+            # The flashed v1 firmware has NO encoder-integrity fault bits.
+            # 0x0102 means firmware v1 plus reserved Focus, not a fault.
+            integrity = "TRUSTED" if fresh else "UNKNOWN"
+            status = ("Referenced" if fresh and reference else
                       "Set a new encoder reference" if fresh else
                       "Pico UART stale or disconnected")
             return {
@@ -175,16 +202,19 @@ class PicoUartWorker:
                 "sample_mono": self._received_at,
                 "availability": "AVAILABLE" if fresh else "UNAVAILABLE",
                 "integrity": integrity,
-                "integrity_reason": "Pico firmware fault flags set" if fault else None,
-                "calibration_confidence": "SUSPECT" if fault else "TRUSTED" if reference and fresh else "UNREFERENCED",
+                "integrity_reason": None,
+                "calibration_confidence": "TRUSTED" if reference and fresh else "UNREFERENCED",
                 "integrity_policy": "strict",
-                "health": "ERROR" if fault else "VALID" if fresh else "STALE",
+                "health": "VALID" if fresh else "STALE",
                 "status": status,
                 "pico_session": self._session_id,
                 "packet_seq": packet.sequence if packet else None,
                 "packet_age_ms": round(age, 2) if age is not None else None,
                 "packet_gaps": self._missed_packets,
                 "crc_errors": self._decoder.crc_errors,
+                "protocol_errors": self._decoder.protocol_errors,
+                "firmware_flags": packet.flags if packet else None,
+                "firmware_version": packet.firmware_version if packet else None,
                 "device": self.device,
             }
 
@@ -193,6 +223,10 @@ class PicoUartWorker:
         with self._lock:
             packet = self._packet
             age = (now - self._received_at) * 1000 if self._received_at is not None else None
+            cutoff = now - 1.0
+            rates = [stamp for stamp in self._recent_packets if stamp >= cutoff]
+            rate_hz = (round((len(rates) - 1) / max(0.001, rates[-1] - rates[0]), 1)
+                       if len(rates) > 1 and self._fresh(now) else 0.0)
             return {
                 "device": self.device,
                 "baud": BAUD,
@@ -203,15 +237,25 @@ class PicoUartWorker:
                 "sequence": packet.sequence if packet else None,
                 "firmware_protocol": 1 if packet else None,
                 "uptime_ms": packet.uptime_ms if packet else None,
+                "pico_timestamp_us": packet.pico_us if packet else None,
+                "firmware_version": packet.firmware_version if packet else None,
+                "watchdog_reset": packet.watchdog_reset if packet else None,
+                "focus_reserved": packet.focus_reserved if packet else None,
+                "focus_count": packet.focus if packet else None,
+                "unknown_flags": packet.unknown_flags if packet else None,
+                "packet_rate_hz": rate_hz,
+                "link_timeouts": self._link_timeouts,
                 "counts": {axis: getattr(packet, axis) if packet else None for axis in AXIS_NAMES},
                 "button_bits": packet.button_bits if packet else 0,
                 "button_presses": deepcopy(self._press_events),
                 "packet_gaps": self._missed_packets,
                 "out_of_order_packets": self._out_of_order,
                 "crc_errors": self._decoder.crc_errors,
+                "protocol_errors": self._decoder.protocol_errors,
                 "resync_bytes": self._decoder.dropped_bytes,
                 "restarts": self._restarts,
-                "fault_flags": packet.fault_flags if packet else None,
+                "firmware_flags": packet.flags if packet else None,
+                "fault_flags": None,  # Not implemented by the flashed v1 firmware.
                 "last_error": self._last_error,
                 "received_packets": self._packets,
                 "monitor_uptime_s": round(now - self._started_at, 1),

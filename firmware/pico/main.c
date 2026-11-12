@@ -1,13 +1,7 @@
-// SPDX-License-Identifier: MIT
-// Kairix RealLines RP2040 acquisition appliance, matched with app/pico_protocol.py.
-// Encoders GP0/1, GP2/3, GP4/5. Buttons GP10/11/12 active-low.
-// UART1 GP8 TX -> Pi RX GPIO15; GP9 RX reserved; 1,000,000 baud, 8N1.
-// Never send human-readable logs on the binary UART.
-
+// Kairix RealLines RP2040 controller v1. UART encoder snapshots; USB for updating.
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-
 #include "pico/stdlib.h"
 #include "pico/rand.h"
 #include "hardware/pio.h"
@@ -15,119 +9,163 @@
 #include "hardware/watchdog.h"
 #include "quadrature_encoder.pio.h"
 
-#define UART uart1
-#define UART_BAUD 1000000
-#define UART_TX_PIN 8
-#define UART_RX_PIN 9
-#define BUTTON_COUNT 3
-#define FRAME_BYTES 58
-#define FRAME_INTERVAL_US 2000
-#define DEBOUNCE_US 20000
+#define PROTOCOL_VERSION 1u
+#define REPORT_INTERVAL_US 2000u  // 500 Hz, not the encoder counting rate
+#define UART_BAUD 1000000u
+#define UART_TX_PIN 8u
+#define UART_RX_PIN 9u
+#define AXES 4u
+#define ACTIVE_AXES 3u
+#define BUTTONS 3u
+#define BUTTON_DEBOUNCE_MS 20u
+#define PACKET_SIZE 63u
+#define LED_PIN 25u
 
-typedef struct {
-    bool last_raw;
-    bool stable;
-    uint32_t last_change_us;
-    uint16_t presses;
-} button_t;
+static const uint8_t axis_pins[AXES] = {0, 2, 4, 6};
+static const uint8_t button_pins[BUTTONS] = {10, 11, 12};
 
-static void put16(uint8_t *dst, uint16_t x) {
-    dst[0] = (uint8_t)x;
-    dst[1] = (uint8_t)(x >> 8);
-}
-static void put32(uint8_t *dst, uint32_t x) {
-    for (unsigned i = 0; i < 4; i++) dst[i] = (uint8_t)(x >> (8 * i));
-}
-static void put64(uint8_t *dst, uint64_t x) {
-    for (unsigned i = 0; i < 8; i++) dst[i] = (uint8_t)(x >> (8 * i));
-}
-static uint16_t crc16(const uint8_t *bytes, unsigned size) {
-    uint16_t crc = 0xFFFF;
-    for (unsigned i = 0; i < size; i++) {
-        crc ^= (uint16_t)bytes[i] << 8;
-        for (unsigned j = 0; j < 8; j++)
+// Wire protocol little-endian. All frames contain cumulative counts.
+typedef struct __attribute__((packed)) {
+    uint8_t magic[2];             // A5 5A
+    uint8_t version;              // 1
+    uint8_t frame_type;           // 1 = tracking
+    uint32_t sequence;
+    uint64_t timestamp_us;        // Pico clock (NOT host clock)
+    uint32_t session_id;          // changes on every firmware boot
+    int64_t counts[AXES];         // raw x4 counts; focus reserved
+    uint8_t buttons_pressed;      // bit n = currently held
+    uint16_t button_presses[BUTTONS]; // monotonic modulo-65536 press events
+    uint16_t flags;               // bit 0: watchdog reset, bit 1: focus inactive
+    uint16_t crc16;               // CRC-16/CCITT-FALSE excluding this field
+} tracking_packet_t;
+_Static_assert(sizeof(tracking_packet_t) == PACKET_SIZE, "Unexpected packet padding");
+
+static uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xffff;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; ++b)
             crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
     }
     return crc;
 }
-static void poll_buttons(button_t buttons[BUTTON_COUNT], uint32_t now) {
-    for (unsigned i = 0; i < BUTTON_COUNT; i++) {
-        bool down = !gpio_get(10 + i);
-        if (down != buttons[i].last_raw) {
-            buttons[i].last_raw = down;
-            buttons[i].last_change_us = now;
+
+typedef struct {
+    bool raw_down;
+    bool stable_down;
+    uint32_t raw_changed_ms;
+    uint16_t presses;
+} button_t;
+static button_t buttons[BUTTONS];
+
+static uint8_t poll_buttons(uint32_t now_ms) {
+    uint8_t mask = 0;
+    for (unsigned i = 0; i < BUTTONS; ++i) {
+        bool down = !gpio_get(button_pins[i]);
+        button_t *b = &buttons[i];
+        if (down != b->raw_down) {
+            b->raw_down = down;
+            b->raw_changed_ms = now_ms;
         }
-        if ((uint32_t)(now - buttons[i].last_change_us) >= DEBOUNCE_US && down != buttons[i].stable) {
-            buttons[i].stable = down;
-            if (down) buttons[i].presses++;
+        if (down != b->stable_down && (uint32_t)(now_ms - b->raw_changed_ms) >= BUTTON_DEBOUNCE_MS) {
+            b->stable_down = down;
+            if (down) ++b->presses;
         }
+        if (b->stable_down) mask |= (uint8_t)(1u << i);
     }
+    return mask;
+}
+
+static void encoder_init(PIO pio, uint sm, uint pin) {
+    pio_sm_set_enabled(pio, sm, false);
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, pin + 1);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 2, false);
+    gpio_pull_up(pin);       // external pull-ups are still recommended
+    gpio_pull_up(pin + 1);
+    pio_sm_config c = quadrature_encoder_program_get_default_config(0);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    sm_config_set_in_shift(&c, false, false, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_NONE);
+    sm_config_set_clkdiv(&c, 1.0f);
+    pio_sm_init(pio, sm, 0, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static uint32_t encoder_count(PIO pio, uint sm) {
+    // Drain old FIFO samples and fetch a fresh sample; the PIO never blocks
+    // while publishing and continues accumulating every quadrature transition.
+    int samples = pio_sm_get_rx_fifo_level(pio, sm) + 1;
+    uint32_t value = 0;
+    while (samples--) value = pio_sm_get_blocking(pio, sm);
+    return value;
 }
 
 int main(void) {
-    stdio_init_all();               // USB stdio only; compatible with picotool -f update.
-    uart_init(UART, UART_BAUD);
+    const bool watchdog_reset = watchdog_caused_reboot();
+    stdio_init_all(); // USB vendor reset interface for picotool; never UART stdio
+    uart_init(uart1, UART_BAUD);
+    uart_set_format(uart1, 8, 1, UART_PARITY_NONE);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
-    uart_set_format(UART, 8, 1, UART_PARITY_NONE);
-    uart_set_fifo_enabled(UART, true);
+    gpio_init(LED_PIN); gpio_set_dir(LED_PIN, GPIO_OUT);
 
-    PIO pio = pio0;
-    pio_add_program(pio, &quadrature_encoder_program); // Must be at address 0.
-    for (unsigned i = 0; i < 3; i++) {
-        quadrature_encoder_program_init(pio, i, i * 2, 0);
+    for (unsigned i = 0; i < BUTTONS; ++i) {
+        gpio_init(button_pins[i]);
+        gpio_set_dir(button_pins[i], GPIO_IN);
+        gpio_pull_up(button_pins[i]);
+        buttons[i].raw_down = !gpio_get(button_pins[i]);
+        buttons[i].stable_down = buttons[i].raw_down;
+        buttons[i].raw_changed_ms = to_ms_since_boot(get_absolute_time());
     }
-    button_t buttons[BUTTON_COUNT] = {0};
-    for (unsigned i = 0; i < BUTTON_COUNT; i++) {
-        gpio_init(10 + i);
-        gpio_set_dir(10 + i, GPIO_IN);
-        gpio_pull_up(10 + i);
-        buttons[i].last_change_us = time_us_32();
-    }
-    uint32_t session = get_rand_32();
-    if (!session) session = 1;
-    uint32_t sequence = 0;
-    int32_t previous[3] = {0};
-    int64_t cumulative[3] = {0};
-    // The PIO counts independently; snapshotting doesn't alter the count.
-    for (unsigned i = 0; i < 3; i++) previous[i] = quadrature_encoder_get_count(pio, i);
+    const PIO pio = pio0;
+    pio_add_program(pio, &quadrature_encoder_program); // program .origin 0
+    for (unsigned i = 0; i < ACTIVE_AXES; ++i) encoder_init(pio, i, axis_pins[i]);
+
+    uint32_t previous[ACTIVE_AXES] = {0};
+    int64_t totals[AXES] = {0};
+    // The initial counter phase may not be zero; use first reading as relative origin.
+    for (unsigned i = 0; i < ACTIVE_AXES; ++i) previous[i] = encoder_count(pio, i);
+
+    tracking_packet_t packet = {0};
+    packet.magic[0] = 0xa5; packet.magic[1] = 0x5a;
+    packet.version = PROTOCOL_VERSION;
+    packet.frame_type = 1;
+    packet.session_id = get_rand_32();
+    packet.flags = (watchdog_reset ? 1u : 0u) | 2u | (1u << 8); // firmware v1.0
+    uint64_t next_report = time_us_64();
+    uint32_t last_led_ms = 0;
+    uint8_t pressed = 0;
     watchdog_enable(2000, true);
-    uint64_t deadline = time_us_64();
-    uint8_t frame[FRAME_BYTES];
+
     while (true) {
+        uint64_t now = time_us_64();
+        pressed = poll_buttons((uint32_t)(now / 1000));
+        if (now >= next_report) {
+            // Never force the encoder hardware to the reporting frequency.
+            for (unsigned i = 0; i < ACTIVE_AXES; ++i) {
+                uint32_t raw = encoder_count(pio, i);
+                int32_t delta = (int32_t)(raw - previous[i]);
+                totals[i] += (int64_t)delta;
+                previous[i] = raw;
+            }
+            packet.sequence++;
+            packet.timestamp_us = time_us_64();
+            for (unsigned i = 0; i < AXES; ++i) packet.counts[i] = totals[i];
+            packet.buttons_pressed = pressed;
+            for (unsigned i = 0; i < BUTTONS; ++i) packet.button_presses[i] = buttons[i].presses;
+            packet.crc16 = crc16_ccitt((const uint8_t *)&packet, PACKET_SIZE - 2);
+            uart_write_blocking(uart1, (const uint8_t *)&packet, PACKET_SIZE);
+            // Skip elapsed reporting slots, never queue old position data.
+            next_report += REPORT_INTERVAL_US;
+            if (next_report <= time_us_64()) next_report = time_us_64() + REPORT_INTERVAL_US;
+        }
+        uint32_t ms = (uint32_t)(now / 1000);
+        if ((uint32_t)(ms - last_led_ms) >= 500) {
+            gpio_put(LED_PIN, !gpio_get(LED_PIN)); last_led_ms = ms;
+        }
         watchdog_update();
-        uint32_t now = time_us_32();
-        poll_buttons(buttons, now);
-        for (unsigned i = 0; i < 3; i++) {
-            int32_t current = quadrature_encoder_get_count(pio, i);
-            int32_t delta = (int32_t)((uint32_t)current - (uint32_t)previous[i]);
-            previous[i] = current;
-            cumulative[i] += delta;
-        }
-        memset(frame, 0, sizeof(frame));
-        memcpy(frame, "KRP1", 4);
-        put32(frame + 4, sequence++);
-        put32(frame + 8, session);
-        put64(frame + 12, time_us_64());
-        put64(frame + 20, (uint64_t)cumulative[0]);
-        put64(frame + 28, (uint64_t)cumulative[1]);
-        put64(frame + 36, (uint64_t)cumulative[2]);
-        uint8_t mask = 0;
-        for (unsigned i = 0; i < BUTTON_COUNT; i++) {
-            if (buttons[i].stable) mask |= (uint8_t)(1u << i);
-            put16(frame + 45 + 2 * i, buttons[i].presses);
-        }
-        frame[44] = mask;
-        frame[51] = 0; // Firmware fault flags (reserved for future encoder diagnostics).
-        put32(frame + 52, to_ms_since_boot(get_absolute_time()));
-        put16(frame + 56, crc16(frame, 56));
-        uart_write_blocking(UART, frame, sizeof(frame));
-        deadline += FRAME_INTERVAL_US;
-        uint64_t latest = time_us_64();
-        if (deadline < latest) deadline = latest; // Skip deadlines, never skip counts.
-        while (time_us_64() < deadline) {
-            watchdog_update();
-            tight_loop_contents();
-        }
+        sleep_us(250);
     }
 }

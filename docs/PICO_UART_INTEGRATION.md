@@ -1,124 +1,83 @@
-# Kairix RealLines — RP2040 Pico UART acquisition (V1.1)
+# Pico UART integration — authoritative firmware protocol V1 (63-byte A5 5A)
 
-**Base:** V9.1 commit `a344800` on `wip/live-tuning-dot-lock`. This is a hardware-testing candidate. Preserve your existing `data/` directory and the current V9.1 calibration profile. The first hardware bring-up must be done while graphics output is not on air.
+**Status: Pi receiver patch V1.2; protocol-level tested against a real captured packet. End-to-end hardware receive after installing this patch remains to be tested.**
 
-## What changes
+## Authoritative implementation and provenance
 
-- A new **Pico UART** tracking source for Pan, Tilt and Zoom. Existing Direct GPIO, Linux Rotary and Simulator choices remain available.
-- A **single shared UART receiver**, independent of the 200 Hz application acquisition loop, decodes 500 frames/s. The Pico's PIO counts every ×4 quadrature transition continuously.
-- Full signed 64-bit **cumulative** counts. Losing one UART packet does not lose encoder counts; the next valid frame replaces the previous snapshot.
-- CRC-16, sequence, boot-session ID, age/staleness, packet gaps, errors, button press counters and basic health on Engineering.
-- Pi-side reference IDs/positions remain separate for each axis. Restarting the Pico clears all references; no silent zeroing or reusing an old camera pose.
-- Physical Zoom with Wide/Tight FOV capture accepts Pico source with the same reference rules as Direct GPIO.
-- Firmware C source and the matching binary wire contract, plus offline tests and a **local CLI** firmware updater. Firmware flashing is **not** exposed through an unauthenticated HTTP endpoint.
+The RP2040 was flashed from `Kairix-RealLines-Pico-Migration-V1.zip`, with source at `reallines-pico-migration/firmware/pico`. That firmware transmits 63-byte frames beginning `a5 5a`. It has already transmitted a packet captured and independently CRC-validated on the Pi. The RealLines branch `a4469df` mistakenly introduced a second `KRP1`/58-byte firmware/receiver contract; the host could open `/dev/serial0` but could not decode its frames. The 63-byte source is now the **only authoritative format** in `firmware/pico/` and `app/pico_protocol.py`. Do not reflash the Pico to fix the original protocol mismatch.
 
-## Wiring — board GPIO labels (not standard Pico header pin numbers)
+Firmware source, PIO table, and license text were restored from the uploaded original flashed-firmware **source package**. The UF2 binary flashed on the real device was built from a local Windows checkout with an SDK-import adjustment; no bit-identical firmware rebuild comparison has yet been performed.
 
-| Function | RP2040 pad | Other end |
-|---|---|---|
-| Pan A / B | GP0 / GP1 | Green / white encoder wires |
-| Tilt A / B | GP2 / GP3 | Green / white encoder wires |
-| Zoom A / B | GP4 / GP5 | Green / white encoder wires |
-| Future Focus | GP6 / GP7 | Reserved; no decoding yet |
-| UART1 TX | GP8 | Raspberry Pi **GPIO15 RX**, physical pin **10** |
-| UART1 RX | GP9 | Raspberry Pi **GPIO14 TX**, physical pin **8** (reserved) |
-| Button 1/2/3 | GP10/GP11/GP12 | Momentary button to GND |
-| Ground | GND | Pi GND, physical pin 6, and encoder ground |
-| Power | Pico USB-C | USB-A port on Pi; don't bridge two 3V3 supplies |
-| Encoder red (5V) | Regulated 5 V | Not connected to GPIO |
+## Electrical and firmware decisions
 
-The firmware enables **internal pull-ups** on all A/B and button inputs. Install the **external 4.7 kΩ pull-up from each encoder A/B to Pico 3V3**, near the Pico. Internal and external pull-ups coexist. NEVER pull-up an RP2040 GPIO to 5 V. Verify the encoder is genuinely NPN open collector, not push-pull 5 V, before connecting. Keep common grounds, strain relief, and signal wiring short or twisted with GND. For production, replace the breadboard.
+- Board: RP2040 USB-C development board, use printed GPIO labels, not original Pico physical-pin numbering.
+- Pan A/B GP0/1, Tilt GP2/3, Zoom GP4/5, reserved Focus GP6/7.
+- Active-low momentary buttons GP10/11/12, firmware debounce 20 ms, cumulative modulo-65536 press counters; no automatic action bound to buttons.
+- UART1 TX GP8 → Raspberry Pi 4 GPIO15 RX (physical pin 10); Pico UART RX GP9 ← Pi GPIO14 TX (pin 8; reserved). Shared ground, Pico powered over USB-C from Pi USB-A.
+- 600 PPR NPN open-collector incremental encoders, full ×4 PIO decoding. A/B: RP2040 internal pull-ups **plus** six external 4.7 kΩ resistors to **Pico 3.3 V**; encoder supply 5 V regulated with common ground. Never connect 5 V directly to an RP2040 GPIO. Use short/ground-paired signal runs and replace breadboard before production.
+- PIO counts continuously. Firmware sends cumulative **signed 64-bit** counts at nominal 500 Hz over 1,000,000-baud UART 8N1. Lost UART snapshots do not lose physical counts, but packet CRC does not prove physical encoder signal integrity.
+- `pico_us` uses the Pico local clock, never a Pi clock. The Pi's acquisition/pose timestamps remain host-monotonic.
 
-## Pi UART prerequisites (Raspberry Pi 4)
+## Exact packet contract
 
-Enable UART hardware, disable the login shell on serial, and select stable **PL011** hardware UART on GPIO14/15. On Raspberry Pi OS, use `sudo raspi-config` -> Interface Options -> Serial Port: **login shell No, serial hardware Yes**. If Bluetooth owns PL011, configure `dtoverlay=disable-bt` and `enable_uart=1` in `/boot/firmware/config.txt` (where supported), then reboot. Check actual device mapping rather than assuming it:
+`struct.Struct('<2sBBIQI4qB3HHH')` — 63 bytes, little-endian.
 
-```bash
-ls -l /dev/serial0 /dev/ttyAMA0
-stty -F /dev/serial0 1000000 raw -echo
-id -nG reallines
+| Bytes | Field |
+|---:|---|
+| 0..1 | Magic A5 5A |
+| 2 | Protocol version = 1 |
+| 3 | Frame type = 1 (tracking) |
+| 4..7 | uint32 sequence |
+| 8..15 | uint64 microseconds since Pico boot |
+| 16..19 | uint32 random boot/session ID |
+| 20..51 | four signed int64 cumulative counts: Pan/Tilt/Zoom/Focus (Focus reserved=0) |
+| 52 | active-low-debounced button held-state mask (3 bits) |
+| 53..58 | three uint16 cumulative button-press totals |
+| 59..60 | uint16 firmware metadata flags |
+| 61..62 | uint16 CRC16/CCITT-FALSE (init FFFF, polynomial 1021) of first 61 bytes, LE |
+
+Flags **are not** hardware encoder fault reports:
+- `0x0001` watchdog-caused reboot (sampled on Pico boot; does not mean active count loss).
+- `0x0002` Focus reserved/inactive.
+- `0xFF00` contains firmware major/minor version; `0x0100` = version 1.0.
+- `0x0102` is a normal healthy/boot metadata value. V1 has **no physical encoder error-counter or signal-integrity flag**. Other unknown flag bits are surfaced as metadata, not interpreted as a count failure.
+
+### Real Pi capture — canonical golden vector
+
+The terminal capture contained 64 bytes, where the **last** `a5` begins the next packet. The first 63 bytes give CRC `0xB5F1`, sequence `163559`, Pico timestamp `327117850 us`, session ID `980923745`, Pan `-72`, Tilt `0`, Zoom `10`, Focus `0`, zero button events, flags `0x0102`. `tests/test_pico_uart.py` contains the exact bytes and tests that serialise back byte-for-byte.
+
+## Raspberry Pi 4 UART — verified preconditions
+
+The operating setup uses `/dev/serial0` → `/dev/ttyAMA0` (hardware PL011), user `reallines` has access via `dialout` and serial console is **disabled**. `/boot/firmware/config.txt` has `enable_uart=1` and `dtoverlay=disable-bt`, with Bluetooth disabled to free PL011. The UART has already been verified with `stty -F /dev/serial0 1000000 raw -echo -ixon -ixoff -crtscts` and a raw `head | od` capture. The host receiver uses Python's `os` / `termios` / `select` — **no pyserial dependency**. Do not run two readers simultaneously; temporarily stop RealLines if making a manual raw UART capture.
+
+## What changes in this patch
+
+- Accept fixed 63-byte `A5 5A` frames; reject wrong type/version, CRC failures, and out-of-order sequence; resynchronise and bound memory in noise.
+- Correct `pico_source` mapping, timestamp/uptime, version/reset/Focus informational flags; preserve three-axis separate reference IDs and cumulative packet-loss diagnostics.
+- Preserve 64-bit count values after a missing UART packet. A Pico boot-session change or substantial UART silence forces fresh camera-position references, **without deleting any saved dot observations**.
+- Report valid packet receive rate, CRC/protocol errors, byte resync, Pico uptime, metadata flags, connection state.
+- Keep all Direct GPIO, Linux Rotary, simulator and current RealLines graphics/Zoom calibration pathways intact.
+
+## Deploy without firmware reflashing
+
+1. Apply patch only to a **clean** Windows checkout of `wip/live-tuning-dot-lock` at `a4469df`.
+2. Run `python -m pytest tests -q`, `node tests/editor_math.test.mjs`, `node --test tests/frontend_contract.test.mjs`, `git diff --check`; review changes; commit and push **only if tests pass**.
+3. On Pi, confirm a clean checkout, `git pull --ff-only origin wip/live-tuning-dot-lock`, run `.venv/bin/python -m unittest discover -s tests -q`, restart `kairix-reallines-dev`.
+4. Keep Pico flashed as-is. In Engineering, select Pico UART for Pan/Tilt/Zoom. Verify **RECEIVING** (not OPEN—WAITING), valid packet counter increasing and packet rate around 500 Hz. Confirm CRC and protocol errors remain zero, session ID and firmware `1.0` visible, flags `0x0102` informational.
+5. Rotate Pan/Tilt/Zoom individually, confirm cumulative counts respond and return to baseline; then reference each position and capture Zoom endpoints as needed. Test a long idle, rapid movement and forced Pico restart for reference invalidation. **Do not clear old world measurements.** New physical source/reference IDs may invalidate an accepted world; a guided alignment recovery mechanism remains future work.
+6. Record diagnostic bundle and assess packet rate, CRC errors, gaps, count drift and visual tracking before trusting for broadcast use. Invalid PIO A/B transitions currently do not get a dedicated hardware error count: a future firmware enhancement is still needed.
+
+## Future firmware builds
+
+For the RP2040 board, with official Pico SDK installed (and `PICO_SDK_PATH` set or local `pico_sdk_import.cmake` supplied):
+
+```sh
+cmake -S firmware/pico -B firmware/pico/build -DPICO_BOARD=pico
+cmake --build firmware/pico/build -j4
 ```
 
-Add the service user to `dialout` if required (`sudo usermod -aG dialout reallines`), then reboot or restart login/session so the membership takes effect. RealLines defaults to `/dev/serial0` **1,000,000 baud, 8N1**, no flow control, no Python pyserial dependency. To override the path on the Pi, add `Environment=KAIRIX_PICO_UART_DEVICE=/dev/ttyAMA0` to a `systemctl edit kairix-reallines-dev.service` drop-in, `daemon-reload`, and restart. Do not start two serial consumers at once.
+`firmware/pico/main.c` and `quadrature_encoder.pio` now match the original firmware source, but an actual UF2 rebuild and binary equivalence check **has not been performed**. Keep the existing Pico firmware until testing justifies an update. The repository's `tools/flash_pico.py` is a separate local-only flashing utility; no public web endpoint should flash hardware.
 
-## Build the included firmware (requires installed official Pico SDK)
+## Workflow and folder management
 
-The **matched** wire protocol is `KRP1` 58 bytes, documented below. A firmware built using a different earlier Pico package may use a different protocol. Install the firmware included in **this** patch before enabling `Pico UART` in Engineering.
-
-```bash
-cd /home/reallines/kairix-reallines/firmware/pico
-export PICO_SDK_PATH=/path/to/installed/pico-sdk
-cmake -S . -B build -DPICO_BOARD=pico
-cmake --build build -j2
-```
-
-Copy `build/reallines_pico.uf2` to the Pico using its USB bootloader. On the Pi, if `picotool` is available and the Pico runs firmware with compatible USB stdio support, an operator can do a verified local update:
-
-```bash
-sha256sum build/reallines_pico.uf2
-python3 tools/flash_pico.py firmware/pico/build/reallines_pico.uf2 --sha256 <exact-output-from-sha256sum>
-```
-
-The command above runs from the RealLines repo root. It requires a human to type `FLASH` and invokes `picotool load -f -v -x`. Physical BOOTSEL remains the fallback if software-triggered updating is unavailable. There is no automatic flashing. **Firmware compilation and flashing have not been validated on your USB-C board yet.** Board-specific PICO_BOARD options may need adjusting.
-
-## Install RealLines patch on Windows
-
-From the extracted bundle beside your existing checkout:
-
-```powershell
-cd "J:\projects\kairix-reallines"
-.\reallines-pico-v1_1\install.ps1
-```
-
-The installer requires clean commit `a344800`, runs all replacement preflight checks, and creates a timestamped copy of changed files before applying. It never accesses `data/`.
-
-Then:
-
-```powershell
-cd "J:\projects\kairix-reallines\kairix-reallines-v0.0.1-dev"
-python -m compileall -q app tests
-python -m pytest tests -q
-node tests/editor_math.test.mjs
-node --test tests/frontend_contract.test.mjs
-git diff --check
-git diff --stat
-```
-
-Commit only after reviewing the diff and passing tests. Push to `wip/live-tuning-dot-lock`, then pull on Pi. Run the Pi unit tests before restarting its service.
-
-## Bring-up
-
-1. Confirm UART wires and board's GPIO pad labels. Confirm firmware matches `KRP1`.
-2. Open Engineering: **Pico encoder controller** should show `RECEIVING`, last packet under about 20 ms, increasing sequence, stable boot session, zero CRC errors.
-3. Select **Pico UART** for Pan, then Tilt, then Zoom. Reference each at a known physical position. Existing gear ratios/directions/PPR remain on RealLines; Pico is fixed ×4.
-4. Slowly move each axis and check counts change smoothly with correct direction. Stop and confirm held counts don't drift. Test fast movement and long idle; watch packet gaps, CRC and controller restarts.
-5. Reference Zoom and capture physical Wide/Tight points again (saved FOV numbers remain available).
-6. Observe that old world calibration is *invalidated* by hardware-source/encoder-reference change. **Old six Dot observations and world solution are preserved on disk**, but old raw counts cannot be relabelled as a new Pico counting session. Establish new physical references and collect new matched observations for world solve. Do not clear old data without a deliberate backup.
-
-## Protocol KRP1, V1
-
-Binary, little endian, 58-byte fixed frame at 500 Hz (2 ms nominal). 1 Mbit/s UART 8N1 => roughly 29% wire usage. Fields by byte offset:
-
-| Offset | Bytes | Value |
-|---:|---:|---|
-| 0 | 4 | ASCII `KRP1` |
-| 4 | 4 | sequence, uint32, wrapping |
-| 8 | 4 | random count-session ID, uint32, changes on reboot |
-| 12 | 8 | Pico monotonic time, uint64 µs |
-| 20 | 8 | Pan cumulative count, int64 |
-| 28 | 8 | Tilt cumulative count, int64 |
-| 36 | 8 | Zoom cumulative count, int64 |
-| 44 | 1 | Three debounced button states, bitmask |
-| 45 | 6 | Three uint16 cumulative press counters |
-| 51 | 1 | Fault flags, initially 0 |
-| 52 | 4 | Device uptime, uint32 ms |
-| 56 | 2 | CRC16-CCITT-FALSE (poly 0x1021, init 0xffff) over first 56 bytes |
-
-The host discards out-of-order/duplicate packets, checks CRC, and accepts fresh cumulative counts even when sequence gaps are detected. It does not infer encoder transitions from packet deltas. An unchanged count is a valid stationary camera; an unchanged packet timestamp indicates a stale UART link. USB firmware version isn't communicated in this minimal protocol; `KRP1` reports wire protocol version 1, not a claim of verified firmware release.
-
-## Future improvements
-
-- Compare 50 Hz vs 100 Hz WebSocket pose publication independently from Pico reporting, with timing instrumentation and no slow-client queue buildup.
-- Add measured end-to-end latency and local Pi HDMI 1080p50 experiment.
-- Add signed, revisioned web-based .UF2 firmware update once Engineering authentication and hardware verification exist. Until then the CLI avoids an unsafe remote flashing endpoint.
-- Validate the firmware's PIO counts against a known pulse generator/oscilloscope and confirm the actual USB-C RP2040 board's PIO/USB/PIN details.
+The repository is the source of truth for application and firmware source; use Git branch `wip/live-tuning-dot-lock` until merged deliberately. `data/` and Pi diagnostic logs must never be deleted by a source-code cleanup. The supplied Windows `cleanup-project.ps1` **previews** moving old installer bundles and backup folders into a dated archive outside Git. The original firmware build and tripod imagery remain untouched until hardware tests have passed.
