@@ -24,6 +24,7 @@ from .world_calibration import CalibrationError, TARGET_POINTS, default_world_ca
 from .dot_calibration import DotCalibrationError, default_dot_calibration, evaluate_dot_world_solution, review_only_world_eligible, metric_rectangle_model_points, model_points_from_saved_history, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
 from .pico_processing import DEFAULT_PICO_PROCESSING, normalise_pico_processing
 from .websocket_output import ClientOutput
+from .measured_targets import default_measured_targets, normalise_measured_targets, validate_measured_target
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -147,6 +148,11 @@ class StateStore:
         self._sync_calibration_from_profile()
         self.world_calibration_index = self._load_or_create_world_calibrations()
         self.world_calibration = self._read_world_calibration(self.world_calibration_index["active_id"])
+        try:
+            self.measured_targets = normalise_measured_targets(self._load("measured_targets.json", default_measured_targets()))
+        except ValueError as exc:
+            self.debug.error("measured_targets_load_failed", error=repr(exc))
+            self.measured_targets = default_measured_targets()
         self.sync_config = self._normalise_sync_config(self._load("sync.json", DEFAULT_SYNC))
         self.pose_history = PoseHistory(self.sync_config["history_duration_seconds"])
         self._pose_reference_key: tuple[Any, ...] | None = None
@@ -1055,7 +1061,9 @@ class StateStore:
             "coalesced_poses": sum(output.coalesced_poses for output in self.client_outputs.values()),
             "critical_overflows": sum(output.critical_overflows for output in self.client_outputs.values()),
         }
-        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "transport": transport, "server_mono": now}
+        measured_targets = deepcopy(self.measured_targets)
+        measured_targets["validation"] = {target["id"]: validate_measured_target(target) for target in measured_targets["targets"]}
+        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "measured_targets": measured_targets, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "transport": transport, "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -1140,6 +1148,18 @@ class StateStore:
         self.debug.app("pico_processing_updated", **candidate)
         await self.broadcast_state()
         return deepcopy(candidate)
+
+    async def update_measured_targets(self, values: dict[str, Any]) -> dict[str, Any]:
+        candidate = normalise_measured_targets(values)
+        validations = {target["id"]: validate_measured_target(target) for target in candidate["targets"]}
+        async with self.lock:
+            self.measured_targets = candidate
+            self._save("measured_targets.json", candidate)
+        self.debug.app("measured_targets_updated", targets=len(candidate["targets"]))
+        await self.broadcast_state()
+        result = deepcopy(candidate)
+        result["validation"] = validations
+        return result
 
     async def update_calibration_overlay(self, values: dict[str, Any]) -> dict[str, Any]:
         unknown = set(values) - {

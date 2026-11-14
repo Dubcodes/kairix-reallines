@@ -1,4 +1,4 @@
-import {recordIncomingPose} from './browser_metrics.js?v=v13';
+import {recordIncomingPose} from './browser_metrics.js?v=world-media1';
 
 export async function api(path, options={}) {
   const init = { ...options };

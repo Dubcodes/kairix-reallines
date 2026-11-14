@@ -66,6 +66,21 @@ export function distanceToSegment(point, a, b) {
   return Math.hypot(point.x - (a.x + t*dx), point.y - (a.y + t*dy));
 }
 
+const distance3d=(camera,point)=>Math.hypot(point.x-camera.x,point.y-camera.y,point.z-camera.z);
+const horizontalDistance=(camera,point)=>Math.hypot(point.x-camera.x,point.y-camera.y);
+
+export function itemDistanceDiagnostics(item,camera){
+  if(!item||!camera||![camera.x,camera.y,camera.z].every(Number.isFinite))return null;
+  const provisional=camera.world_valid!==true;
+  if(item.type==='line'){
+    const a={x:+item.x1,y:+item.y1,z:+item.z1},b={x:+item.x2,y:+item.y2,z:+item.z2};
+    return{kind:'line',provisional,endpoints:{a:{distance_3d_m:distance3d(camera,a),horizontal_m:horizontalDistance(camera,a)},b:{distance_3d_m:distance3d(camera,b),horizontal_m:horizontalDistance(camera,b)}}};
+  }
+  if(!['marker','text','image'].includes(item.type))return null;
+  const point={x:+item.x,y:+item.y,z:+item.z};
+  return{kind:item.type,provisional,distance_3d_m:distance3d(camera,point),horizontal_m:horizontalDistance(camera,point)};
+}
+
 export function itemWorldPoints(item) {
   if (item.type === 'line') return [{x:+item.x1,y:+item.y1},{x:+item.x2,y:+item.y2}];
   if (item.type === 'text' || item.type === 'marker') return [{x:+item.x,y:+item.y}];

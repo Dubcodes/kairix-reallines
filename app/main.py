@@ -100,6 +100,10 @@ class PicoProcessingUpdate(BaseModel):
     values: dict
 
 
+class MeasuredTargetsUpdate(BaseModel):
+    values: dict
+
+
 class ImuUpdate(BaseModel):
     values: dict
 
@@ -420,6 +424,14 @@ async def pico_controller_status():
 async def update_pico_processing(body: PicoProcessingUpdate):
     try:
         return await store.update_pico_processing(body.values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/measured-targets")
+async def update_measured_targets(body: MeasuredTargetsUpdate):
+    try:
+        return await store.update_measured_targets(body.values)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -787,7 +799,7 @@ async def debug_toggle(enabled: bool):
 
 @app.get("/api/diagnostics/bundle")
 async def diagnostic_bundle():
-    files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "zoom_lens_profiles.json", DATA_DIR / "sync.json", DATA_DIR / "imu.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
+    files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "pico_processing.json", DATA_DIR / "measured_targets.json", DATA_DIR / "zoom_lens_profiles.json", DATA_DIR / "sync.json", DATA_DIR / "imu.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
     bundle = debug.create_bundle(files)
     return FileResponse(bundle, filename=bundle.name, media_type="application/zip")
 

@@ -2,12 +2,16 @@ import {api,connectState,gateControlsUntilState,logFrontend} from './common.js?v
 import {calculateMovementCalibration} from './calibration_contract.js?v=world-media1';
 import {updatePreviewMedia} from './preview_media.js?v=world-media1';
 import {DotCalibrationUi} from './dot_calibration_ui.js?v=world-media1';
+import {MeasuredTargetUi} from './measured_target_ui.js?v=world-media1';
 
 const byId=id=>document.getElementById(id);
 const targets=['top_left','top_center','top_right','middle_left','center','middle_right','bottom_left','bottom_center','bottom_right'];
 const targetLabel=value=>value.replaceAll('_',' ').toUpperCase();
 let state=null,applying=false;
 const dotCalibration=new DotCalibrationUi(byId);
+const measuredTargets=new MeasuredTargetUi(byId);
+const updateDotCalibration=dotCalibration.updateState.bind(dotCalibration);
+dotCalibration.updateState=(incoming,event)=>{updateDotCalibration(incoming,event);measuredTargets.updateState(incoming,event);};
 const movement={pan:{start:null,end:null,angle:'',proposal:null,error:''},tilt:{start:null,end:null,angle:'',proposal:null,error:''}};
 const releaseInitialControls=gateControlsUntilState();
 let controlsReady=false;

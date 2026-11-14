@@ -94,6 +94,7 @@ class FrontendContractCase(unittest.TestCase):
             js = (STATIC / "js" / f"{page}.js").read_text(encoding="utf-8")
             if page == "calibration":
                 js += (STATIC / "js" / "dot_calibration_ui.js").read_text(encoding="utf-8")
+                js += (STATIC / "js" / "measured_target_ui.js").read_text(encoding="utf-8")
             controls = set(re.findall(r"<(?:button|input|select)[^>]+\bid=['\"]([^'\"]+)", html))
             for control_id in controls:
                 self.assertRegex(js, rf"['\"]{re.escape(control_id)}['\"]", f"{page}: {control_id}")
@@ -236,6 +237,26 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("/api/pico/processing", source)
         self.assertIn("Samples consumed / discarded", source)
         self.assertIn("Firmware V1 does not report missed physical quadrature transitions", html)
+
+    def test_measured_target_editor_is_separate_and_does_not_advertise_fake_vision_actions(self):
+        html = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        source = (STATIC / "js" / "measured_target_ui.js").read_text(encoding="utf-8")
+        self.assertIn("Preparatory measurements only", html)
+        self.assertIn("All unique marker pairs", html)
+        self.assertIn("/api/measured-targets", source)
+        self.assertIn("completeMeasuredPairs", source)
+        self.assertNotIn(">Capture<", html)
+        self.assertNotIn(">Detect<", html)
+        self.assertNotIn(">Auto-Calibrate<", html)
+
+    def test_graphics_editor_exposes_world_distance_and_effective_visibility_diagnostics(self):
+        control = (STATIC / "js" / "control.js").read_text(encoding="utf-8")
+        editor = (STATIC / "js" / "editor.js").read_text(encoding="utf-8")
+        self.assertIn("itemDistanceDiagnostics", editor)
+        self.assertIn("Horizontal ground distance", control)
+        self.assertIn("Endpoint A 3D / ground", control)
+        self.assertIn("PARENT HIDDEN", control)
+        self.assertIn("Effective visibility", control)
 
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")

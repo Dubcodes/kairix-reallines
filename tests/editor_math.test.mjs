@@ -13,7 +13,7 @@ async function browserModule(path) {
 
 const {groupForItem,isItemEffectivelyVisible,projectPoint}=await browserModule('../app/static/js/render.js');
 const {
-  boundsForItems, distanceToSegment, fitTopDown, screenToWorldOnZPlane, snapValue,
+  boundsForItems, distanceToSegment, fitTopDown, itemDistanceDiagnostics, screenToWorldOnZPlane, snapValue,
   topDownToWorld, worldToTopDown,
 }=await browserModule('../app/static/js/editor.js');
 
@@ -27,6 +27,18 @@ for(const point of [{x:2.4,y:12,z:0},{x:-3,y:20,z:.4},{x:1,y:6,z:1.1}]) {
   assert.ok(Math.abs(restored.x-point.x)<1e-9);
   assert.ok(Math.abs(restored.y-point.y)<1e-9);
   assert.equal(restored.z,point.z);
+}
+
+{
+  const calibrated={x:0,y:0,z:0,world_valid:true};
+  const marker=itemDistanceDiagnostics({type:'marker',x:3,y:4,z:12},calibrated);
+  assert.equal(marker.distance_3d_m,13);
+  assert.equal(marker.horizontal_m,5);
+  assert.equal(marker.provisional,false);
+  const line=itemDistanceDiagnostics({type:'line',x1:0,y1:3,z1:4,x2:6,y2:8,z2:0},calibrated);
+  assert.equal(line.endpoints.a.distance_3d_m,5);
+  assert.equal(line.endpoints.b.horizontal_m,10);
+  assert.equal(itemDistanceDiagnostics({type:'marker',x:1,y:2,z:3},{x:0,y:0,z:0,world_valid:false}).provisional,true);
 }
 
 const centreCamera={x:3,y:2,z:1.8,pan:0,tilt:0,roll:0,fov:60,height:1.8};

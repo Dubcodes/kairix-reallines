@@ -1,6 +1,6 @@
 import {connectState} from './common.js?v=world-media1';
 import {renderScene} from './render.js?v=world-media1';
-import {recordRenderedFrame} from './browser_metrics.js?v=v13';
+import {recordRenderedFrame} from './browser_metrics.js?v=world-media1';
 import {updatePreviewMedia} from './preview_media.js?v=world-media1';
 const stage=document.getElementById('previewStage'),canvas=document.getElementById('compositeCanvas'),badge=document.getElementById('previewBadge');let state;
 connectState(incoming=>{state=incoming;updatePreviewMedia(stage,state.engineering,true);},'preview');
