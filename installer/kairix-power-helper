@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+COMMANDS = {
+    "restart_app": ["/usr/bin/systemctl", "restart", "kairix-reallines-dev.service"],
+    "reboot": ["/usr/bin/systemctl", "reboot"],
+    "poweroff": ["/usr/bin/systemctl", "poweroff"],
+}
+
+if os.geteuid() != 0 or len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
+    raise SystemExit(64)
+raise SystemExit(subprocess.run(COMMANDS[sys.argv[1]], check=False).returncode)

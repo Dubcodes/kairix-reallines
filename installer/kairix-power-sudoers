@@ -1,0 +1,4 @@
+# Install as /etc/sudoers.d/kairix-reallines-power with mode 0440 after visudo validation.
+reallines ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper restart_app
+reallines ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper reboot
+reallines ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper poweroff

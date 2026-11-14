@@ -258,6 +258,18 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("PARENT HIDDEN", control)
         self.assertIn("Effective visibility", control)
 
+    def test_system_power_controls_require_https_and_dedicated_authentication(self):
+        html = (STATIC / "engineering.html").read_text(encoding="utf-8")
+        source = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('type="password"', html)
+        self.assertIn("Linux login password is never used", html)
+        self.assertIn("location.protocol!=='https:'", source)
+        self.assertIn("/api/system-power/authorize", source)
+        self.assertIn("/api/system-power/execute", source)
+        self.assertIn('request.url.scheme != "https"', main)
+        self.assertNotIn("x-forwarded-proto", main.lower())
+
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
         html = (STATIC / "calibration.html").read_text(encoding="utf-8")

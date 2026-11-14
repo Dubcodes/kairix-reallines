@@ -8,7 +8,7 @@ import socket
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -22,6 +22,7 @@ from .runtime import imu_status_publication_loop, pose_publication_loop, trackin
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
 from .dot_calibration import DotCalibrationError
+from .power_control import PowerControlError, PowerControlService
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
@@ -41,6 +42,7 @@ publication_task: asyncio.Task | None = None
 imu_status_task: asyncio.Task | None = None
 source_manager = TrackingSourceManager()
 store.pico_source_manager = source_manager
+power_control = PowerControlService()
 
 
 class CameraUpdate(BaseModel):
@@ -102,6 +104,16 @@ class PicoProcessingUpdate(BaseModel):
 
 class MeasuredTargetsUpdate(BaseModel):
     values: dict
+
+
+class PowerAuthorize(BaseModel):
+    action: str
+    secret: str
+
+
+class PowerExecute(BaseModel):
+    action: str
+    token: str
 
 
 class ImuUpdate(BaseModel):
@@ -244,6 +256,48 @@ async def system_info():
         "debug_session": debug.session_dir.name,
         "websocket_clients": len(store.clients),
     }
+
+
+def _secure_admin_request(request: Request) -> str:
+    # Deliberately use the transport URL seen by Uvicorn. Forwarded headers are
+    # not accepted as proof of HTTPS.
+    if request.url.scheme != "https":
+        raise HTTPException(403, "Secure administration requires direct HTTPS")
+    host = request.headers.get("host", "")
+    origin = request.headers.get("origin", "")
+    if not host or origin != f"https://{host}":
+        raise HTTPException(403, "Secure administration origin check failed")
+    return request.client.host if request.client else "unknown"
+
+
+@app.get("/api/system-power/status")
+async def system_power_status(request: Request):
+    return {**power_control.status(), "request_secure": request.url.scheme == "https"}
+
+
+@app.post("/api/system-power/authorize")
+async def system_power_authorize(body: PowerAuthorize, request: Request):
+    client_id = _secure_admin_request(request)
+    try:
+        result = power_control.authorize(body.action, body.secret, client_id)
+    except PowerControlError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    debug.app("system_power_authorized", action=body.action, client=client_id)
+    return result
+
+
+@app.post("/api/system-power/execute")
+async def system_power_execute(body: PowerExecute, request: Request, background_tasks: BackgroundTasks):
+    client_id = _secure_admin_request(request)
+    async with store.lock:
+        pass  # Wait for any in-flight atomic state write before accepting power loss.
+    try:
+        power_control.consume(body.token, body.action, client_id)
+    except PowerControlError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    debug.app("system_power_requested", action=body.action, client=client_id)
+    background_tasks.add_task(power_control.execute_consumed, body.action)
+    return {"accepted": True, "action": body.action, "message": "System action acknowledged; the connection may close"}
 
 
 @app.post("/api/camera")
