@@ -213,10 +213,20 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("calculateMovementCalibration", calibration)
         self.assertIn("movementCard('pan')+movementCard('tilt')", calibration)
         self.assertIn("movement[axis]", calibration)
+        self.assertIn("'pico_uart'", calibration)
         self.assertIn("/api/profiles/${state.profiles.active_id}/axes/${axis}", calibration)
         self.assertIn("direction_learned:true", calibration)
         self.assertIn("preserves the live encoder count and position reference", html)
         self.assertIn("venue calibration must be verified or recalculated", html)
+
+    def test_dot_calibration_pose_updates_do_not_rebuild_interactive_controls(self):
+        source = (STATIC / "js" / "dot_calibration_ui.js").read_text(encoding="utf-8")
+        self.assertIn("if(event?.type==='pose')", source)
+        self.assertIn("this.renderLive();", source)
+        live = source[source.index("renderLive(){"):source.index("updateState(state,event)")]
+        self.assertNotIn("renderMarkerList", live)
+        self.assertNotIn("renderObservations", live)
+        self.assertNotIn("setStatus", live)
 
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")

@@ -700,15 +700,27 @@ export class DotCalibrationUi {
   render(){
     if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSavedReview();this.renderSolution();this.renderWorldCandidate();
     const viewport=this.byId('dotLockViewport');viewport.classList.toggle('editing',this.editor.editing);viewport.classList.toggle('dragging',this.editor.dragging);this.draw();this.renderMarkerCoordinates();
-    const target=this.activeTarget();
-    if(!target)this.setStatus('CREATE A FREE OR RECTANGLE TARGET','warn');
-    else if(!this.editor.editing&&target.observations.length)this.setStatus(`${target.name.toUpperCase()} — ${target.observations.length} OBSERVATION${target.observations.length===1?'':'S'} SAVED · MOVE CAMERA THEN ADJUST THIS VIEW`,'ok');
+  }
+
+  renderLive(){
+    if(!this.state)return;
+    this.draw();
+    this.renderSavedReview();
   }
 
   updateState(state,event){
-    this.state=state;const incoming=state.world_calibrations?.active?.dot_calibration;
-    if(incoming&&!this.editor.editing)this.data=clone(incoming);
+    this.state=state;
     if(!this.controlsBound)this.bind();
+    if(event?.type==='pose'){
+      this.renderLive();
+      return;
+    }
+    const incoming=state.world_calibrations?.active?.dot_calibration;
+    if(incoming&&!this.editor.editing)this.data=clone(incoming);
+    if(this.selectedObservationId&&!this.selectedSavedObservation()){
+      this.selectedObservationId=null;
+      this.editingObservationId=null;
+    }
     const anchorId=this.anchorObservation()?.id??null;
     if(!this.editor.editing&&anchorId!==this.lastOverlayAnchorId){this.lastOverlayAnchorId=anchorId;this.updateOverlay(false);}
     this.render();
