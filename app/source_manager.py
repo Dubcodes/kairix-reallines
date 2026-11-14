@@ -7,6 +7,7 @@ from typing import Any
 from .gpio_source import QuadratureGpioWorker
 from .linux_rotary_source import LinuxRotaryWorker
 from .pico_source import PicoUartWorker
+from .pico_processing import DEFAULT_PICO_PROCESSING, active_processing_rate, normalise_pico_processing
 from .tracking import AXES, acquisition_signature
 
 
@@ -19,6 +20,21 @@ class TrackingSourceManager:
         self._pico: PicoUartWorker | None = None
         self._pico_axes: tuple[str, ...] = ()
         self._profile_id: str | None = None
+        self._pico_processing = dict(DEFAULT_PICO_PROCESSING)
+
+    def configure_pico_processing(self, values: dict[str, Any]) -> dict[str, Any]:
+        settings = normalise_pico_processing(values)
+        with self._lock:
+            self._pico_processing = settings
+            pico = self._pico
+        if pico is not None:
+            pico.configure_processing(settings)
+        return deepcopy(settings)
+
+    @property
+    def acquisition_rate_hz(self) -> int:
+        with self._lock:
+            return active_processing_rate(self._pico_processing) if self._pico_axes else 200
 
     def configure(self, profile_id: str, profile: dict[str, Any]) -> None:
         wanted: dict[str, dict[str, Any]] = {}
@@ -71,6 +87,7 @@ class TrackingSourceManager:
                 if old_pico is not None:
                     old_pico.stop()
                 pico = PicoUartWorker()
+                pico.configure_processing(self._pico_processing)
                 pico.start()
         elif old_pico is not None:
             old_pico.stop()
@@ -96,15 +113,20 @@ class TrackingSourceManager:
             pico_axes = self._pico_axes
         result = {axis: worker.snapshot() for axis, worker in workers}
         if pico:
-            result.update({axis: pico.snapshot(axis) for axis in pico_axes})
+            result.update(pico.consume_snapshots(pico_axes))
         return result
 
     def pico_status(self) -> dict[str, Any]:
         with self._lock:
             pico = self._pico
             axes = self._pico_axes
+            settings = deepcopy(self._pico_processing)
         result = pico.status() if pico is not None else {"connected": False, "device": None}
         result["enabled_axes"] = list(axes)
+        result.setdefault("processing_settings", settings)
+        result.setdefault("processing_mode", settings["mode"])
+        result.setdefault("processing_target_hz", active_processing_rate(settings))
+        result.setdefault("buffer_capacity", settings["buffer_capacity"])
         return result
 
     def set_reference(self, axis: str, angle: float) -> str:

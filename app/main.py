@@ -96,6 +96,10 @@ class EngineeringUpdate(BaseModel):
     values: dict
 
 
+class PicoProcessingUpdate(BaseModel):
+    values: dict
+
+
 class ImuUpdate(BaseModel):
     values: dict
 
@@ -159,6 +163,7 @@ async def request_logging(request: Request, call_next):
 @app.on_event("startup")
 async def start_acquisition():
     global acquisition_task, publication_task, imu_status_task
+    source_manager.configure_pico_processing(store.pico_processing)
     source_manager.configure(store.profile_index["active_id"], store.profile)
     imu_service.start()
     acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
@@ -409,6 +414,14 @@ async def update_camera_rig(profile_id: str, body: AxisConfigUpdate):
 @app.get("/api/pico/status")
 async def pico_controller_status():
     return source_manager.pico_status()
+
+
+@app.patch("/api/pico/processing")
+async def update_pico_processing(body: PicoProcessingUpdate):
+    try:
+        return await store.update_pico_processing(body.values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/tracking/{axis}/reference")

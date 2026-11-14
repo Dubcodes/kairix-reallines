@@ -22,6 +22,7 @@ from .kinematics import RigGeometryError, camera_position, normalise_rig_offset,
 from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXES, SOURCE_TYPES, TrackingConfigError, acquisition_signature, default_profile, degrees_per_count, map_raw_value, map_referenced_count, merge_axis_update, normalise_axis_config, relative_position_count, tracking_fingerprint
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 from .dot_calibration import DotCalibrationError, default_dot_calibration, evaluate_dot_world_solution, review_only_world_eligible, metric_rectangle_model_points, model_points_from_saved_history, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
+from .pico_processing import DEFAULT_PICO_PROCESSING, normalise_pico_processing
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -129,6 +130,11 @@ class StateStore:
         self.camera = deepcopy(DEFAULT_CAMERA)
         self.calibration = self._load("calibration.json", DEFAULT_CALIBRATION)
         self.engineering = self._load("engineering.json", DEFAULT_ENGINEERING)
+        try:
+            self.pico_processing = normalise_pico_processing(self._load("pico_processing.json", DEFAULT_PICO_PROCESSING))
+        except ValueError:
+            self.pico_processing = deepcopy(DEFAULT_PICO_PROCESSING)
+            self._save("pico_processing.json", self.pico_processing)
         original_engineering = deepcopy(self.engineering)
         self.engineering["allow_provisional_gfx"] = self.engineering.get("allow_provisional_gfx") is True
         self.engineering["preview_source"] = self.engineering.get("preview_source") if self.engineering.get("preview_source") in {"none", "mjpeg", "video"} else "none"
@@ -1041,7 +1047,7 @@ class StateStore:
         else:
             world["effective_status"] = world.get("status")
         world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
-        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": []}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
+        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -1092,6 +1098,18 @@ class StateStore:
         self.debug.app("engineering_settings_updated", allow_provisional_gfx=result["allow_provisional_gfx"], preview_source=result["preview_source"])
         await self.broadcast_state()
         return result
+
+    async def update_pico_processing(self, values: dict[str, Any]) -> dict[str, Any]:
+        candidate = normalise_pico_processing({**self.pico_processing, **values})
+        async with self.lock:
+            self.pico_processing = candidate
+            self._save("pico_processing.json", candidate)
+        manager = getattr(self, "pico_source_manager", None)
+        if manager is not None:
+            manager.configure_pico_processing(candidate)
+        self.debug.app("pico_processing_updated", **candidate)
+        await self.broadcast_state()
+        return deepcopy(candidate)
 
     async def update_calibration_overlay(self, values: dict[str, Any]) -> dict[str, Any]:
         unknown = set(values) - {

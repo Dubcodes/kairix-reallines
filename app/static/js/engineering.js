@@ -316,7 +316,16 @@ function renderPicoController(){
     'Count session':p.session_id??'—',
     'Packet sequence':p.sequence??'—',
     'Packets received':p.received_packets??0,
-    'Valid packet rate':p.packet_rate_hz==null?'—':`${format(p.packet_rate_hz,1)} Hz`,
+    'Firmware nominal transmission rate':p.firmware_nominal_rate_hz==null?'—':`${p.firmware_nominal_rate_hz} Hz (matched source definition)`,
+    'Observed incoming packet rate':p.packet_rate_hz==null?'—':`${format(p.packet_rate_hz,1)} Hz`,
+    'Observed incoming throughput':p.incoming_bytes_per_second==null?'—':`${p.incoming_bytes_per_second} byte/s`,
+    'Pi processing mode':p.processing_mode==='every'?'Process Every Received Sample — EXPERIMENTAL':'Latest Snapshot — stable',
+    'Pi target / measured processed rate':`${p.processing_target_hz??'—'} / ${p.processed_sample_rate_hz??'—'} Hz`,
+    'Samples consumed / discarded':`${p.samples_consumed??0} / ${p.samples_discarded??0}`,
+    'Buffer occupancy / capacity':`${p.buffer_occupancy??0} / ${p.buffer_capacity??'—'}`,
+    'Buffer overflows':p.buffer_overflows??0,
+    'Processing latency p95':p.processing_latency_ms_p95==null?'—':`${format(p.processing_latency_ms_p95,2)} ms`,
+    'Processing sampling jitter p95':p.processing_jitter_ms_p95==null?'—':`${format(p.processing_jitter_ms_p95,2)} ms`,
     'Link silence invalidations':p.link_timeouts??0,
     'Missed UART packets (counts unaffected)':p.packet_gaps??0,
     'CRC errors':p.crc_errors??0,
@@ -338,6 +347,12 @@ function renderPicoController(){
     const a=document.createElement('div'),b=document.createElement('div');
     a.textContent=label;b.textContent=String(value);return [a,b];
   }));
+  const settings=p.processing_settings||{mode:'latest',latest_rate_hz:200,every_rate_hz:500,buffer_capacity:256};
+  for(const id of ['picoProcessingMode','picoLatestRate','picoEveryRate','picoBufferCapacity','savePicoProcessing','resetPicoProcessing'])byId(id).disabled=false;
+  if(byId('picoProcessingMode')!==document.activeElement)byId('picoProcessingMode').value=settings.mode;
+  if(byId('picoLatestRate')!==document.activeElement)byId('picoLatestRate').value=settings.latest_rate_hz;
+  if(byId('picoEveryRate')!==document.activeElement)byId('picoEveryRate').value=settings.every_rate_hz;
+  if(byId('picoBufferCapacity')!==document.activeElement)byId('picoBufferCapacity').value=settings.buffer_capacity;
 }
 function renderSync(){const sync=state.sync,live=state.camera,render=state.render_camera,rows={'Acquisition target':'200 Hz','Measured history rate':sync.sample_rate_hz===null?'—':`${format(sync.sample_rate_hz,1)} Hz`,'Pose transport target':'50 Hz','Configured delay':`${sync.graphics_delay_ms} ms`,'History depth':`${sync.history_duration_seconds} s`,'Stored samples':sync.sample_count,'Oldest sample age':sync.oldest_age_ms===null?'—':`${format(sync.oldest_age_ms,1)} ms`,'Newest sample age':sync.newest_age_ms===null?'—':`${format(sync.newest_age_ms,1)} ms`,'Requested render age':`${sync.requested_render_age_ms} ms`,'Interpolation':sync.interpolation,'Live Pan / Tilt':`${format(live.pan,3)}° / ${format(live.tilt,3)}°`,'Render Pan / Tilt':`${format(render.pan,3)}° / ${format(render.tilt,3)}°`,'Effective difference':sync.effective_difference_ms===null?'—':`${format(sync.effective_difference_ms,1)} ms`};byId('syncDiagnostics').replaceChildren(...Object.entries(rows).flatMap(([key,value])=>{const label=document.createElement('div'),content=document.createElement('div');label.textContent=key;content.textContent=value;return[label,content];}));}
 function renderSetupStatus(){
@@ -379,6 +394,20 @@ byId('renameProfile').onclick=async()=>{const answer=await showDialog({title:'Re
 byId('duplicateProfile').onclick=async()=>{const answer=await showDialog({title:'Duplicate setup profile',value:`${state.profiles.active.name} Copy`,accept:'Duplicate'});if(answer.accepted&&answer.value)await safe(()=>api(`/api/profiles/${state.profiles.active_id}/duplicate`,{method:'POST',body:JSON.stringify({name:answer.value})}));};
 byId('deleteProfile').onclick=async()=>{const answer=await showDialog({title:`Delete “${state.profiles.active.name}”?`,message:'At least one setup profile is always retained.',accept:'Delete'});if(answer.accepted)await safe(()=>api(`/api/profiles/${state.profiles.active_id}`,{method:'DELETE'}));};
 byId('debugOn').onclick=()=>safe(()=>api('/api/debug/true',{method:'POST'}));byId('debugOff').onclick=()=>safe(()=>api('/api/debug/false',{method:'POST'}));
+
+async function savePicoProcessing(values){
+  const buttons=[byId('savePicoProcessing'),byId('resetPicoProcessing')],feedback=byId('picoProcessingFeedback');
+  buttons.forEach(button=>button.disabled=true);byId('picoProcessingError').textContent='';feedback.textContent='Processing…';feedback.className='status-warn';
+  try{
+    await api('/api/pico/processing',{method:'PATCH',body:JSON.stringify({values})});
+    feedback.textContent='Confirmed';feedback.className='status-ok';
+  }catch(error){
+    byId('picoProcessingError').textContent=String(error);feedback.textContent='Failed';feedback.className='status-bad';
+    buttons.forEach(button=>button.disabled=false);
+  }
+}
+byId('savePicoProcessing').onclick=()=>savePicoProcessing({mode:byId('picoProcessingMode').value,latest_rate_hz:Number(byId('picoLatestRate').value),every_rate_hz:Number(byId('picoEveryRate').value),buffer_capacity:Number(byId('picoBufferCapacity').value)});
+byId('resetPicoProcessing').onclick=()=>savePicoProcessing({mode:'latest',latest_rate_hz:200,every_rate_hz:500,buffer_capacity:256});
 byId('allowProvisionalGfx').onchange=async event=>{const enabled=event.target.checked,result=await safe(()=>api('/api/engineering',{method:'PATCH',body:JSON.stringify({values:{allow_provisional_gfx:enabled}})}));if(!result)event.target.checked=state.engineering.allow_provisional_gfx;};
 byId('savePreviewMedia').onclick=async()=>{byId('previewMediaError').textContent='';const result=await safe(()=>api('/api/engineering',{method:'PATCH',body:JSON.stringify({values:{preview_source:byId('previewSource').value,preview_url:byId('previewUrl').value}})}));if(!result)byId('previewMediaError').textContent='Preview settings were not saved.';};
 byId('saveImu').onclick=async()=>{byId('imuError').textContent='';const source=byId('imuSource').value,result=await safe(()=>api('/api/imu',{method:'PATCH',body:JSON.stringify({values:{source,enabled:source!=='disabled'}})}));if(!result)byId('imuError').textContent='IMU setting was not saved. Encoder-only operation is unaffected.';};

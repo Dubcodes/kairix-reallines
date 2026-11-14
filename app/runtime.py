@@ -18,10 +18,11 @@ async def publish_pose_once(store: Any) -> None:
 
 
 async def tracking_loop(store: Any, source_manager: Any, frequency_hz: float = 200.0) -> None:
-    interval = 1.0 / frequency_hz
     next_tick = time.monotonic()
     while True:
         await sample_tracking_once(store, source_manager, time.monotonic())
+        active_rate = float(getattr(source_manager, "acquisition_rate_hz", frequency_hz))
+        interval = 1.0 / max(1.0, active_rate)
         next_tick += interval
         if next_tick < time.monotonic() - interval:
             next_tick = time.monotonic()

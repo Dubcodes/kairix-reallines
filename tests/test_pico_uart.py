@@ -9,6 +9,7 @@ from app.pico_protocol import (
     encode_packet,
 )
 from app.pico_source import PicoUartWorker, STALE_SECONDS
+from app.pico_processing import DEFAULT_PICO_PROCESSING, normalise_pico_processing
 
 # Exactly the first 63 bytes of the `head | od` capture from the Raspberry Pi.
 # The trailing a5 in the 64-byte terminal output starts the *next* packet.
@@ -29,6 +30,13 @@ def packet(seq=1, session=10, pan=120, tilt=-34, zoom=5,
 
 
 class PicoProtocolTests(unittest.TestCase):
+    def test_processing_settings_defaults_and_validation(self):
+        self.assertEqual(normalise_pico_processing({}), DEFAULT_PICO_PROCESSING)
+        with self.assertRaisesRegex(ValueError, "mode"):
+            normalise_pico_processing({"mode": "unbounded"})
+        with self.assertRaisesRegex(ValueError, "capacity"):
+            normalise_pico_processing({"buffer_capacity": 4})
+
     def test_real_hardware_frame_crc_and_all_fields(self):
         self.assertEqual(len(REAL_CAPTURE), 63)
         self.assertEqual(FRAME_BYTES, 63)
@@ -143,6 +151,44 @@ class PicoProtocolTests(unittest.TestCase):
         self.assertEqual(worker.snapshot('pan', now=now+.007)['raw_count'], 150)
         self.assertEqual(worker.status(now=now+.007)['packet_gaps'], 2)
         self.assertEqual(worker.snapshot('pan', now=now+.007)['integrity'], 'TRUSTED')
+
+    def test_latest_mode_consumes_newest_and_counts_processing_discards(self):
+        worker = PicoUartWorker('/dev/null')
+        now = time.monotonic()
+        worker.configure_processing({**DEFAULT_PICO_PROCESSING, "mode": "latest"})
+        worker.feed(b''.join(encode_packet(packet(seq, pan=seq * 10)) for seq in range(1, 5)), now=now)
+        snapshots = worker.consume_snapshots(('pan', 'tilt'), now=now + .010)
+        self.assertEqual(snapshots['pan']['raw_count'], 40)
+        self.assertEqual(snapshots['tilt']['packet_seq'], 4)
+        status = worker.status(now=now + .011)
+        self.assertEqual(status['samples_consumed'], 1)
+        self.assertEqual(status['samples_discarded'], 3)
+        self.assertEqual(status['buffer_occupancy'], 0)
+
+    def test_every_mode_consumes_in_sequence_with_bounded_overflow(self):
+        worker = PicoUartWorker('/dev/null')
+        now = time.monotonic()
+        worker.configure_processing({"mode": "every", "latest_rate_hz": 200, "every_rate_hz": 500, "buffer_capacity": 16})
+        worker.feed(b''.join(encode_packet(packet(seq, pan=seq)) for seq in range(1, 21)), now=now)
+        status = worker.status(now=now + .001)
+        self.assertEqual(status['buffer_occupancy'], 16)
+        self.assertEqual(status['buffer_overflows'], 4)
+        self.assertEqual(status['samples_discarded'], 4)
+        first = worker.consume_snapshots(('pan',), now=now + .002)['pan']
+        second = worker.consume_snapshots(('pan',), now=now + .004)['pan']
+        self.assertEqual((first['raw_count'], second['raw_count']), (5, 6))
+        self.assertEqual(worker.status(now=now + .005)['samples_consumed'], 2)
+
+    def test_processing_mode_change_preserves_reference_and_mapping_counts(self):
+        worker = PicoUartWorker('/dev/null')
+        now = time.monotonic()
+        worker.feed(encode_packet(packet(1, pan=123)), now=now)
+        reference = worker.set_reference('pan', 12.5)
+        worker.configure_processing({"mode": "every", "latest_rate_hz": 150, "every_rate_hz": 450, "buffer_capacity": 64})
+        snap = worker.snapshot('pan', now=now + .001)
+        self.assertTrue(snap['referenced'])
+        self.assertEqual(snap['reference_id'], reference)
+        self.assertEqual(snap['reference_count'], 123)
 
     def test_duplicate_and_out_of_order_packets_do_not_rewind_counts(self):
         worker = PicoUartWorker('/dev/null')

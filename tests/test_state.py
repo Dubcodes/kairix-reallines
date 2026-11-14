@@ -46,6 +46,18 @@ class StoreCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "http"):
                 await store.update_engineering_settings({"preview_url": "file:///secret"})
 
+    async def test_pico_processing_settings_are_separate_persistent_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            self.assertEqual(store.pico_processing["mode"], "latest")
+            updated = await store.update_pico_processing({"mode": "every", "every_rate_hz": 450, "buffer_capacity": 128})
+            self.assertEqual(updated["latest_rate_hz"], 200)
+            reloaded = self.make_store(directory)
+            self.assertEqual(reloaded.pico_processing, updated)
+            self.assertTrue((Path(directory) / "pico_processing.json").exists())
+            with self.assertRaisesRegex(ValueError, "capacity"):
+                await store.update_pico_processing({"buffer_capacity": 99999})
+
     async def test_ground_offset_is_calibration_scoped_persistent_and_non_destructive(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)

@@ -228,6 +228,15 @@ class FrontendContractCase(unittest.TestCase):
         self.assertNotIn("renderObservations", live)
         self.assertNotIn("setStatus", live)
 
+    def test_engineering_exposes_bounded_pico_processing_controls_and_confidence_boundaries(self):
+        html = (STATIC / "engineering.html").read_text(encoding="utf-8")
+        source = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        for control in ("picoProcessingMode", "picoLatestRate", "picoEveryRate", "picoBufferCapacity", "resetPicoProcessing"):
+            self.assertIn(f'id="{control}"', html)
+        self.assertIn("/api/pico/processing", source)
+        self.assertIn("Samples consumed / discarded", source)
+        self.assertIn("Firmware V1 does not report missed physical quadrature transitions", html)
+
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")
         html = (STATIC / "calibration.html").read_text(encoding="utf-8")
