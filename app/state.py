@@ -23,6 +23,7 @@ from .tracking import AXES, ENCODER_SOURCES, POSITION_ENCODER_AXES, REQUIRED_AXE
 from .world_calibration import CalibrationError, TARGET_POINTS, default_world_calibration, solve_world_calibration, synthetic_observations, target_points, utc_now, validate_target
 from .dot_calibration import DotCalibrationError, default_dot_calibration, evaluate_dot_world_solution, review_only_world_eligible, metric_rectangle_model_points, model_points_from_saved_history, normalise_dot_calibration, solve_dot_calibration, solve_dot_world_reference
 from .pico_processing import DEFAULT_PICO_PROCESSING, normalise_pico_processing
+from .websocket_output import ClientOutput
 
 DEFAULT_CAMERA = {"source": "simulator", "x": 0.0, "y": 0.0, "z": 1.7, "pan": 0.0, "tilt": -8.0, "roll": 0.0, "fov": 60.0, "height": 1.7, "valid": True, "world_valid": False, "raw_pan": 0, "raw_tilt": 0, "updated_mono": 0.0}
 DEFAULT_CALIBRATION = {"pan_direction": None, "tilt_direction": None, "marks": {}}
@@ -178,6 +179,7 @@ class StateStore:
         }
         self._refresh_tracking_from_profile(initial=True)
         self.clients: set[WebSocket] = set()
+        self.client_outputs: dict[WebSocket, ClientOutput] = {}
         self.lock = asyncio.Lock()
         self.layout_dirty = False
         self.layout_save_error: str | None = None
@@ -1047,7 +1049,13 @@ class StateStore:
         else:
             world["effective_status"] = world.get("status")
         world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
-        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "server_mono": now}
+        transport = {
+            "clients": len(self.clients),
+            "queued_messages": sum(len(output.critical) + int(output.latest_pose is not None) for output in self.client_outputs.values()),
+            "coalesced_poses": sum(output.coalesced_poses for output in self.client_outputs.values()),
+            "critical_overflows": sum(output.critical_overflows for output in self.client_outputs.values()),
+        }
+        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "transport": transport, "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -1063,12 +1071,34 @@ class StateStore:
     async def broadcast(self, message: dict[str, Any]) -> None:
         dead: list[WebSocket] = []
         for client in list(self.clients):
+            output = self.client_outputs.get(client)
+            if output is not None:
+                if not output.enqueue(message):
+                    dead.append(client)
+                continue
             try:
                 await client.send_json(message)
             except Exception:
                 dead.append(client)
         for client in dead:
+            await self.unregister_websocket(client)
+
+    def register_websocket(self, client: WebSocket) -> ClientOutput:
+        self.clients.add(client)
+        async def failed(exc: Exception) -> None:
+            self.debug.error("websocket_sender_error", error=repr(exc))
             self.clients.discard(client)
+            self.client_outputs.pop(client, None)
+        output = ClientOutput(client, failed)
+        self.client_outputs[client] = output
+        output.start()
+        return output
+
+    async def unregister_websocket(self, client: WebSocket) -> None:
+        self.clients.discard(client)
+        output = self.client_outputs.pop(client, None)
+        if output is not None:
+            await output.stop()
 
     async def broadcast_state(self) -> None:
         await self.broadcast({"type": "state", "data": self.snapshot()})

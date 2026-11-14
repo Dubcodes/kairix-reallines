@@ -795,9 +795,9 @@ async def diagnostic_bundle():
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     await websocket.accept()
-    store.clients.add(websocket)
+    output = store.register_websocket(websocket)
     debug.websocket("connected", clients=len(store.clients), client=str(websocket.client))
-    await websocket.send_json({"type": "state", "data": store.snapshot()})
+    output.enqueue({"type": "state", "data": store.snapshot()})
     try:
         while True:
             msg = await websocket.receive_text()
@@ -807,5 +807,5 @@ async def ws(websocket: WebSocket):
     except Exception as exc:
         debug.error("websocket_error", error=repr(exc))
     finally:
-        store.clients.discard(websocket)
+        await store.unregister_websocket(websocket)
         debug.websocket("disconnected", clients=len(store.clients))

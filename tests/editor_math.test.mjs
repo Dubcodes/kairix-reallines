@@ -4,6 +4,7 @@ import {
   clearDotLockSession,createDotLockSession,dotLockRay,dotLockReferencesMatch,
   dotLockWorldPoint,normalizedScreenPoint,projectDotLockSession,
 } from '../app/static/js/dot_lock.js';
+import {browserMetricsSummary,createBrowserMetrics,noteIncomingPose,noteRenderedFrame} from '../app/static/js/browser_metrics.js';
 
 async function browserModule(path) {
   const source=await readFile(new URL(path,import.meta.url),'utf8');
@@ -110,3 +111,17 @@ assert.equal(dotLockReferencesMatch(dotSession,{pan:'P2',tilt:'T1',zoom:'Z1'}),f
 assert.equal(clearDotLockSession(),null);
 assert.deepEqual(scene,dotSceneBefore,'Dot Lock does not alter scene/layout objects');
 console.log('editor math tests passed');
+
+{
+  const metrics=createBrowserMetrics();
+  noteIncomingPose(metrics,0);noteIncomingPose(metrics,20);noteIncomingPose(metrics,40);
+  noteRenderedFrame(metrics,{now:40,renderDurationMs:2,poseKey:1,canvasWidth:1920,canvasHeight:1080,dpr:1});
+  noteRenderedFrame(metrics,{now:60,renderDurationMs:4,poseKey:1,canvasWidth:1920,canvasHeight:1080,dpr:1});
+  noteRenderedFrame(metrics,{now:80,renderDurationMs:3,poseKey:2,canvasWidth:1920,canvasHeight:1080,dpr:1});
+  const summary=browserMetricsSummary(metrics,80);
+  assert.equal(summary.pose_interarrival_p95_ms,20);
+  assert.equal(summary.frame_interval_p95_ms,20);
+  assert.equal(summary.render_p95_ms,3);
+  assert.equal(summary.held_poses,1);
+  assert.equal(summary.canvas_width,1920);
+}
