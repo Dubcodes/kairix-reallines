@@ -81,13 +81,13 @@ class RealBrowserSmokeCase(unittest.TestCase):
     def test_engineering_pico_settings_persist_and_power_is_locked_on_http(self):
         page = self.page
         page.goto(f"{self.base}/engineering")
-        page.wait_for_function("document.querySelector('#uiStatus').textContent !== 'Loading'")
+        page.wait_for_selector("#picoProcessingMode:not([disabled])")
         page.select_option("#picoProcessingMode", "every")
         page.fill("#picoEveryRate", "450")
         page.fill("#picoBufferCapacity", "128")
         page.click("#savePicoProcessing")
         page.wait_for_function("document.querySelector('#picoProcessingFeedback').textContent === 'Confirmed'")
-        page.reload();page.wait_for_function("document.querySelector('#uiStatus').textContent !== 'Loading'")
+        page.reload();page.wait_for_selector("#picoProcessingMode:not([disabled])")
         self.assertEqual(page.input_value("#picoProcessingMode"), "every", page.text_content("#uiStatus") + " " + (page.get_attribute("#uiStatus", "title") or ""))
         self.assertEqual(page.input_value("#picoEveryRate"), "450")
         self.assertTrue(page.is_disabled('[data-power-action="reboot"]'))

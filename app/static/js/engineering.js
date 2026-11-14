@@ -21,6 +21,7 @@ let state=null,applying=false,axesKey='',connectionMode='connecting';
 const zoomFovDrafts=createZoomFovDrafts();
 const setUiStatus=(label,detail='')=>window.__kairixEngineeringBoot?.(label,detail);
 let groundOffsetPending=null;
+let picoProcessingDirty=false;
 
 if(dialog&&byId('dialogCancel'))byId('dialogCancel').onclick=()=>dialog.close('cancel');
 function showDialog({title,message='',value=null,accept='OK'}){if(!dialog)return Promise.resolve({accepted:false});byId('dialogTitle').textContent=title;byId('dialogMessage').textContent=message;byId('dialogInput').hidden=value===null;byId('dialogInput').value=value??'';byId('dialogAccept').textContent=accept;return new Promise(resolve=>{dialog.addEventListener('close',()=>resolve(dialog.returnValue==='accept'?{accepted:true,value:byId('dialogInput').value.trim()}:{accepted:false}),{once:true});dialog.showModal();if(value!==null){byId('dialogInput').focus();byId('dialogInput').select();}});}
@@ -350,7 +351,7 @@ function renderPicoController(syncControls=true){
   }));
   const settings=p.processing_settings||{mode:'latest',latest_rate_hz:200,every_rate_hz:500,buffer_capacity:256};
   for(const id of ['picoProcessingMode','picoLatestRate','picoEveryRate','picoBufferCapacity','savePicoProcessing','resetPicoProcessing'])byId(id).disabled=false;
-  if(syncControls){
+  if(syncControls&&!picoProcessingDirty){
     if(byId('picoProcessingMode')!==document.activeElement)byId('picoProcessingMode').value=settings.mode;
     if(byId('picoLatestRate')!==document.activeElement)byId('picoLatestRate').value=settings.latest_rate_hz;
     if(byId('picoEveryRate')!==document.activeElement)byId('picoEveryRate').value=settings.every_rate_hz;
@@ -401,8 +402,18 @@ byId('debugOn').onclick=()=>safe(()=>api('/api/debug/true',{method:'POST'}));byI
 
 async function savePicoProcessing(values){
   const buttons=[byId('savePicoProcessing'),byId('resetPicoProcessing')],feedback=byId('picoProcessingFeedback');
-  return runOperationFeedback({controls:buttons,statusNode:feedback,errorNode:byId('picoProcessingError'),operation:()=>api('/api/pico/processing',{method:'PATCH',body:JSON.stringify({values})})});
+  const outcome=await runOperationFeedback({controls:buttons,statusNode:feedback,errorNode:byId('picoProcessingError'),operation:()=>api('/api/pico/processing',{method:'PATCH',body:JSON.stringify({values})})});
+  if(outcome.ok){
+    picoProcessingDirty=false;
+    const saved=outcome.result;
+    byId('picoProcessingMode').value=saved.mode;
+    byId('picoLatestRate').value=saved.latest_rate_hz;
+    byId('picoEveryRate').value=saved.every_rate_hz;
+    byId('picoBufferCapacity').value=saved.buffer_capacity;
+  }
+  return outcome;
 }
+for(const id of ['picoProcessingMode','picoLatestRate','picoEveryRate','picoBufferCapacity'])byId(id).addEventListener('input',()=>{picoProcessingDirty=true;});
 byId('savePicoProcessing').onclick=()=>savePicoProcessing({mode:byId('picoProcessingMode').value,latest_rate_hz:Number(byId('picoLatestRate').value),every_rate_hz:Number(byId('picoEveryRate').value),buffer_capacity:Number(byId('picoBufferCapacity').value)});
 byId('resetPicoProcessing').onclick=()=>savePicoProcessing({mode:'latest',latest_rate_hz:200,every_rate_hz:500,buffer_capacity:256});
 
