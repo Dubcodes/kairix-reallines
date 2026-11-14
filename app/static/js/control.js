@@ -39,6 +39,7 @@ function selectedGroup(){return selection?.kind==='group'?state?.scene.groups.fi
 function groupItems(group){const ids=new Set(group?.item_ids||[]);return(state?.scene.items||[]).filter(item=>ids.has(item.id));}
 function itemGroupId(item){return groupForItem(state.scene,item.id)?.id||'';}
 function escapeAttr(value){return String(value??'').replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');}
+const escapeHtml=escapeAttr;
 function ensureCanvasSize(){const rect=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2),width=Math.max(320,Math.round(rect.width*dpr)),height=Math.max(240,Math.round(rect.height*dpr));if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}return{width,height,dpr};}
 function canvasPoint(event){const rect=canvas.getBoundingClientRect();return{x:(event.clientX-rect.left)*canvas.width/rect.width,y:(event.clientY-rect.top)*canvas.height/rect.height};}
 function textAspect(item){const size=Math.max(16,Math.min(256,+item.size||42));measureContext.font=`700 ${size}px system-ui, sans-serif`;return Math.max(8,Math.ceil(measureContext.measureText(item.text||' ').width+size*.35))/Math.ceil(size*1.35);}

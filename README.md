@@ -290,3 +290,44 @@ Delay is constrained to 0–2000 ms. Rendering requests the pose at `current_mon
 Invalid samples are hard boundaries: the system never interpolates through tracking loss. A request older than the retained history reports `HISTORY_UNDERRUN`; an empty or newly reset buffer reports `BUFFERING`. The render pose is invalid in either case, causing world-tracked GFX objects to be hidden until a safe pose is available. A stationary camera remains valid, and zero delay uses the newest pose.
 
 History is cleared whenever coordinate meaning changes, including setup-profile switches, world-calibration switches or solves, source/direction/offset changes, and relevant camera configuration changes. This deliberately produces a short refill period instead of blending incompatible reference frames. No prediction or future-time extrapolation is implemented.
+
+## V1.3 Pico processing and diagnostics
+
+Pico UART reception now owns a bounded packet queue that never blocks the UART thread. **Latest Snapshot** remains the stable default: acquisition samples the newest cumulative count at 200 Hz and counts skipped processing snapshots separately from UART sequence gaps. **Process Every Received Sample** is experimental and consumes queued packets in order at a configurable target (default 500 Hz). Limits are 20–500 Hz for Latest, 20–1000 Hz for Every Sample, and 16–4096 queued samples. When full, the oldest processing snapshot is discarded so stale backlog cannot grow indefinitely. Settings persist independently in `data/pico_processing.json`; reset restores Latest/200 Hz, Every/500 Hz, and capacity 256.
+
+Engineering separates source-defined firmware protocol/rate from observed packet rate and byte throughput. It reports received, consumed, processing-discarded and overflow counts, queue occupancy, UART gaps, CRC/protocol/out-of-order errors, session/restart state, controller uptime, processing latency and sampling jitter. Cumulative counts mean a skipped UART snapshot does not itself lose movement. Firmware V1 has no physical quadrature-integrity telemetry, so fresh UART data is never presented as proof that every encoder transition was captured. Communication integrity, count confidence and camera-calibration confidence remain separate.
+
+## V1.3 calibration and measured targets
+
+Fast pose messages update only live Dot Calibration drawing/review state; they do not rebuild marker/observation controls or replace operation feedback. Historical review retains the selected observation and uses its immutable saved image coordinates/camera pose. The protected manual target, observation schema and solver are unchanged. Pico Pan/Tilt now participates in the same known-angle gear-ratio workflow as Direct GPIO and Linux Rotary.
+
+Vision-Assisted Calibration has a separate versioned `data/measured_targets.json`. It records marker names, optional heights above ground, every unique marker-pair distance, and a distinct ground-slant constraint type. Empty means unknown, never zero. Triangle/height conflicts and underconstrained geometry are reported. This data is preparatory only and is not passed to the current manual solver. See [Vision-assisted architecture](docs/VISION_ASSISTED_CALIBRATION.md).
+
+## V1.3 graphics diagnostics
+
+Each WebSocket has one bounded writer. Full state transitions use a small critical queue; obsolete compact pose messages coalesce to the newest pose. A slow client therefore cannot block acquisition or all other clients, while HTTP polling fallback remains available. GFX, Preview and Control publish low-rate local browser metrics through same-origin browser storage: pose/frame cadence, inter-arrival/frame p95, render mean/p95, held/missing/stale poses, canvas size and device pixel ratio. Engineering reads those summaries without adding an on-air overlay or per-frame network traffic.
+
+The Canvas world-plane path remains unchanged apart from reporting its deterministic triangle work (8×8 subdivisions = 128 triangles per world texture; billboards use 2). Browser timing can identify local cadence/render pressure, but cannot prove Pi-to-browser latency, OBS behaviour, genlock, or 1080i50/1080p50 field synchronization because Pi monotonic and browser performance clocks are unrelated.
+
+Graphics Editor properties report calibrated camera-to-object 3D/horizontal ground distances and both line-endpoint distances. Provisional camera/world models are labelled. Group visibility is an effective parent mask and child rows/properties explicitly say when the parent hides an otherwise-visible object; scene coordinates are never mutated by diagnostics.
+
+## Secure system power administration
+
+Power controls are disabled unless a dedicated administrator credential exists and the page is served by direct HTTPS. The Linux login password is never accepted. The credential file defaults to `/etc/kairix-reallines/admin.json`, outside the repository, Samba share, data directory and diagnostics, and contains only an Argon2id hash. Provision interactively so the secret is not placed in shell history:
+
+```bash
+cd /home/reallines/kairix-reallines
+sudo .venv/bin/python -m app.power_control provision
+```
+
+Use direct TLS termination at Uvicorn (or a separately reviewed local reverse-proxy design that preserves the direct secure transport requirement). A practical development route is to create a locally trusted certificate, make its key readable only by the service account, and add `--ssl-keyfile /etc/kairix-reallines/tls/key.pem --ssl-certfile /etc/kairix-reallines/tls/cert.pem` to the service `ExecStart`. RealLines deliberately ignores client-supplied forwarded-protocol headers.
+
+Privileged installation is separate and manual:
+
+```bash
+sudo install -o root -g root -m 0755 installer/kairix-power-helper /usr/local/libexec/kairix-power-helper
+sudo install -o root -g root -m 0440 installer/kairix-power-sudoers /etc/sudoers.d/kairix-reallines-power
+sudo visudo -cf /etc/sudoers.d/kairix-reallines-power
+```
+
+Remove with `sudo rm /etc/sudoers.d/kairix-reallines-power /usr/local/libexec/kairix-power-helper /etc/kairix-reallines/admin.json` after stopping RealLines. The helper accepts only `restart_app`, `reboot` or `poweroff`; the service remains unprivileged. Authentication is rate-limited, creates a 60-second action/client-bound single-use token, and checks same-origin HTTPS again on execution. Restarting or powering off stops graphics and loses session-only references. Shutdown cannot turn the Pi back on.

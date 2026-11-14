@@ -11,6 +11,7 @@ import {
   validateEngineeringState,
   zoomFovDraftValue,
 } from './engineering_contract.js?v=world-media1';
+import {runOperationFeedback} from './operation_feedback.js?v=world-media1';
 
 window.__kairixEngineeringInitialized=true;
 const byId=id=>document.getElementById(id);
@@ -305,7 +306,7 @@ function renderAxes(){
     card.title=runtime.status||'';
   }
 }
-function renderPicoController(){
+function renderPicoController(syncControls=true){
   const node=byId('picoControllerState');if(!node)return;
   const p=state.pico_controller||{},axes=p.enabled_axes||[];
   const rows={
@@ -349,10 +350,12 @@ function renderPicoController(){
   }));
   const settings=p.processing_settings||{mode:'latest',latest_rate_hz:200,every_rate_hz:500,buffer_capacity:256};
   for(const id of ['picoProcessingMode','picoLatestRate','picoEveryRate','picoBufferCapacity','savePicoProcessing','resetPicoProcessing'])byId(id).disabled=false;
-  if(byId('picoProcessingMode')!==document.activeElement)byId('picoProcessingMode').value=settings.mode;
-  if(byId('picoLatestRate')!==document.activeElement)byId('picoLatestRate').value=settings.latest_rate_hz;
-  if(byId('picoEveryRate')!==document.activeElement)byId('picoEveryRate').value=settings.every_rate_hz;
-  if(byId('picoBufferCapacity')!==document.activeElement)byId('picoBufferCapacity').value=settings.buffer_capacity;
+  if(syncControls){
+    if(byId('picoProcessingMode')!==document.activeElement)byId('picoProcessingMode').value=settings.mode;
+    if(byId('picoLatestRate')!==document.activeElement)byId('picoLatestRate').value=settings.latest_rate_hz;
+    if(byId('picoEveryRate')!==document.activeElement)byId('picoEveryRate').value=settings.every_rate_hz;
+    if(byId('picoBufferCapacity')!==document.activeElement)byId('picoBufferCapacity').value=settings.buffer_capacity;
+  }
 }
 function renderSync(){const sync=state.sync,live=state.camera,render=state.render_camera,transport=state.transport||{},rows={'Acquisition target':`${state.pico_controller?.processing_target_hz??200} Hz`,'Measured history rate':sync.sample_rate_hz===null?'—':`${format(sync.sample_rate_hz,1)} Hz`,'Pose transport target':'50 Hz','WebSocket clients':transport.clients??state.clients,'Queued client messages':transport.queued_messages??0,'Coalesced obsolete poses':transport.coalesced_poses??0,'Critical queue overflows':transport.critical_overflows??0,'Configured delay':`${sync.graphics_delay_ms} ms`,'History depth':`${sync.history_duration_seconds} s`,'Stored samples':sync.sample_count,'Oldest sample age':sync.oldest_age_ms===null?'—':`${format(sync.oldest_age_ms,1)} ms`,'Newest sample age':sync.newest_age_ms===null?'—':`${format(sync.newest_age_ms,1)} ms`,'Requested render age':`${sync.requested_render_age_ms} ms`,'Interpolation':sync.interpolation,'Live Pan / Tilt':`${format(live.pan,3)}° / ${format(live.tilt,3)}°`,'Render Pan / Tilt':`${format(render.pan,3)}° / ${format(render.tilt,3)}°`,'Effective difference':sync.effective_difference_ms===null?'—':`${format(sync.effective_difference_ms,1)} ms`};byId('syncDiagnostics').replaceChildren(...Object.entries(rows).flatMap(([key,value])=>{const label=document.createElement('div'),content=document.createElement('div');label.textContent=key;content.textContent=value;return[label,content];}));}
 function renderBrowserMetrics(){const root=byId('browserOutputMetrics');if(!root)return;const rows=[];for(const page of ['gfx','preview','control']){let value=null;try{value=JSON.parse(localStorage.getItem(`kairix.browser_metrics.${page}`)||'null');}catch(_error){}if(!value)continue;rows.push([`${page.toUpperCase()} pose / frame rate`,`${format(value.incoming_pose_hz,1)} / ${format(value.animation_frame_hz,1)} Hz`],[`${page.toUpperCase()} inter-arrival / frame p95`,`${format(value.pose_interarrival_p95_ms,2)} / ${format(value.frame_interval_p95_ms,2)} ms`],[`${page.toUpperCase()} render mean / p95`,`${format(value.render_mean_ms,2)} / ${format(value.render_p95_ms,2)} ms`],[`${page.toUpperCase()} held / missing / stale`,`${value.held_poses} / ${value.missing_poses} / ${value.stale_poses}`],[`${page.toUpperCase()} canvas / DPR`,`${value.canvas_width}×${value.canvas_height} / ${format(value.device_pixel_ratio,2)}`]);}if(!rows.length)rows.push(['Status','Open Preview or GFX to collect browser measurements.']);root.replaceChildren(...rows.flatMap(([label,value])=>{const a=document.createElement('div'),b=document.createElement('div');a.textContent=label;b.textContent=value;return[a,b];}));}
@@ -398,14 +401,7 @@ byId('debugOn').onclick=()=>safe(()=>api('/api/debug/true',{method:'POST'}));byI
 
 async function savePicoProcessing(values){
   const buttons=[byId('savePicoProcessing'),byId('resetPicoProcessing')],feedback=byId('picoProcessingFeedback');
-  buttons.forEach(button=>button.disabled=true);byId('picoProcessingError').textContent='';feedback.textContent='Processing…';feedback.className='status-warn';
-  try{
-    await api('/api/pico/processing',{method:'PATCH',body:JSON.stringify({values})});
-    feedback.textContent='Confirmed';feedback.className='status-ok';
-  }catch(error){
-    byId('picoProcessingError').textContent=String(error);feedback.textContent='Failed';feedback.className='status-bad';
-    buttons.forEach(button=>button.disabled=false);
-  }
+  return runOperationFeedback({controls:buttons,statusNode:feedback,errorNode:byId('picoProcessingError'),operation:()=>api('/api/pico/processing',{method:'PATCH',body:JSON.stringify({values})})});
 }
 byId('savePicoProcessing').onclick=()=>savePicoProcessing({mode:byId('picoProcessingMode').value,latest_rate_hz:Number(byId('picoLatestRate').value),every_rate_hz:Number(byId('picoEveryRate').value),buffer_capacity:Number(byId('picoBufferCapacity').value)});
 byId('resetPicoProcessing').onclick=()=>savePicoProcessing({mode:'latest',latest_rate_hz:200,every_rate_hz:500,buffer_capacity:256});
@@ -446,7 +442,7 @@ function renderState(incoming,event){
     byId('trackingStatus').textContent=state.tracking.valid?(state.camera.world_valid?'Camera tracking ready':'Venue calibration required'):'Camera tracking needs setup';
     byId('trackingStatus').className=state.tracking.valid?(state.camera.world_valid?'status-ok':'status-warn'):'status-bad';
     if(event?.type!=='pose')renderProfiles();
-    renderAxes();renderSync();renderSetupStatus();renderPicoController();
+    renderAxes();renderSync();renderSetupStatus();renderPicoController(event?.type!=='pose');
     const world=state.world_calibrations.active,solution=world.solution;
     byId('live').innerHTML=`<div>Profile</div><div>${escapeHtml(state.profiles.active.name)}</div><div>World calibration</div><div>${escapeHtml(world.name)} · ${state.camera.world_valid?'VALID':'NOT VALID'}</div><div>RMS</div><div>${solution?`${format(solution.rms_angular_error,4)}°`:'—'}</div><div>Camera XYZ</div><div>${format(state.camera.x,2)}, ${format(state.camera.y,2)}, ${format(state.camera.z,2)} m</div><div>Pan</div><div>${format(state.camera.pan,3)}°</div><div>Tilt</div><div>${format(state.camera.tilt,3)}°</div><div>FOV</div><div>${format(state.camera.fov,2)}°</div><div>Clients</div><div>${state.clients}</div>`;
     byId('debugState').textContent=`Debug: ${state.engineering.debug_enabled?'enabled':'disabled'}`;
