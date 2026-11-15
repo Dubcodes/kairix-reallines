@@ -2,3 +2,6 @@
 reallines ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper restart_app
 reallines ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper reboot
 reallines ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper poweroff
+kairix ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper restart_app
+kairix ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper reboot
+kairix ALL=(root) NOPASSWD: /usr/local/libexec/kairix-power-helper poweroff

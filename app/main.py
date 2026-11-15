@@ -22,7 +22,7 @@ from .runtime import imu_status_publication_loop, pose_publication_loop, trackin
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
 from .dot_calibration import DotCalibrationError
-from .power_control import PowerControlError, PowerControlService
+from .power_control import MutationGate, PowerControlError, PowerControlService
 from .browser_diagnostics import BrowserDiagnostics
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +44,7 @@ imu_status_task: asyncio.Task | None = None
 source_manager = TrackingSourceManager()
 store.pico_source_manager = source_manager
 power_control = PowerControlService()
+mutation_gate = MutationGate()
 browser_diagnostics = BrowserDiagnostics()
 
 
@@ -168,6 +169,20 @@ class BrowserMetricsReport(BaseModel):
 
 
 @app.middleware("http")
+async def power_transition_gate(request: Request, call_next):
+    guarded = request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in {
+        "/api/system-power/authorize", "/api/system-power/execute",
+    }
+    if not guarded:
+        return await call_next(request)
+    try:
+        async with mutation_gate.mutation():
+            return await call_next(request)
+    except PowerControlError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=503)
+
+
+@app.middleware("http")
 async def request_logging(request: Request, call_next):
     start = time.monotonic()
     try:
@@ -286,6 +301,8 @@ def _secure_admin_request(request: Request) -> str:
     # not accepted as proof of HTTPS.
     if request.url.scheme != "https":
         raise HTTPException(403, "Secure administration requires direct HTTPS")
+    if request.headers.get("forwarded") or request.headers.get("x-forwarded-proto"):
+        raise HTTPException(403, "Forwarded transport headers are not accepted for secure administration")
     host = request.headers.get("host", "")
     origin = request.headers.get("origin", "")
     if not host or origin != f"https://{host}":
@@ -295,7 +312,8 @@ def _secure_admin_request(request: Request) -> str:
 
 @app.get("/api/system-power/status")
 async def system_power_status(request: Request):
-    return {**power_control.status(), "request_secure": request.url.scheme == "https"}
+    return {**power_control.status(), "request_secure": request.url.scheme == "https",
+            "mutations_blocked": mutation_gate.closing}
 
 
 @app.post("/api/system-power/authorize")
@@ -312,14 +330,25 @@ async def system_power_authorize(body: PowerAuthorize, request: Request):
 @app.post("/api/system-power/execute")
 async def system_power_execute(body: PowerExecute, request: Request, background_tasks: BackgroundTasks):
     client_id = _secure_admin_request(request)
-    async with store.lock:
-        pass  # Wait for any in-flight atomic state write before accepting power loss.
     try:
+        await mutation_gate.begin_transition()
+        async with store.lock:
+            pass  # All admitted writes have drained; finish any final atomic persistence.
         power_control.consume(body.token, body.action, client_id)
-    except PowerControlError as exc:
+    except Exception as exc:
+        await mutation_gate.reopen()
+        if not isinstance(exc, PowerControlError):
+            debug.error("system_power_transition_failed", action=body.action, error=repr(exc))
+            raise HTTPException(500, "Could not prepare the system transition") from exc
         raise HTTPException(403, str(exc)) from exc
     debug.app("system_power_requested", action=body.action, client=client_id)
-    background_tasks.add_task(power_control.execute_consumed, body.action)
+    async def execute_action() -> None:
+        try:
+            await power_control.execute_consumed(body.action)
+        except Exception as exc:
+            await mutation_gate.reopen()
+            debug.error("system_power_helper_failed", action=body.action, error=repr(exc))
+    background_tasks.add_task(execute_action)
     return {"accepted": True, "action": body.action, "message": "System action acknowledged; the connection may close"}
 
 

@@ -3,12 +3,24 @@ import os
 import subprocess
 import sys
 
+SERVICE_CONFIG = "/etc/kairix-reallines/service-name"
+ALLOWED_SERVICES = {"kairix-reallines-dev.service", "kairix-reallines.service"}
 COMMANDS = {
-    "restart_app": ["/usr/bin/systemctl", "restart", "kairix-reallines-dev.service"],
     "reboot": ["/usr/bin/systemctl", "reboot"],
     "poweroff": ["/usr/bin/systemctl", "poweroff"],
 }
 
-if os.geteuid() != 0 or len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
+if os.geteuid() != 0 or len(sys.argv) != 2 or sys.argv[1] not in {"restart_app", *COMMANDS}:
     raise SystemExit(64)
-raise SystemExit(subprocess.run(COMMANDS[sys.argv[1]], check=False).returncode)
+if sys.argv[1] == "restart_app":
+    try:
+        with open(SERVICE_CONFIG, encoding="utf-8") as source:
+            service = source.read().strip()
+    except OSError:
+        raise SystemExit(78)
+    if service not in ALLOWED_SERVICES:
+        raise SystemExit(78)
+    command = ["/usr/bin/systemctl", "restart", service]
+else:
+    command = COMMANDS[sys.argv[1]]
+raise SystemExit(subprocess.run(command, check=False).returncode)

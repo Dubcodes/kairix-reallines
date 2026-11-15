@@ -47,7 +47,7 @@ Group=$DEV_USER
 SupplementaryGroups=gpio input
 WorkingDirectory=$REPO
 Environment=KAIRIX_DATA_DIR=$REPO/data
-ExecStart=$VENV/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+ExecStart=$VENV/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload --no-proxy-headers
 Restart=always
 RestartSec=2
 

@@ -268,7 +268,8 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("/api/system-power/authorize", source)
         self.assertIn("/api/system-power/execute", source)
         self.assertIn('request.url.scheme != "https"', main)
-        self.assertNotIn("x-forwarded-proto", main.lower())
+        self.assertIn('request.headers.get("x-forwarded-proto")', main.lower())
+        self.assertIn("forwarded transport headers are not accepted", main.lower())
 
     def test_rig_geometry_ui_uses_profile_path_and_nine_marks(self):
         calibration = (STATIC / "js" / "calibration.js").read_text(encoding="utf-8")

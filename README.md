@@ -313,21 +313,36 @@ Graphics Editor properties report calibrated camera-to-object 3D/horizontal grou
 
 ## Secure system power administration
 
-Power controls are disabled unless a dedicated administrator credential exists and the page is served by direct HTTPS. The Linux login password is never accepted. The credential file defaults to `/etc/kairix-reallines/admin.json`, outside the repository, Samba share, data directory and diagnostics, and contains only an Argon2id hash. Provision interactively so the secret is not placed in shell history:
+Power controls are disabled unless a dedicated administrator credential exists, the allowlisted helper is available and the page is served by direct HTTPS. The Linux login password is never accepted. The root-owned credential defaults to `/etc/kairix-reallines/admin.json`, outside the repository, Samba share, data directory and diagnostics, and contains only an Argon2id hash. Provision interactively so the secret is not placed in shell history:
 
 ```bash
 cd /home/reallines/kairix-reallines
 sudo .venv/bin/python -m app.power_control provision
 ```
 
-Use direct TLS termination at Uvicorn (or a separately reviewed local reverse-proxy design that preserves the direct secure transport requirement). A practical development route is to create a locally trusted certificate, make its key readable only by the service account, and add `--ssl-keyfile /etc/kairix-reallines/tls/key.pem --ssl-certfile /etc/kairix-reallines/tls/cert.pem` to the service `ExecStart`. RealLines deliberately ignores client-supplied forwarded-protocol headers.
+The resulting file is deliberately mode `0600` and must not be made readable by the service account. Install the optional systemd credential drop-in so systemd supplies a protected runtime copy to the development service:
+
+```bash
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/kairix-reallines-dev.service.d
+sudo install -o root -g root -m 0644 installer/kairix-power-credentials.conf /etc/systemd/system/kairix-reallines-dev.service.d/50-power-credential.conf
+```
+
+For production, use `/etc/systemd/system/kairix-reallines.service.d/50-power-credential.conf` instead. RealLines checks `$CREDENTIALS_DIRECTORY/kairix-admin.json` before the legacy direct path. Missing, unreadable and malformed credentials are reported separately; a normal installation without the drop-in continues with power controls disabled.
+
+Use direct TLS termination at Uvicorn. The generated development and production services include `--no-proxy-headers`; retain it when adding `--ssl-keyfile /etc/kairix-reallines/tls/key.pem --ssl-certfile /etc/kairix-reallines/tls/cert.pem` to `ExecStart`. Client-supplied `Forwarded` and `X-Forwarded-Proto` headers are rejected for power authorization. A reverse proxy requires a separate reviewed design and is not enabled by these instructions.
 
 Privileged installation is separate and manual:
 
 ```bash
 sudo install -o root -g root -m 0755 installer/kairix-power-helper /usr/local/libexec/kairix-power-helper
+sudo install -d -o root -g root -m 0755 /etc/kairix-reallines
+sudo install -o root -g root -m 0644 installer/kairix-power-service-dev /etc/kairix-reallines/service-name
 sudo install -o root -g root -m 0440 installer/kairix-power-sudoers /etc/sudoers.d/kairix-reallines-power
 sudo visudo -cf /etc/sudoers.d/kairix-reallines-power
+sudo systemctl daemon-reload
+sudo systemctl restart kairix-reallines-dev.service
 ```
 
-Remove with `sudo rm /etc/sudoers.d/kairix-reallines-power /usr/local/libexec/kairix-power-helper /etc/kairix-reallines/admin.json` after stopping RealLines. The helper accepts only `restart_app`, `reboot` or `poweroff`; the service remains unprivileged. Authentication is rate-limited, creates a 60-second action/client-bound single-use token, and checks same-origin HTTPS again on execution. Restarting or powering off stops graphics and loses session-only references. Shutdown cannot turn the Pi back on.
+Install `installer/kairix-power-service-production` instead of the development template for `kairix-reallines.service`. The helper refuses missing, malformed or non-allowlisted service configuration and never accepts a service name from HTTP. Remove the sudoers file, helper, service-name file, credential drop-in and administrator credential after stopping RealLines if abandoning power controls.
+
+Authentication is rate-limited, creates a 60-second action/client-bound single-use token, and checks direct same-origin HTTPS again on execution. After acceptance, new mutations are blocked while admitted atomic writes drain. A helper failure reopens writes and is reported; a successful helper dispatch remains labelled as dispatched rather than falsely claiming that restart/shutdown completed. Restarting or powering off stops graphics and loses session-only references. Shutdown cannot turn the Pi back on.
