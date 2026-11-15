@@ -1,4 +1,4 @@
-import {recordIncomingPose} from './browser_metrics.js?v=world-media1';
+import {poseIdentity,recordIncomingPose} from './browser_metrics.js?v=world-media1';
 
 export async function api(path, options={}) {
   const init = { ...options };
@@ -29,6 +29,7 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
   };
   const deliver = (data, type='state') => {
     currentState = data;
+    recordIncomingPose(page,poseIdentity(data));
     try {
       onState(data, {type});
       return true;
@@ -40,7 +41,6 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
   };
   const deliverPose = (pose) => {
     if (!currentState) return;
-    recordIncomingPose(page);
     currentState = {...currentState, ...pose, tracking:{...currentState.tracking, ...pose.tracking, axes:{...currentState.tracking.axes, ...(pose.tracking?.axes||{})}}};
     deliver(currentState, 'pose');
   };

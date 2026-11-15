@@ -23,6 +23,7 @@ from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
 from .dot_calibration import DotCalibrationError
 from .power_control import PowerControlError, PowerControlService
+from .browser_diagnostics import BrowserDiagnostics
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
@@ -43,6 +44,7 @@ imu_status_task: asyncio.Task | None = None
 source_manager = TrackingSourceManager()
 store.pico_source_manager = source_manager
 power_control = PowerControlService()
+browser_diagnostics = BrowserDiagnostics()
 
 
 class CameraUpdate(BaseModel):
@@ -158,6 +160,13 @@ class FrontendLog(BaseModel):
     data: dict = {}
 
 
+class BrowserMetricsReport(BaseModel):
+    client_id: str
+    page: str
+    label: str | None = None
+    metrics: dict
+
+
 @app.middleware("http")
 async def request_logging(request: Request, call_next):
     start = time.monotonic()
@@ -239,6 +248,20 @@ async def get_state():
 @app.get("/api/pose")
 async def get_pose():
     return store.pose_snapshot()
+
+
+@app.get("/api/browser-metrics")
+async def get_browser_metrics():
+    return {"clients": browser_diagnostics.snapshot()}
+
+
+@app.post("/api/browser-metrics")
+async def update_browser_metrics(body: BrowserMetricsReport):
+    try:
+        accepted = browser_diagnostics.report(body.client_id, body.page, body.label, body.metrics)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"accepted": accepted}
 
 
 @app.get("/api/system")
