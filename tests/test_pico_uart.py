@@ -8,7 +8,7 @@ from app.pico_protocol import (
     MAGIC, FRAME_BYTES, PicoPacket, PicoStreamDecoder, crc16_ccitt,
     encode_packet,
 )
-from app.pico_source import PicoUartWorker, STALE_SECONDS
+from app.pico_source import PicoUartWorker, PROCESSING_MAX_AGE_SECONDS, STALE_SECONDS
 from app.pico_processing import DEFAULT_PICO_PROCESSING, normalise_pico_processing
 
 # Exactly the first 63 bytes of the `head | od` capture from the Raspberry Pi.
@@ -178,6 +178,91 @@ class PicoProtocolTests(unittest.TestCase):
         second = worker.consume_snapshots(('pan',), now=now + .004)['pan']
         self.assertEqual((first['raw_count'], second['raw_count']), (5, 6))
         self.assertEqual(worker.status(now=now + .005)['samples_consumed'], 2)
+
+    def test_every_mode_is_freshness_first_at_200_450_and_500_hz(self):
+        for consumer_hz in (200, 450, 500):
+            with self.subTest(consumer_hz=consumer_hz):
+                worker = PicoUartWorker('/dev/null')
+                worker.configure_processing({"mode": "every", "latest_rate_hz": 200,
+                                             "every_rate_hz": consumer_hz, "buffer_capacity": 512})
+                start = time.monotonic()
+                next_consume = start
+                last = None
+                for seq in range(1, 1001):
+                    arrival = start + seq / 500
+                    worker.feed(encode_packet(packet(seq, pan=seq)), now=arrival)
+                    if arrival >= next_consume:
+                        last = worker.consume_snapshots(('pan',), now=arrival)['pan']
+                        next_consume += 1 / consumer_hz
+                self.assertIsNotNone(last)
+                maximum_lag = int(PROCESSING_MAX_AGE_SECONDS * 500) + 2
+                self.assertGreaterEqual(last['raw_count'], 1000 - maximum_lag)
+                status = worker.status(now=start + 2.002)
+                self.assertLessEqual(status['queue_oldest_age_ms'], PROCESSING_MAX_AGE_SECONDS * 1000 + 3)
+                if consumer_hz < 500:
+                    self.assertGreater(status['stale_samples_rejected'], 0)
+                else:
+                    self.assertEqual(status['stale_samples_rejected'], 0)
+
+    def test_every_mode_drops_obsolete_burst_but_keeps_recent_cumulative_position(self):
+        worker = PicoUartWorker('/dev/null')
+        worker.configure_processing({"mode": "every", "latest_rate_hz": 200,
+                                     "every_rate_hz": 200, "buffer_capacity": 256})
+        now = time.monotonic()
+        for seq in range(1, 121):
+            worker.feed(encode_packet(packet(seq, pan=seq * 10)), now=now + seq * .002)
+        snapshot = worker.consume_snapshots(('pan',), now=now + .242)['pan']
+        self.assertGreaterEqual(snapshot['raw_count'], 700)
+        status = worker.status(now=now + .243)
+        self.assertGreater(status['stale_samples_rejected'], 0)
+        self.assertEqual(status['packet_gaps'], 0)
+        self.assertEqual(status['buffer_overflows'], 0)
+
+    def test_queue_is_cleared_on_mode_change_disconnect_restart_and_timestamp_rollback(self):
+        worker = PicoUartWorker('/dev/null')
+        now = time.monotonic()
+        worker.configure_processing({"mode": "every", "latest_rate_hz": 200,
+                                     "every_rate_hz": 200, "buffer_capacity": 64})
+        worker.feed(encode_packet(packet(1, session=1, pan=10)), now=now)
+        worker.feed(encode_packet(packet(2, session=1, pan=20)), now=now + .002)
+        worker.configure_processing({"mode": "latest", "latest_rate_hz": 200,
+                                     "every_rate_hz": 200, "buffer_capacity": 64})
+        self.assertEqual(worker.status(now=now + .003)['buffer_occupancy'], 0)
+        worker.feed(encode_packet(packet(3, session=1, pan=30)), now=now + .004)
+        worker.stop()
+        self.assertEqual(worker.status(now=now + .005)['buffer_occupancy'], 0)
+        self.assertFalse(worker.snapshot('pan', now=now + .005)['driver_alive'])
+
+        restarted = PicoUartWorker('/dev/null')
+        restarted.configure_processing({"mode": "every", "latest_rate_hz": 200,
+                                         "every_rate_hz": 200, "buffer_capacity": 64})
+        restarted.feed(encode_packet(packet(1, session=10, pan=100)), now=now)
+        restarted.feed(encode_packet(packet(2, session=10, pan=200)), now=now + .002)
+        restarted.feed(encode_packet(packet(1, session=11, pan=900)), now=now + .004)
+        current = restarted.consume_snapshots(('pan',), now=now + .005)['pan']
+        self.assertEqual((current['raw_count'], current['pico_session']), (900, 11))
+
+        restarted.feed(encode_packet(packet(2, session=11, pan=901, pico_us=100)), now=now + .006)
+        rollback = restarted.consume_snapshots(('pan',), now=now + .007)['pan']
+        self.assertEqual(rollback['raw_count'], 901)
+        self.assertFalse(rollback['referenced'])
+
+    def test_stale_consumer_invalidates_reference_and_clears_queue_once(self):
+        worker = PicoUartWorker('/dev/null')
+        now = time.monotonic()
+        worker.configure_processing({"mode": "every", "latest_rate_hz": 200,
+                                     "every_rate_hz": 200, "buffer_capacity": 64})
+        worker.feed(encode_packet(packet(1, pan=11)), now=now)
+        worker.set_reference('pan', 0)
+        stale = worker.consume_snapshots(('pan',), now=now + STALE_SECONDS + .001)['pan']
+        self.assertFalse(stale['driver_alive'])
+        self.assertFalse(stale['referenced'])
+        first = worker.status(now=now + STALE_SECONDS + .002)
+        worker.consume_snapshots(('pan',), now=now + STALE_SECONDS + .010)
+        second = worker.status(now=now + STALE_SECONDS + .011)
+        self.assertEqual(first['link_timeouts'], 1)
+        self.assertEqual(second['link_timeouts'], 1)
+        self.assertEqual(second['buffer_occupancy'], 0)
 
     def test_processing_mode_change_preserves_reference_and_mapping_counts(self):
         worker = PicoUartWorker('/dev/null')

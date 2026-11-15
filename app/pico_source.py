@@ -21,6 +21,7 @@ AXIS_NAMES = ("pan", "tilt", "zoom")
 DEFAULT_DEVICE = "/dev/serial0"
 BAUD = 1_000_000
 STALE_SECONDS = 0.35
+PROCESSING_MAX_AGE_SECONDS = 0.10
 FIRMWARE_NOMINAL_RATE_HZ = 500
 
 
@@ -56,11 +57,32 @@ class PicoUartWorker:
         self._samples_consumed = 0
         self._processing_discards = 0
         self._buffer_overflows = 0
+        self._stale_sample_rejections = 0
+        self._buffer_clears = 0
         self._link_timeouts = 0
+
+    def _clear_processing_queue_locked(self, *, stale: bool = False) -> int:
+        discarded = len(self._queue)
+        if discarded:
+            self._queue.clear()
+            self._processing_discards += discarded
+            self._stale_sample_rejections += discarded if stale else 0
+            self._buffer_clears += 1
+        return discarded
+
+    def _invalidate_link_locked(self, *, timeout: bool = False) -> None:
+        self._clear_processing_queue_locked(stale=True)
+        self._references.clear()
+        self._packet = None
+        self._received_at = None
+        if timeout:
+            self._link_timeouts += 1
 
     def configure_processing(self, values: dict | None) -> dict:
         settings = normalise_pico_processing(values)
         with self._lock:
+            if settings["mode"] != self._processing["mode"]:
+                self._clear_processing_queue_locked()
             capacity = settings["buffer_capacity"]
             while len(self._queue) > capacity:
                 self._queue.popleft()
@@ -88,8 +110,7 @@ class PicoUartWorker:
         self._thread = None
         with self._lock:
             self._connected = False
-            self._received_at = None
-            self._references.clear()
+            self._invalidate_link_locked()
 
     def _open_uart(self) -> int:
         # Import only on Linux; packet parsing/tests must also run on Windows.
@@ -131,8 +152,7 @@ class PicoUartWorker:
             except Exception as exc:
                 with self._lock:
                     self._connected = False
-                    self._received_at = None
-                    self._references.clear()  # A broken serial connection must require re-reference.
+                    self._invalidate_link_locked()
                     self._last_error = str(exc)[:300]
             finally:
                 if fd is not None:
@@ -150,14 +170,14 @@ class PicoUartWorker:
                 # the host wasn't observing it. Keep measurements but invalidate
                 # pose references until deliberately re-established.
                 if self._received_at is not None and arrival - self._received_at > STALE_SECONDS:
-                    self._references.clear()
-                    self._link_timeouts += 1
+                    self._invalidate_link_locked(timeout=True)
                 # Even a pathological reused random session must not preserve
                 # references if the Pico time goes backwards while sequence rises.
                 if (self._packet is not None and self._session_id == packet.session_id
                         and packet.pico_us < self._packet.pico_us
                         and ((packet.sequence - self._packet.sequence) & 0xFFFFFFFF) < 0x80000000):
                     self._references.clear()
+                    self._clear_processing_queue_locked()
                     self._restarts += 1
                     self._last_sequence = None
                     self._last_press_counts = None
@@ -166,6 +186,7 @@ class PicoUartWorker:
                         self._restarts += 1
                     self._session_id = packet.session_id
                     self._references.clear()
+                    self._clear_processing_queue_locked()
                     self._last_sequence = None
                     self._last_press_counts = None
                 if self._last_sequence is not None:
@@ -245,6 +266,8 @@ class PicoUartWorker:
     def consume_snapshots(self, axes: tuple[str, ...], now: float | None = None) -> dict[str, dict]:
         now = time.monotonic() if now is None else float(now)
         with self._lock:
+            if self._received_at is not None and now - self._received_at > STALE_SECONDS:
+                self._invalidate_link_locked(timeout=True)
             packet, received_at = self._packet, self._received_at
             if self._queue:
                 if self._processing["mode"] == "latest":
@@ -253,6 +276,10 @@ class PicoUartWorker:
                     self._processing_discards += skipped
                     self._queue.clear()
                 else:
+                    while len(self._queue) > 1 and now - self._queue[0][1] > PROCESSING_MAX_AGE_SECONDS:
+                        self._queue.popleft()
+                        self._processing_discards += 1
+                        self._stale_sample_rejections += 1
                     packet, received_at = self._queue.popleft()
                 self._samples_consumed += 1
                 self._processing_latencies.append(max(0.0, (now - received_at) * 1000.0))
@@ -278,6 +305,7 @@ class PicoUartWorker:
             target_interval = 1000.0 / active_processing_rate(self._processing)
             jitter = sorted(abs(value - target_interval) for value in self._processing_intervals)
             latencies = sorted(self._processing_latencies)
+            queue_age = max(0.0, (now - self._queue[0][1]) * 1000.0) if self._queue else 0.0
             percentile = lambda values: round(values[min(len(values) - 1, int((len(values) - 1) * .95))], 3) if values else None
             return {
                 "device": self.device,
@@ -306,8 +334,13 @@ class PicoUartWorker:
                 "buffer_occupancy": len(self._queue),
                 "buffer_capacity": self._processing["buffer_capacity"],
                 "buffer_overflows": self._buffer_overflows,
+                "stale_samples_rejected": self._stale_sample_rejections,
+                "buffer_clears": self._buffer_clears,
+                "queue_oldest_age_ms": round(queue_age, 3),
                 "processing_latency_ms_p95": percentile(latencies),
                 "processing_jitter_ms_p95": percentile(jitter),
+                "acquisition_rate_hz": consumed_rate,
+                "link_health": "RECEIVING" if self._fresh(now) else "WAITING" if self._connected else "DISCONNECTED",
                 "processing_settings": deepcopy(self._processing),
                 "link_timeouts": self._link_timeouts,
                 "counts": {axis: getattr(packet, axis) if packet else None for axis in AXIS_NAMES},
