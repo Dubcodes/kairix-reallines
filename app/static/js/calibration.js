@@ -8,6 +8,7 @@ const byId=id=>document.getElementById(id);
 const targets=['top_left','top_center','top_right','middle_left','center','middle_right','bottom_left','bottom_center','bottom_right'];
 const targetLabel=value=>value.replaceAll('_',' ').toUpperCase();
 let state=null,applying=false;
+let syncQueue=Promise.resolve(),pendingDelay=null;
 const dotCalibration=new DotCalibrationUi(byId);
 const measuredTargets=new MeasuredTargetUi(byId);
 const updateDotCalibration=dotCalibration.updateState.bind(dotCalibration);
@@ -32,6 +33,8 @@ function setInput(selector,value){const input=document.querySelector(selector);i
 function renderCalibration(){
   const collection=state.world_calibrations,calibration=collection.active,solution=calibration.solution;
   byId('activeProfile').textContent=state.profiles.active.name;
+  const delayInput=byId('graphicsDelay');if(delayInput!==document.activeElement&&pendingDelay===null)delayInput.value=state.sync.graphics_delay_ms;
+  if(pendingDelay===null){byId('syncStatus').textContent=`Saved · ${state.sync.interpolation} · effective ${state.sync.effective_difference_ms===null?'—':format(state.sync.effective_difference_ms,1)} ms`;byId('syncStatus').className=`small ${state.sync.interpolation==='OK'?'status-ok':'status-warn'}`;}
   const identityMatch=collection.profile_match&&collection.fingerprint_match&&collection.rig_match;
   const worldReady=calibration.valid&&identityMatch&&collection.reference_match;
   const experimental=worldReady&&solution?.experimental_review_only===true;
@@ -112,3 +115,12 @@ byId('generateSynthetic').onclick=()=>safe(()=>api('/api/world-calibration/synth
 document.querySelectorAll('[data-mark]').forEach(button=>button.onclick=()=>safe(()=>api('/api/calibration/mark',{method:'POST',body:JSON.stringify({mark:button.dataset.mark})})));
 byId('resetDirection').onclick=()=>safe(()=>api('/api/calibration/reset',{method:'POST'}));
 for(const axis of ['pan','tilt'])byId(axis).addEventListener('input',event=>{if(!applying)safe(()=>api('/api/camera',{method:'POST',body:JSON.stringify({[axis]:+event.target.value})}));});
+
+function setGraphicsDelay(value){
+  const delay=Math.max(0,Math.min(2000,Math.round(+value||0))),input=byId('graphicsDelay'),statusNode=byId('syncStatus');pendingDelay=delay;input.value=delay;statusNode.textContent='Saving…';statusNode.className='small status-warn';
+  syncQueue=syncQueue.catch(()=>{}).then(()=>api('/api/sync',{method:'PATCH',body:JSON.stringify({values:{graphics_delay_ms:delay}})})).then(()=>{statusNode.textContent=`Saved · ${delay} ms`;statusNode.className='small status-ok';}).catch(reason=>{statusNode.textContent=`Failed · ${reason}`;statusNode.className='small status-bad';logFrontend('calibration','graphics_delay_update_failed',{error:String(reason)});}).finally(()=>{pendingDelay=null;});return syncQueue;
+}
+byId('graphicsDelay').addEventListener('change',event=>setGraphicsDelay(event.target.value));
+byId('graphicsDelay').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();setGraphicsDelay(event.target.value);}});
+document.querySelectorAll('[data-delay-step]').forEach(button=>button.onclick=()=>setGraphicsDelay((pendingDelay??state.sync.graphics_delay_ms)+Number(button.dataset.delayStep)));
+byId('resetDelay').onclick=()=>setGraphicsDelay(0);

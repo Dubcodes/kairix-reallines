@@ -2,7 +2,7 @@ import {api,logFrontend} from './common.js?v=world-media1';
 import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
-  rectangleTemplatePoints,rmsOverlayError,withoutObservation,replaceObservation,nudgeDotPointPx,
+  rectangleTemplatePoints,rmsOverlayError,withoutObservation,replaceObservation,nudgeDotPointPx,magnifierCrop,
 } from './dot_lock.js?v=world-media1';
 
 const clone=value=>structuredClone(value);
@@ -21,6 +21,8 @@ export class DotCalibrationUi {
     this.anchorObservationId=null;
     this.selectedObservationId=null;
     this.editingObservationId=null;
+    this.quality=null;
+    this.visionCandidate=null;
     this.lastOverlayAnchorId=undefined;
     this.overlayTimer=null;
     this.controlsBound=false;
@@ -123,7 +125,7 @@ export class DotCalibrationUi {
     id('newFreeDotTarget').onclick=()=>this.newTarget('free');
     id('newRectangleDotTarget').onclick=()=>this.newTarget('rectangle');
     id('deleteDotTarget').onclick=()=>this.deleteTarget();
-    id('dotTargetSelect').onchange=async event=>{this.data.active_target_id=event.target.value||null;this.selectedObservationId=null;this.editingObservationId=null;this.cancelEdit();await this.persist();this.render();};
+    id('dotTargetSelect').onchange=async event=>{this.data.active_target_id=event.target.value||null;this.selectedObservationId=null;this.editingObservationId=null;this.quality=null;this.cancelEdit();await this.persist();this.render();};
     id('addDotLock').onclick=()=>{if(!this.activeTarget())return;this.editor.adding=true;this.editor.editing=true;this.setStatus('CLICK THE VIEWPORT TO PLACE THE NEW MARKER');this.render();};
     id('deleteDotLock').onclick=()=>this.deleteSelectedMarker();
     id('prepareDotObservation').onclick=()=>this.prepareObservation();
@@ -138,6 +140,10 @@ export class DotCalibrationUi {
     id('dotOverlayScale').onchange=async event=>{
       await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_scale:Number(event.target.value)}})});
     };
+    id('dotMarkerWedges').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_wedges:Number(event.target.value)}})});};
+    id('dotMarkerOpacity').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_opacity:Number(event.target.value)}})});};
+    id('dotMagnifierEnabled').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{magnifier_enabled:event.target.checked}})});};
+    id('dotMagnifierScale').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{magnifier_scale:Number(event.target.value)}})});};
     id('dotOverlayLabels').onchange=async event=>{
       await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_labels:event.target.checked}})});
     };
@@ -162,6 +168,14 @@ export class DotCalibrationUi {
     id('restorePreviousDotWorld').onclick=()=>this.restorePreviousWorld();
     id('editSavedDotObservation').onclick=()=>this.editSelectedObservation();
     id('clearSavedDotReview').onclick=()=>this.selectObservation(null);
+    id('calculateCalibrationQuality').onclick=()=>this.calculateQuality();
+    id('startVisionCalibration').onclick=()=>this.visionAction('/api/vision-calibration/start');
+    id('stopVisionCalibration').onclick=()=>this.visionAction('/api/vision-calibration/stop');
+    id('saveVisionObs').onclick=()=>this.saveVisionObs();
+    id('captureVisionObs').onclick=()=>this.captureVisionObs();
+    id('teachVisionTarget').onclick=()=>this.teachVisionTarget();
+    id('analyseVisionStill').onclick=()=>this.analyseVisionStill();
+    id('useVisionCandidate').onclick=()=>this.useVisionCandidate();
     id('dotEdgeMidpoints').addEventListener('change',()=>this.toggleEdgeMidpoints());
     const canvas=id('dotLockCanvas');
     canvas.addEventListener('pointerdown',event=>this.pointerDown(event));
@@ -278,7 +292,7 @@ export class DotCalibrationUi {
     // previously selected; that made off-screen-marker editing unpredictable.
     this.editor.selected=null;this.editor.dragging=false;this.updateOverlay(true);this.render();
   }
-  pointerMove(event){if(!this.editor.dragging||!this.editor.selected)return;this.editor.draft[this.editor.selected]=this.pointerPoint(event);this.updateOverlay();this.draw();this.renderMarkerCoordinates();}
+  pointerMove(event){if(!this.editor.dragging||!this.editor.selected)return;this.editor.draft[this.editor.selected]={...this.pointerPoint(event),method:'manual'};this.updateOverlay();this.draw();this.renderMarkerCoordinates();}
   pointerUp(event){if(!this.editor.dragging)return;this.editor.dragging=false;this.byId('dotLockCanvas').releasePointerCapture?.(event.pointerId);this.updateOverlay(true);this.render();}
 
   keyDown(event){
@@ -302,6 +316,7 @@ export class DotCalibrationUi {
     }
     const coordinate=axis==='X'?'x':'y';
     this.editor.draft[id][coordinate]=n/denominator;
+    this.editor.draft[id].method='manual';delete this.editor.draft[id].confidence;
     this.updateOverlay();this.draw();this.renderMarkerCoordinates();
   }
 
@@ -325,7 +340,7 @@ export class DotCalibrationUi {
   }
 
   observationPoints(){
-    return Object.fromEntries([...this.editor.enabled].filter(id=>this.editor.draft[id]).map(id=>[id,{x:Number(this.editor.draft[id].x),y:Number(this.editor.draft[id].y)}]));
+    return Object.fromEntries([...this.editor.enabled].filter(id=>this.editor.draft[id]).map(id=>{const point=this.editor.draft[id];const value={x:Number(point.x),y:Number(point.y)};if(point.method)value.method=point.method;if(Number.isFinite(Number(point.confidence)))value.confidence=Number(point.confidence);return[id,value];}));
   }
 
   selectedSavedObservation(){
@@ -362,11 +377,12 @@ export class DotCalibrationUi {
   async saveObservation(){
     const target=this.activeTarget();if(!target||!this.editor.editing||!this.editor.capture){this.setStatus('PRESS “ADJUST THIS VIEW” BEFORE SAVING AN OBSERVATION','bad');return;}
     const points=this.observationPoints(),count=Object.keys(points).length,baseline=target.observations.length===0;
+    if(this.editor.capture_method==='vision'&&this.editor.vision_validated!==true){this.setStatus('VISION RESULT IS NOT VALIDATED — VERIFY CAMERA SETTLING AND MARKER IDENTITIES, OR CAPTURE AGAIN','bad');return;}
     const captured=this.editor.capture.axes||{},now=this.currentAxisCounts();
     for(const [axis,tolerance] of [['pan',3],['tilt',3],['zoom',8]]){
       const saved=axis==='zoom'?captured.zoom?.relative_count:captured[axis]?.raw_count;
       const current=now[axis];
-      if(saved!==null&&saved!==undefined&&current!==null&&current!==undefined&&Math.abs(Number(current)-Number(saved))>tolerance){
+      if(this.editor.capture_method!=='vision'&&saved!==null&&saved!==undefined&&current!==null&&current!==undefined&&Math.abs(Number(current)-Number(saved))>tolerance){
         this.setStatus(`CAMERA ${axis.toUpperCase()} MOVED DURING DOT ADJUSTMENT — CANCEL AND RECAPTURE THIS VIEW`,'bad');return;
       }
     }
@@ -380,7 +396,7 @@ export class DotCalibrationUi {
       observation={...clone(existing),points};
       target.observations=replaceObservation(target.observations,observation);
     }else{
-      observation={id:uid('obs'),...clone(this.editor.capture),points};
+      observation={id:uid('obs'),...clone(this.editor.capture),points,capture_method:this.editor.capture_method||'manual'};
       target.observations.push(observation);
     }
     this.selectedObservationId=observation.id;
@@ -543,6 +559,10 @@ export class DotCalibrationUi {
     const overlay=this.state?.calibration_overlay||{};
     id('dotOverlayGfx').checked=!!overlay.enabled;
     id('dotOverlayScale').value=String(overlay.marker_scale??2);
+    id('dotMarkerWedges').value=String(overlay.marker_wedges??4);
+    id('dotMarkerOpacity').value=String(overlay.marker_opacity??.95);
+    id('dotMagnifierEnabled').checked=overlay.magnifier_enabled===true;
+    id('dotMagnifierScale').value=String(overlay.magnifier_scale??6);
     id('dotOverlayLabels').checked=overlay.show_labels!==false;
     id('dotOverlayVectors').checked=overlay.show_vectors!==false;
     id('dotGroundGridHere').checked=!!overlay.ground_grid_calibration;
@@ -621,6 +641,93 @@ export class DotCalibrationUi {
       :`O${index} HISTORICAL VIEW — ${pose}. Gold markers show SAVED IMAGE COORDINATES, not a live alignment. Return to these encoder counts before editing.`;
   }
 
+  visionStatus(message,kind=''){
+    const node=this.byId('visionCalibrationStatus');node.textContent=message;node.className=`small ${kind}`;
+  }
+
+  async visionAction(path){
+    try{const result=await api(path,{method:'POST'});this.visionStatus(result.active?'Active · still capture only':'Inactive','');}
+    catch(error){this.visionStatus(String(error),'form-error');}
+  }
+
+  async saveVisionObs(){
+    try{
+      const result=await api('/api/vision-calibration/obs',{method:'PATCH',body:JSON.stringify({values:{host:this.byId('visionObsHost').value,port:Number(this.byId('visionObsPort').value),source:this.byId('visionObsSource').value,password:this.byId('visionObsPassword').value}})});
+      this.byId('visionObsPassword').value='';this.visionStatus(`OBS configured · ${result.host}:${result.port} · ${result.source}`);
+    }catch(error){this.visionStatus(String(error),'form-error');}
+  }
+
+  async visionUpload(path,form){
+    const response=await fetch(path,{method:'POST',body:form});if(!response.ok)throw new Error(`${response.status} ${await response.text()}`);return response.json();
+  }
+
+  async teachVisionTarget(){
+    const file=this.byId('visionStillFile').files?.[0],target=this.activeTarget();
+    const source=this.editor.editing?this.observationPoints():(this.selectedSavedObservation()?.points||{});
+    if(!file||!target||Object.keys(source).length<3){this.visionStatus('Choose a still and provide at least three current/selected gold markers first','form-error');return;}
+    const form=new FormData();form.append('file',file);form.append('target_id',target.id);form.append('markers_json',JSON.stringify(source));
+    try{const result=await this.visionUpload('/api/vision-calibration/teach',form);this.visionStatus(`Taught ${(result.marker_ids||[]).length} marker identities at ${result.image_width}×${result.image_height}`);}
+    catch(error){this.visionStatus(String(error),'form-error');}
+  }
+
+  async analyseVisionStill(){
+    const file=this.byId('visionStillFile').files?.[0];if(!file){this.visionStatus('Choose an imported still first','form-error');return;}
+    const form=new FormData();form.append('file',file);
+    try{this.visionStatus('Analysing imported still…');this.showVisionResult(await this.visionUpload('/api/vision-calibration/analyse',form));}
+    catch(error){this.visionStatus(String(error),'form-error');}
+  }
+
+  async captureVisionObs(){
+    try{this.visionStatus('Capturing two camera-only OBS frames and checking settling…');this.showVisionResult(await api('/api/vision-calibration/capture-obs',{method:'POST'}));}
+    catch(error){this.visionStatus(String(error),'form-error');}
+  }
+
+  showVisionResult(result){
+    this.visionCandidate=result;const rows=[['Markers',Object.keys(result.points||{}).length],['Minimum confidence',fmt((result.minimum_confidence||0)*100,1)+'%'],['Identity ambiguity',result.ambiguous?'YES — REJECTED':'No'],['Video settled',result.frame_stability?.stable?'Yes':result.frame_stability?.reason||'Not verified'],['Encoder settled',result.frame_stability?.encoder_stable===undefined?'Not measured':result.frame_stability.encoder_stable?'Yes':'No'],['Candidate',result.accepted_for_review?'VALIDATED FOR MANUAL REVIEW':'REVIEW ONLY — CANNOT SAVE']];
+    const root=this.byId('visionDetectionResult');root.replaceChildren(...rows.flatMap(([a,b])=>{const x=document.createElement('div'),y=document.createElement('div');x.textContent=a;y.textContent=b;return[x,y];}));
+    this.byId('useVisionCandidate').disabled=!Object.keys(result.points||{}).length;this.visionStatus(result.accepted_for_review?'Detection ready for operator review':'Detection needs manual review or a stable recapture',result.accepted_for_review?'':'form-error');
+  }
+
+  useVisionCandidate(){
+    const result=this.visionCandidate,target=this.activeTarget();if(!result||!target||result.target_id!==target.id){this.visionStatus('Detected result does not match the active target','form-error');return;}
+    const capture=clone(result.capture_context||{});delete capture.tracking_valid;
+    this.editingObservationId=null;this.editor={editing:true,adding:false,dragging:false,capture,draft:clone(result.points),enabled:new Set(Object.keys(result.points||{})),selected:Object.keys(result.points||{})[0]??null,capture_method:'vision',vision_validated:result.accepted_for_review===true};
+    this.updateOverlay(true);this.render();this.setStatus(result.accepted_for_review?'VISION MARKERS LOADED — VERIFY IDENTITIES AND ALIGNMENT BEFORE SAVING':'UNVALIDATED VISION MARKERS LOADED FOR REVIEW ONLY — THEY CANNOT BE SAVED','warn');
+  }
+
+  async calculateQuality(exclusion=null){
+    const target=this.activeTarget();if(!target)return;
+    const status=this.byId('calibrationQualityStatus');status.textContent=exclusion?'Testing exclusion…':'Calculating…';
+    try{
+      this.quality=await api('/api/world-calibration/dot-calibration/quality',{method:'POST',body:JSON.stringify({values:{target_id:target.id,...(exclusion||{})}})});
+      status.textContent='Review-only result — saved calibration unchanged';this.renderQuality();
+    }catch(error){status.textContent=String(error);this.setStatus(String(error),'bad');}
+  }
+
+  renderQuality(){
+    const observationRoot=this.byId('calibrationObservationQuality'),markerRoot=this.byId('calibrationMarkerQuality'),exclusionRoot=this.byId('calibrationExclusionResult');
+    observationRoot.replaceChildren();markerRoot.replaceChildren();exclusionRoot.textContent='';
+    const quality=this.quality&&this.quality.target_id===this.activeTarget()?.id?this.quality.baseline:null;if(!quality)return;
+    const obsIndex=new Map((this.activeTarget()?.observations||[]).map((obs,index)=>[obs.id,index+1]));
+    const row=(values,klass='')=>{const node=document.createElement('div');node.className=`quality-row ${klass}`;for(const value of values){const cell=document.createElement('div');if(value instanceof Node)cell.append(value);else cell.textContent=String(value);node.append(cell);}return node;};
+    observationRoot.append(row(['View','Markers','RMS','Worst','Pose / refs','Review'],'header'));
+    for(const view of quality.views||[]){
+      const button=document.createElement('button');button.type='button';button.textContent='Test excluding view';button.onclick=()=>this.calculateQuality({observation_id:view.observation_id});
+      const currentRefs=this.referenceIds(),savedRefs=view.references||{},refsCurrent=['pan','tilt','zoom'].every(axis=>(savedRefs[axis]??null)===(currentRefs[axis]??null));
+      const pose=`P ${fmt(view.camera?.pan,2)}° T ${fmt(view.camera?.tilt,2)}° · refs ${refsCurrent?'current':'changed'} · ${view.diversity?.contribution||'—'}`;
+      const klass=view.rms_pixel_error>6?'high':view.rms_pixel_error>2?'review':'good';
+      const node=row([`O${obsIndex.get(view.observation_id)??'?'}`,view.marker_count,`${fmt(view.rms_pixel_error,2)} px`,`${view.worst_marker||'—'} · ${fmt(view.max_pixel_error,2)} px`,pose,button],klass);
+      node.onclick=event=>{if(event.target!==button)this.selectObservation(view.observation_id);};observationRoot.append(node);
+    }
+    markerRoot.append(row(['View','Marker','ΔX','ΔY','Residual','Review'],'header'));
+    for(const marker of quality.markers||[]){
+      const button=document.createElement('button');button.type='button';button.textContent='Test excluding';button.onclick=()=>this.calculateQuality({observation_id:marker.observation_id,marker_id:marker.marker_id});
+      const klass=marker.residual_px>8?'high':marker.residual_px>3?'review':'good';
+      markerRoot.append(row([`O${obsIndex.get(marker.observation_id)??'?'}`,`${marker.marker_id} · ${marker.method}`,`${fmt(marker.dx_px,2)} px`,`${fmt(marker.dy_px,2)} px`,`${fmt(marker.residual_px,2)} px · ${marker.inside_image?'in image':'outside'}`,button],klass));
+    }
+    const result=this.quality.exclusion;if(result){const verdict=result.supports_exclusion?'The other observations support reviewing this measurement.':'The full observation set does not support excluding this measurement.';exclusionRoot.textContent=`Review-only ${result.kind} test: ${fmt(result.baseline_rms_px,2)} → ${fmt(result.all_observations_rms_px,2)} px RMS on all saved points. ${verdict}`;}
+  }
+
   renderWorldCandidate(){
     const node=this.byId('dotWorldCandidate'),candidate=this.data.world_candidate;
     const active=this.state?.world_calibrations?.active?.solution;
@@ -692,13 +799,24 @@ export class DotCalibrationUi {
     const predicted=projectModelPoints(target.model_points||{},this.state.render_camera,width,height);
     const anchor=this.anchorObservation(),observed=this.editor.editing?this.editor.draft:(anchor?.points||{});
     const samePose=!anchor||this.observationMatchesCurrentPose(anchor);
-    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers,markerScale:overlay.marker_scale??1,showLabels:overlay.show_labels!==false,showVectors:samePose&&overlay.show_vectors!==false});
+    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers,markerScale:overlay.marker_scale??1,markerOpacity:overlay.marker_opacity??.95,markerWedges:overlay.marker_wedges??4,showLabels:overlay.show_labels!==false,showVectors:samePose&&overlay.show_vectors!==false});
     const error=samePose?rmsOverlayError(predicted,this.editor.editing?this.observationPoints():observed,1920,1080):null;
     if(error!==null){ctx.save();ctx.fillStyle='rgba(7,16,24,.84)';ctx.fillRect(10,10,260,34);ctx.fillStyle=this.editor.editing?'#ffce67':'#9fe6ff';ctx.font='700 14px system-ui';ctx.fillText(`${this.editor.editing?'Current':'Saved-view'} error ${fmt(error,1)} px RMS`,20,32);ctx.restore();}
+    this.drawMagnifier(canvas,observed,overlay);
+  }
+
+  drawMagnifier(sourceCanvas,observed,overlay){
+    const panel=this.byId('dotMagnifierPanel'),target=this.byId('dotMagnifierCanvas'),point=observed?.[this.editor.selected];
+    panel.hidden=overlay.magnifier_enabled!==true||!point;if(panel.hidden)return;
+    const ctx=target.getContext('2d'),width=target.width,height=target.height,magnification=overlay.magnifier_scale??6;ctx.clearRect(0,0,width,height);
+    const image=document.querySelector('[data-preview-image]:not([hidden])'),video=document.querySelector('[data-preview-video]:not([hidden])'),media=video?.readyState>=2?video:image?.complete?image:null;
+    if(media){const mw=media.videoWidth||media.naturalWidth,mh=media.videoHeight||media.naturalHeight;if(mw&&mh){const crop=magnifierCrop(point,mw,mh,magnification);try{ctx.drawImage(media,crop.x,crop.y,crop.width,crop.height,0,0,width,height);}catch(_error){}}}
+    const crop=magnifierCrop(point,sourceCanvas.width,sourceCanvas.height,magnification);ctx.drawImage(sourceCanvas,crop.x,crop.y,crop.width,crop.height,0,0,width,height);
+    const cx=width/2,cy=height/2,gap=5,arm=22;ctx.save();ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cx-arm,cy);ctx.lineTo(cx-gap,cy);ctx.moveTo(cx+gap,cy);ctx.lineTo(cx+arm,cy);ctx.moveTo(cx,cy-arm);ctx.lineTo(cx,cy-gap);ctx.moveTo(cx,cy+gap);ctx.lineTo(cx,cy+arm);ctx.stroke();ctx.restore();
   }
 
   render(){
-    if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSavedReview();this.renderSolution();this.renderWorldCandidate();
+    if(!this.state)return;this.renderTargetFields();this.renderMarkerList();this.renderObservations();this.renderSavedReview();this.renderSolution();this.renderWorldCandidate();this.renderQuality();
     const viewport=this.byId('dotLockViewport');viewport.classList.toggle('editing',this.editor.editing);viewport.classList.toggle('dragging',this.editor.dragging);this.draw();this.renderMarkerCoordinates();
   }
 

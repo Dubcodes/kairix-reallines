@@ -145,8 +145,9 @@ class RealBrowserSmokeCase(unittest.TestCase):
         page.locator("#items .tree-row").last.click()
         page.wait_for_selector("#distanceDiagnostics")
         self.assertIn("3D distance", page.text_content("#distanceDiagnostics"))
+        page.goto(f"{self.base}/calibration");page.wait_for_selector("#graphicsDelay:not([disabled])")
         page.fill("#graphicsDelay", "37");page.locator("#graphicsDelay").press("Enter")
-        page.wait_for_timeout(150)
+        page.wait_for_function("document.querySelector('#syncStatus').textContent.includes('Saved')")
         self.assertEqual(page.input_value("#graphicsDelay"), "37")
 
     def test_group_visibility_reports_parent_mask_without_changing_child_visibility(self):

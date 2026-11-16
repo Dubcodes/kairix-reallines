@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {
   clearDotLockSession,createDotLockSession,dotLockRay,dotLockReferencesMatch,
-  dotLockWorldPoint,normalizedScreenPoint,projectDotLockSession,
+  dotLockWorldPoint,normalizedScreenPoint,projectDotLockSession,wedgeMarkerGeometry,
+  shouldHidePredictedMarker,magnifierCrop,
 } from '../app/static/js/dot_lock.js';
-import {browserMetricsSummary,createBrowserMetrics,noteIncomingPose,noteRenderedFrame,poseIdentity} from '../app/static/js/browser_metrics.js';
+import {SUPPORTED_DIAGNOSTIC_PAGES,browserMetricsSummary,createBrowserMetrics,noteIncomingPose,noteRenderedFrame,poseIdentity} from '../app/static/js/browser_metrics.js';
 
 async function browserModule(path) {
   const source=await readFile(new URL(path,import.meta.url),'utf8');
@@ -138,6 +139,32 @@ console.log('editor math tests passed');
   assert.equal(summary.duplicate_pose_messages,1);
   assert.equal(summary.invalid_tracking_frames,1);
   assert.equal(summary.canvas_width,1920);
+  assert.equal(summary.animation_frame_hz_5s,50);
+  assert.equal(summary.incoming_pose_hz_5s,50);
+  assert.equal(summary.presentation_timing_available,false);
+  assert.equal(SUPPORTED_DIAGNOSTIC_PAGES.has('calibration'),false);
   assert.equal(poseIdentity({render_camera:{render_timestamp:12.5,interpolation_status:'OK',valid:true}}),'12.5:OK:valid');
   assert.equal(poseIdentity({render_camera:{pan:1}}),null);
+}
+
+{
+  const four=wedgeMarkerGeometry(100,100,20,4,4),three=wedgeMarkerGeometry(100,100,20,3,4);
+  assert.equal(four.length,4);assert.equal(three.length,3);
+  for(const wedge of [...four,...three])assert.ok(wedge.every(point=>Math.hypot(point.x-100,point.y-100)>=3.999),'wedge geometry preserves the clear centre gap');
+  assert.equal(shouldHidePredictedMarker({x:.5,y:.5},{x:.501,y:.5},1920,1080,4,1),true);
+  assert.equal(shouldHidePredictedMarker({x:.5,y:.5},{x:.51,y:.5},1920,1080,4,1),false);
+  const crop=magnifierCrop({x:.5,y:.5},1920,1080,6);
+  assert.deepEqual(crop,{x:800,y:450,width:320,height:180});
+}
+
+{
+  const metrics=createBrowserMetrics();
+  noteRenderedFrame(metrics,{now:0,renderDurationMs:9,poseKey:'old',poseValid:true});
+  noteRenderedFrame(metrics,{now:10000,renderDurationMs:1,poseKey:'a',poseValid:true});
+  noteRenderedFrame(metrics,{now:10020,renderDurationMs:1,poseKey:'b',poseValid:true});
+  noteRenderedFrame(metrics,{now:10040,renderDurationMs:1,poseKey:'c',poseValid:true});
+  const summary=browserMetricsSummary(metrics,10040);
+  assert.equal(summary.animation_frame_hz_5s,50,'old inactivity does not dilute the current 5-second rate');
+  assert.equal(summary.render_mean_ms_5s,1);
+  assert.equal(summary.missed_frame_deadlines_5s,0);
 }

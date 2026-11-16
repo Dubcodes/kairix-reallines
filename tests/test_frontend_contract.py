@@ -419,6 +419,22 @@ class FrontendContractCase(unittest.TestCase):
         self.assertNotIn("dotLock", renderer)
         self.assertNotIn("dot-lock", renderer)
         self.assertIn("DotCalibrationUi", calibration)
+        self.assertIn("Calibration Quality", html)
+        self.assertIn("Test excluding", dot_ui)
+        self.assertIn("Vision Calibration (operator-triggered)", html)
+        self.assertIn("captureVisionObs", dot_ui)
+
+    def test_timing_control_is_calibration_only_and_favicons_are_complete(self):
+        calibration = (STATIC / "calibration.html").read_text(encoding="utf-8")
+        control = (STATIC / "control.html").read_text(encoding="utf-8")
+        self.assertIn('id="graphicsDelay"', calibration)
+        self.assertIn("Saving…", (STATIC / "js" / "calibration.js").read_text(encoding="utf-8"))
+        self.assertNotIn('id="graphicsDelay"', control)
+        self.assertIn('id="graphicsDelayReadOnly"', control)
+        for page in ("engineering.html", "calibration.html", "control.html", "preview.html", "gfx.html"):
+            self.assertIn('rel="icon"', (STATIC / page).read_text(encoding="utf-8"), page)
+        for asset in ("favicon.svg", "favicon-16.svg", "favicon.png", "favicon.ico"):
+            self.assertGreater((STATIC / asset).stat().st_size, 100)
 
     def test_operator_workflow_uses_plain_language_without_breaking_control_ids(self):
         engineering_html = (STATIC / "engineering.html").read_text(encoding="utf-8")
@@ -487,7 +503,7 @@ class FrontendContractCase(unittest.TestCase):
         self.assertEqual({
             "product", "version", "hostname", "platform", "python", "machine",
             "uptime_seconds", "data_dir", "debug_enabled", "debug_session",
-            "websocket_clients",
+            "debug_queue", "websocket_clients",
         }, keys)
 
     def test_synthetic_calibration_side_effect_is_explicit(self):
@@ -516,6 +532,16 @@ class FrontendContractCase(unittest.TestCase):
             self.assertIn("gpio,input", source)
         production_service = (ROOT / "installer" / "kairix-reallines.service").read_text(encoding="utf-8")
         self.assertIn("SupplementaryGroups=gpio input", production_service)
+
+    def test_stable_development_operation_is_reversible_and_never_implicit(self):
+        source = (ROOT / "installer" / "kairix-dev-operation-mode").read_text(encoding="utf-8")
+        self.assertIn('MODE="${1:-}"', source)
+        self.assertIn('if [[ "$MODE" == "stable" ]]', source)
+        self.assertIn("--no-proxy-headers", source)
+        self.assertIn("--reload", (ROOT / "installer" / "install-dev.sh").read_text(encoding="utf-8"))
+        self.assertNotIn("--reload", source.split('if [[ "$MODE" == "stable" ]]', 1)[1].split("else", 1)[0])
+        self.assertIn('if [[ "$RESTART" == "--restart" ]]', source)
+        self.assertIn("The running service was not interrupted", source)
 
 
 if __name__ == "__main__":

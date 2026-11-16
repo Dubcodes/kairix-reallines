@@ -103,11 +103,32 @@ export function hitTestDot(points,point,width,height,radius=20){
   return best;
 }
 
-export function drawDotCalibrationOverlay(ctx,width,height,{predicted=[],observed={},selected=null,showConnections=false,markers=[],markerScale=1,showLabels=true,showVectors=true}={}){
+export function wedgeMarkerGeometry(x,y,radius,wedgeCount=4,gap=3){
+  const count=wedgeCount===3?3:4,triangles=[];
+  for(let index=0;index<count;index+=1){
+    const angle=-Math.PI/2+index*Math.PI*2/count,ux=Math.cos(angle),uy=Math.sin(angle),px=-uy,py=ux;
+    const tip={x:x+ux*gap,y:y+uy*gap},base={x:x+ux*radius,y:y+uy*radius},half=Math.max(1,radius*.34);
+    triangles.push([tip,{x:base.x+px*half,y:base.y+py*half},{x:base.x-px*half,y:base.y-py*half}]);
+  }
+  return triangles;
+}
+
+export function shouldHidePredictedMarker(predicted,observed,width,height,thresholdCssPx=4,dpr=1){
+  if(!predicted||!observed)return false;
+  return Math.hypot((predicted.x-observed.x)*width,(predicted.y-observed.y)*height)<=thresholdCssPx*Math.max(1,dpr);
+}
+
+export function magnifierCrop(point,sourceWidth,sourceHeight,magnification=6){
+  const scale=Math.max(2,Math.min(16,Number(magnification)||6)),width=sourceWidth/scale,height=sourceHeight/scale;
+  return{x:Math.max(0,Math.min(sourceWidth-width,point.x*sourceWidth-width/2)),y:Math.max(0,Math.min(sourceHeight-height,point.y*sourceHeight-height/2)),width,height};
+}
+
+export function drawDotCalibrationOverlay(ctx,width,height,{predicted=[],observed={},selected=null,showConnections=false,markers=[],markerScale=1,markerOpacity=.95,markerWedges=4,showLabels=true,showVectors=true}={}){
   const dpr=Math.min(globalThis.devicePixelRatio||1,2),scale=Math.max(.75,Math.min(4,Number(markerScale)||1));
   const predictedMap=new Map((predicted||[]).map(point=>[String(point.id),point.predicted]));
   const ids=markers.length?markers.map(marker=>String(marker.id)):[...new Set([...predictedMap.keys(),...Object.keys(observed||{})])];
   const observedMap=observed||{},pathIds=['M1','M2','M3','M4'];
+  const drawWedges=(x,y,r,color,opacity,count)=>{ctx.save();ctx.fillStyle=color;ctx.globalAlpha=Math.max(.1,Math.min(1,opacity));for(const triangle of wedgeMarkerGeometry(x,y,r,count,3*dpr)){ctx.beginPath();ctx.moveTo(triangle[0].x,triangle[0].y);ctx.lineTo(triangle[1].x,triangle[1].y);ctx.lineTo(triangle[2].x,triangle[2].y);ctx.closePath();ctx.fill();}ctx.restore();};
   const label=(id,x,y,fill)=>{
     if(!showLabels)return;
     const fontSize=12*dpr*scale,pad=4*dpr*scale,text=String(id);
@@ -121,15 +142,16 @@ export function drawDotCalibrationOverlay(ctx,width,height,{predicted=[],observe
   }
   for(const id of ids){
     const predictedPoint=predictedMap.get(id);
-    if(predictedPoint){
-      const x=predictedPoint.x*width,y=predictedPoint.y*height,r=12*dpr*scale;
-      ctx.save();ctx.strokeStyle='#57b8ff';ctx.lineWidth=2.5*dpr*scale;ctx.beginPath();ctx.moveTo(x-r,y);ctx.lineTo(x+r,y);ctx.moveTo(x,y-r);ctx.lineTo(x,y+r);ctx.stroke();ctx.fillStyle='#57b8ff';ctx.beginPath();ctx.arc(x,y,2.5*dpr*scale,0,Math.PI*2);ctx.fill();label(id,x,y,'#7fcbff');ctx.restore();
-    }
     const observedPoint=observedMap[id];
+    const predictionHidden=shouldHidePredictedMarker(predictedPoint,observedPoint,width,height,4,dpr);
+    if(predictedPoint&&!predictionHidden){
+      const x=predictedPoint.x*width,y=predictedPoint.y*height,r=12*dpr*scale;
+      drawWedges(x,y,r,'#57b8ff',markerOpacity*.9,markerWedges);label(id,x,y,'#7fcbff');
+    }
     if(observedPoint){
       const x=observedPoint.x*width,y=observedPoint.y*height,r=10*dpr*scale,stroke=String(selected)===id?'#fff7c9':'#ffce67';
-      ctx.save();ctx.strokeStyle=stroke;ctx.fillStyle='rgba(255,206,103,.20)';ctx.lineWidth=3*dpr*scale;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.beginPath();ctx.moveTo(x-r*1.45,y);ctx.lineTo(x+r*1.45,y);ctx.moveTo(x,y-r*1.45);ctx.lineTo(x,y+r*1.45);ctx.stroke();ctx.fillStyle=stroke;ctx.beginPath();ctx.arc(x,y,3*dpr*scale,0,Math.PI*2);ctx.fill();label(id,x,y,stroke);ctx.restore();
-      if(predictedPoint&&showVectors){ctx.save();ctx.strokeStyle='rgba(255,95,111,.95)';ctx.lineWidth=2*dpr*scale;ctx.setLineDash([5*dpr*scale,4*dpr*scale]);ctx.beginPath();ctx.moveTo(predictedPoint.x*width,predictedPoint.y*height);ctx.lineTo(x,y);ctx.stroke();ctx.setLineDash([]);const angle=Math.atan2(y-predictedPoint.y*height,x-predictedPoint.x*width),ah=7*dpr*scale;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-ah*Math.cos(angle-.55),y-ah*Math.sin(angle-.55));ctx.moveTo(x,y);ctx.lineTo(x-ah*Math.cos(angle+.55),y-ah*Math.sin(angle+.55));ctx.stroke();ctx.restore();}
+      drawWedges(x,y,r,stroke,markerOpacity,markerWedges);if(String(selected)===id){ctx.save();ctx.strokeStyle='rgba(255,247,201,.75)';ctx.lineWidth=Math.max(1,dpr);ctx.beginPath();ctx.arc(x,y,r*1.45,0,Math.PI*2);ctx.stroke();ctx.restore();}label(id,x,y,stroke);
+      if(predictedPoint&&!predictionHidden&&showVectors){ctx.save();ctx.strokeStyle='rgba(255,95,111,.95)';ctx.lineWidth=2*dpr*scale;ctx.setLineDash([5*dpr*scale,4*dpr*scale]);ctx.beginPath();ctx.moveTo(predictedPoint.x*width,predictedPoint.y*height);ctx.lineTo(x,y);ctx.stroke();ctx.setLineDash([]);const angle=Math.atan2(y-predictedPoint.y*height,x-predictedPoint.x*width),ah=7*dpr*scale;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-ah*Math.cos(angle-.55),y-ah*Math.sin(angle-.55));ctx.moveTo(x,y);ctx.lineTo(x-ah*Math.cos(angle+.55),y-ah*Math.sin(angle+.55));ctx.stroke();ctx.restore();}
     }
   }
 }
@@ -153,6 +175,7 @@ export function drawGfxCalibrationOverlay(canvas,state){
   drawDotCalibrationOverlay(ctx,width,height,{
     predicted,observed:overlay.editing?(overlay.draft_points||{}):(overlay.reference_points||{}),selected:overlay.selected_marker,
     showConnections:target.type==='rectangle',markers:target.markers||[],markerScale:overlay.marker_scale??2,
+    markerOpacity:overlay.marker_opacity??.95,markerWedges:overlay.marker_wedges??4,
     showLabels:overlay.show_labels!==false,showVectors:overlay.show_vectors!==false,
   });
   const dpr=Math.min(globalThis.devicePixelRatio||1,2),text='CALIBRATION OVERLAY — NOT FOR AIR';

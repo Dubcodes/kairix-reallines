@@ -1,11 +1,12 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kairix RealLines — Camera Calibration</title><link rel="stylesheet" href="/static/css/common.css?v=world-media1"></head>
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kairix RealLines — Camera Calibration</title><link rel="icon" href="/static/favicon.svg" type="image/svg+xml"><link rel="alternate icon" href="/favicon.ico"><link rel="stylesheet" href="/static/css/common.css?v=world-media1"></head>
 <body data-page="calibration"><header><div><h1>Camera Calibration</h1><div class="small">Set up camera movement, lens position and venue alignment</div></div><div class="header-status"><a class="button" href="/engineering">Back to Setup &amp; System</a><span id="status">Not calibrated</span></div></header>
 <div class="grid calibration-grid">
 <section class="panel"><h2>Active setup</h2><strong id="activeProfile">—</strong><p id="profileMatch" class="small"></p></section>
+<section class="panel"><h2>Video / Graphics Timing</h2><label>Graphics delay <input id="graphicsDelay" type="number" min="0" max="2000" step="1" value="0"> ms</label><div class="sync-steps"><button data-delay-step="-100">−100</button><button data-delay-step="-10">−10</button><button data-delay-step="-1">−1</button><button data-delay-step="1">+1</button><button data-delay-step="10">+10</button><button data-delay-step="100">+100</button></div><div class="row"><button id="resetDelay" type="button">Reset 0</button><span id="syncStatus" class="small" role="status">—</span></div><p class="small">Delay graphics only to match a delayed camera/video path. This uses the existing pose history and persists in <code>sync.json</code>.</p></section>
 <section id="prototypeCalibrationWarning" class="panel span-all form-error" hidden><strong>Prototype encoder tolerance is active.</strong> Camera/venue calibration can be used for development, but results should not be treated as final until encoder integrity is restored.</section>
 <section class="panel span-all dot-lock-panel">
 <h2>Dot Calibration — Repeated Observations</h2>
-<p class="small">Use the same physical markers across as many Pan/Tilt/Zoom positions as useful. You can leave temporarily invisible markers unselected: their saved measurements and model history are retained. Blue <strong>+</strong> marks are RealLines predictions; gold <strong>●</strong> marks are the positions you drag onto the real feature. Save each stopped-camera view as another observation.</p>
+  <p class="small">Use the same physical markers across as many Pan/Tilt/Zoom positions as useful. You can leave temporarily invisible markers unselected: their saved measurements and model history are retained. Blue wedges are RealLines predictions; gold wedges are observations. Their true coordinate is the clear centre gap. A close blue prediction hides visually so it cannot cover the gold measurement; neither coordinate is changed.</p>
 <div class="dot-lock-toolbar">
   <label>Target<select id="dotTargetSelect"></select></label>
   <button id="newFreeDotTarget" type="button">New free target</button>
@@ -14,6 +15,10 @@
   <details class="dot-visual-options"><summary>Overlay and grid options</summary><div class="row">
   <label class="tool-check calibration-gfx-toggle"><input id="dotOverlayGfx" type="checkbox"> Show calibration overlay on GFX</label>
   <label>GFX marker size<select id="dotOverlayScale"><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option><option value="3">3×</option></select></label>
+  <label>Wedges<select id="dotMarkerWedges"><option value="4" selected>Four</option><option value="3">Three</option></select></label>
+  <label>Opacity<select id="dotMarkerOpacity"><option value="0.5">50%</option><option value="0.75">75%</option><option value="0.95" selected>95%</option><option value="1">100%</option></select></label>
+  <label class="tool-check"><input id="dotMagnifierEnabled" type="checkbox"> Selected-marker magnifier</label>
+  <label>Magnification<select id="dotMagnifierScale"><option value="3">3×</option><option value="6" selected>6×</option><option value="10">10×</option><option value="16">16×</option></select></label>
   <label class="tool-check"><input id="dotOverlayLabels" type="checkbox" checked> Labels</label>
   <label class="tool-check"><input id="dotOverlayVectors" type="checkbox" checked> Error arrows</label>
   <label class="tool-check"><input id="dotGroundGridHere" type="checkbox"> Ground grid here</label>
@@ -48,7 +53,31 @@
   <div data-preview-status class="media-status">NO CAMERA PREVIEW SOURCE</div>
   <canvas id="dotLockCanvas" tabindex="0" aria-label="Dot calibration viewport; arrow keys nudge selected marker"></canvas>
 </div>
+<div id="dotMagnifierPanel" class="dot-magnifier" hidden><canvas id="dotMagnifierCanvas" width="320" height="180" aria-label="Magnified selected calibration marker"></canvas><span>Magnified selected marker · clear centre is the measurement coordinate</span></div>
 <div class="dot-quality" aria-live="polite"><div class="small"><strong>Automatic calibration:</strong> Every saved or updated observation refits the whole measured history. Accepted calibration and candidate are compared on identical views. Only validated candidates apply normally; a better but slightly out-of-limit candidate may be tried explicitly in development and restored afterwards.</div><div class="row"><button id="recalculateDotWorld" type="button">Recalculate all saved views</button></div><div id="dotWorldCandidate" class="kv"></div></div>
+<section class="dot-quality" aria-labelledby="calibrationQualityHeading">
+  <h3 id="calibrationQualityHeading">Calibration Quality</h3>
+  <p class="small">Review-only reprojection diagnostics. Testing an exclusion never removes a saved marker or changes the accepted calibration.</p>
+  <div class="row"><button id="calculateCalibrationQuality" type="button">Calculate residuals</button><span id="calibrationQualityStatus" class="small" role="status">Not calculated</span></div>
+  <div id="calibrationObservationQuality" class="quality-table"></div>
+  <div id="calibrationMarkerQuality" class="quality-table"></div>
+  <div id="calibrationExclusionResult" class="small"></div>
+</section>
+<details class="dot-quality" id="visionCalibrationPanel">
+  <summary><strong>Vision Calibration (operator-triggered)</strong></summary>
+  <p class="small">Processes only requested stills while this session is active. OBS must name the camera-only source; RealLines never changes the OBS scene or program output. Low-confidence results remain review-only and manual Dot Calibration remains available.</p>
+  <div class="row"><button id="startVisionCalibration" type="button">Start session</button><button id="stopVisionCalibration" type="button">Stop session</button><span id="visionCalibrationStatus" class="small">Inactive</span></div>
+  <div class="grid two">
+    <label>OBS host<input id="visionObsHost" value="127.0.0.1"></label>
+    <label>OBS port<input id="visionObsPort" type="number" value="4455" min="1" max="65535"></label>
+    <label>Camera-only source<input id="visionObsSource" autocomplete="off"></label>
+    <label>OBS WebSocket password<input id="visionObsPassword" type="password" autocomplete="new-password"></label>
+  </div>
+  <div class="row"><button id="saveVisionObs" type="button">Save OBS connection</button><button id="captureVisionObs" type="button">Capture stable OBS pair</button></div>
+  <label>Offline/manual camera still<input id="visionStillFile" type="file" accept="image/png,image/jpeg"></label>
+  <div class="row"><button id="teachVisionTarget" type="button">Teach from current gold markers</button><button id="analyseVisionStill" type="button">Detect in imported still</button><button id="useVisionCandidate" type="button" disabled>Review detected markers</button></div>
+  <div id="visionDetectionResult" class="kv"></div>
+</details>
 <div class="dot-calibration-details">
   <div><h3>Markers</h3><div id="dotMarkerList" class="marker-list"></div><p class="small">Click a marker to select it. <strong>Double-click to recover an off-screen marker at the centre</strong>. Drag the gold marker or use arrow keys and the numeric X/Y fields for precise alignment. Uncheck <em>use</em> for markers that are not visible in this observation.</p></div>
   <div><h3>Saved observations</h3><div id="dotObservationList" class="observation-list"></div>

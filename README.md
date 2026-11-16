@@ -57,6 +57,14 @@ sudo ./installer/install-dev.sh
 
 This creates a `kairix-reallines-dev.service` that runs the repository directly with Uvicorn reload enabled, and adds a writable Samba share named `reallines-dev`. Editing the files over SMB therefore changes the same checkout the Pi is running.
 
+For stable operation without Uvicorn filesystem reload monitoring, prepare the reversible systemd drop-in without interrupting the running service:
+
+```bash
+sudo ./installer/kairix-dev-operation-mode stable
+```
+
+After confirming a maintenance window, apply it with `sudo systemctl restart kairix-reallines-dev.service`. Return to edit-and-reload development mode with `sudo ./installer/kairix-dev-operation-mode reload`, followed by the same deliberate restart. Passing `--restart` performs that restart immediately; do so only when graphics output is not in use. Both modes retain the same checkout, data path, port and `--no-proxy-headers` transport policy.
+
 After the script runs, set the Samba password once:
 
 ```bash
@@ -240,7 +248,7 @@ Engineering and Calibration expose a synthetic scenario generator that creates o
 
 The Camera Calibration page also provides a repeated-observation Dot Calibration workflow alongside the original 9-point venue solver. A calibration target contains stable marker IDs and may be a free-point target or a measured rectangle. Rectangle targets begin with four connected corner markers and can add four edge midpoints; optional real width/height measurements provide metric scale, while approximate distance remains available when exact dimensions are unknown. Target definitions are stored with the named world calibration so a measured venue feature can be reused later.
 
-The operator aligns at least four markers for a baseline observation, saves it, then moves Pan/Tilt/Zoom in any useful combination while keeping any subset of the same physical markers identifiable. Each stopped-camera view records the current encoder reference IDs/counts, delayed `render_camera`, and the normalized observed screen positions. Later observations may contain only one visible marker, which supports tight-zoom workflows where the rest of the target has left frame. Blue crosses are current-model predictions; gold circles are draggable observations. A **Show calibration overlay on GFX** switch publishes those same markers through the normal `/gfx` animation frame, using the same delayed `render_camera` as scene graphics; it is session-only and defaults OFF after service restart.
+The operator aligns at least four markers for a baseline observation, saves it, then moves Pan/Tilt/Zoom in any useful combination while keeping any subset of the same physical markers identifiable. Each stopped-camera view records the current encoder reference IDs/counts, delayed `render_camera`, and the normalized observed screen positions. Later observations may contain only one visible marker, which supports tight-zoom workflows where the rest of the target has left frame. Blue wedges are current-model predictions; gold wedges are draggable observations. Three- or four-wedge markers keep a clear mathematical centre, and a close blue prediction hides visually without moving either coordinate. A local Calibration magnifier assists fine alignment. A **Show calibration overlay on GFX** switch publishes those same markers through the normal `/gfx` animation frame, using the same delayed `render_camera` as scene graphics; it is session-only and defaults OFF after service restart.
 
 The V1 refinement solver uses all retained correspondences to propose Pan/Tilt encoder gear ratios and, when Zoom coverage is sufficient, a nonlinear curvature correction between the existing Wide/Tight FOV endpoints. Calculation does not silently change the active camera model. The UI reports before/after pixel RMS and the proposal is applied only on explicit **Apply refinement**. Applying mapping changes preserves encoder references/counts, reseeds pose history, updates the target model to the refined geometry, and marks venue/world calibration for verification. Saved observations are tied to the encoder reference IDs under which they were captured; after a new hardware reference, clear the stale observations and realign the retained target definition. Rig-offset solving and lens-distortion coefficients are deliberately deferred for a later calibration stage.
 
@@ -309,7 +317,69 @@ Each WebSocket has one bounded writer. Full state transitions use a small critic
 
 The Canvas world-plane path remains unchanged apart from reporting its deterministic triangle work (8×8 subdivisions = 128 triangles per world texture; billboards use 2). Browser timing can identify local cadence/render pressure, but cannot prove Pi-to-browser latency, OBS behaviour, genlock, or 1080i50/1080p50 field synchronization because Pi monotonic and browser performance clocks are unrelated.
 
+V1.4 adds rolling 5-second and 30-second pose/frame rates, frame-interval distributions, missed 50 Hz deadlines, recent render durations, visibility/suspension state, transport mode and aggregate server output-queue health. Each browser instance has a distinct ephemeral identity, so two GFX windows no longer overwrite one remote report. Only GFX, Preview and Control emit telemetry; Calibration and Engineering no longer generate rejected browser-metrics requests. Browser `requestAnimationFrame` cadence is still not a scan-out timestamp.
+
+For a controlled OBS comparison, set the OBS project and recording to 1920×1080 at 50 FPS, set the Browser Source to 1920×1080, enable its custom frame rate explicitly at 50, and refresh/reinitialize the source after changing FPS. Configure the camera source for the capture device's actual 1080p50 format and disable avoidable buffering where the device supports it. Record the 50 FPS composite, use a repeatable camera start/stop movement, and compare the first source-frame movement with the first graphics movement frame by frame. Set RealLines graphics delay to zero for natural-pipeline measurement; report intentional delay separately. A 50 Hz WebSocket rate alone does not prove low end-to-end latency.
+
 Graphics Editor properties report calibrated camera-to-object 3D/horizontal ground distances and both line-endpoint distances. Provisional camera/world models are labelled. Group visibility is an effective parent mask and child rows/properties explicitly say when the parent hides an otherwise-visible object; scene coordinates are never mutated by diagnostics.
+
+## V1.4 dedicated HDMI output
+
+The optional HDMI output reuses the clean `/gfx` renderer in a separate Cage/Wayland/Chromium service. It discovers DRM connectors from sysfs and exact refresh modes from `modetest`; Engineering accepts only modes verified by DRM. The default requested mode is `1920x1080@50.00` on `HDMI-A-2`. The output contains graphics only and has no controls, camera video or diagnostics overlay.
+
+Installation is deliberately separate and leaves the service disabled and stopped:
+
+```bash
+cd /home/reallines/kairix-reallines
+sudo ./installer/install-hdmi-output.sh
+modetest -M vc4 -c
+```
+
+Review the generated `kairix-reallines-hdmi.service`, `/usr/local/lib/kairix-reallines/kairix-hdmi-launcher`, `/usr/local/sbin/kairix-hdmi-helper` and `/etc/sudoers.d/kairix-reallines-hdmi` before enabling. The helper accepts only start, stop, restart, enable or disable for that exact unit. The service runs as the RealLines user with video/render/input supplementary groups, uses a private runtime directory, restarts after Cage/Chromium failure, and fails safely while the configured display is disconnected; systemd retries and recovers when it returns.
+
+Removal/rollback during maintenance:
+
+```bash
+sudo systemctl disable --now kairix-reallines-hdmi.service
+sudo rm /etc/systemd/system/kairix-reallines-hdmi.service
+sudo rm /etc/sudoers.d/kairix-reallines-hdmi
+sudo rm /usr/local/sbin/kairix-hdmi-helper
+sudo rm /usr/local/lib/kairix-reallines/kairix-hdmi-launcher
+sudo systemctl daemon-reload
+```
+
+No boot configuration is changed. Actual mode, VSync, scan-out cadence, reconnect recovery, capture-card compatibility and latency must be validated on the physical Pi before broadcast use. This implementation does not claim genlock, deterministic field alignment, 1080i50 support or key/fill.
+
+## V1.4 stability, performance and calibration operations
+
+Engineering includes an opt-in **Tracking Stability** recorder. It holds at most 60,000 events in RAM for a selected 10–60 second window and records accepted Pico samples, raw axis counts/deltas, reference identities, mapped axes, tracking health, camera/render poses and publication/drop information. Live and fixed-server-pose modes separate acquisition movement from downstream presentation movement. Nothing is written per sample during normal operation; JSONL or CSV is produced only when requested. Fixed pose changes only the published diagnostic render pose for the current process. It is never a substitute for a valid encoder reference.
+
+Runtime profiling reports rolling wall/process CPU timing and scheduling jitter for acquisition, state processing and publication stages. Static tracking and rig fingerprints are cached and invalidated on the same profile changes that invalidate their underlying models; live counts and poses are never cached. Routine diagnostics use a bounded 4,096-event RAM queue, flush at a controlled interval or batch size, preserve important errors immediately, rotate at 2 MiB with three generations, and flush on normal shutdown. A sudden power failure can still lose queued routine events; persisted profiles, layouts and calibrations remain atomic disk data.
+
+For a reversible no-reload operating comparison:
+
+```bash
+cd /home/reallines/kairix-reallines
+sudo ./installer/kairix-dev-operation-mode stable
+sudo systemctl restart kairix-reallines-dev.service   # only during an authorised maintenance window
+# Return to edit/reload mode later:
+sudo ./installer/kairix-dev-operation-mode reload
+sudo systemctl restart kairix-reallines-dev.service
+```
+
+The script only installs or removes a systemd drop-in; it does not restart unless `--restart` is explicitly supplied. Compare `systemctl status`, `/api/performance`, process CPU and loop jitter after an equal warm-up period in each mode. The previous 114% application-worker and 65% reload-process readings are historical observations, not measurements of this build.
+
+Camera Calibration owns the editable 0–2000 ms graphics synchronization control. Graphics Editor shows the configured value read-only, while Engineering reports the effective history result. This relocation does not change `sync.json`, interpolation, pose-history safety boundaries or backend API semantics.
+
+### Calibration quality and vision-assisted stills
+
+**Calibration Quality** evaluates the measured-rectangle solution with the same projection model used by the solver. It lists horizontal/vertical/total pixel residual, image inclusion, manual/automatic origin, per-view RMS, worst marker and captured pose/references. Marker and whole-view exclusion tests solve copied data in a worker thread, compare the candidate on all original observations as a held-out check, and never alter saved gold points or the accepted world. An apparent improvement is review evidence only, not permission to delete or apply anything.
+
+Vision Calibration is explicitly started and stopped on Camera Calibration. Install dependencies from `requirements.txt` to enable OpenCV template detection. Teach a measured target from a camera-only still and labelled gold markers; the independently persisted template data is stored in `data/vision_targets.json`. A later still is searched near each taught identity, reports confidence/ambiguity and enters the existing Dot editor for manual review. Uncertain identity, insufficient confidence, invalid tracking, moving video features or changing encoder counts prevents saving the automatic result. A validated result keeps an immutable encoder/reference/camera snapshot even if the camera moves while background analysis completes.
+
+OBS capture uses WebSocket v5 `GetSourceScreenshot` only. Configure the camera input itself, not the programme scene. RealLines requests two stills 250 ms apart, checks image stability and encoder settling, and never changes OBS scene selection or programme output. OBS credentials are stored separately in `data/vision_obs_secret.json`, restricted to the service user where supported, omitted from API status and diagnostics, and never placed in static files. Manual still import remains available for offline teaching/detection, but a single imported image cannot prove exposure-time settling and is therefore review-only. Screenshot response time is not treated as camera exposure time.
+
+The detector is intentionally a first stopped-camera implementation: it uses constrained template matching, exact identities and a bounded one-job worker rather than continuous capture. Scale/lighting changes, motion blur, lens distortion, repetitive markers and OBS buffering require physical validation. Manual Dot Calibration remains the authoritative fallback. Vision processing is inactive during normal racing graphics operation.
 
 ## Secure system power administration
 
