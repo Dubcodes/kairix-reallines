@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+import subprocess, sys
+UNIT = "kairix-reallines-hdmi.service"
+COMMANDS = {"start":["systemctl","start",UNIT], "stop":["systemctl","stop",UNIT], "restart":["systemctl","restart",UNIT], "enable":["systemctl","enable","--now",UNIT], "disable":["systemctl","disable","--now",UNIT]}
+if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS: raise SystemExit("usage: kairix-hdmi-helper start|stop|restart|enable|disable")
+raise SystemExit(subprocess.run(COMMANDS[sys.argv[1]], check=False).returncode)

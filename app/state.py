@@ -145,6 +145,8 @@ class StateStore:
             self._save("engineering.json", self.engineering)
         self.profile_index = self._load_or_migrate_profiles(legacy_engineering_exists)
         self.profile = self._read_profile(self.profile_index["active_id"])
+        self._tracking_fingerprint_cache: str | None = None
+        self._rig_fingerprint_cache: str | None = None
         self._sync_calibration_from_profile()
         self.world_calibration_index = self._load_or_create_world_calibrations()
         self.world_calibration = self._read_world_calibration(self.world_calibration_index["active_id"])
@@ -179,7 +181,9 @@ class StateStore:
             "enabled": False, "target_id": None, "editing": False,
             "draft_points": {}, "reference_points": {}, "reference_observation_id": None,
             "selected_marker": None,
-            "marker_scale": 2.0, "show_labels": True, "show_vectors": True,
+            "marker_scale": 2.0, "marker_opacity": 0.95, "marker_wedges": 4,
+            "magnifier_enabled": False, "magnifier_scale": 6.0,
+            "show_labels": True, "show_vectors": True,
             "ground_grid_calibration": False, "ground_grid_gfx": False,
             "grid_spacing_m": 1.0, "grid_extent_m": 20.0, "grid_major_every": 5,
         }
@@ -251,14 +255,14 @@ class StateStore:
         )
         return (
             self.profile_index["active_id"],
-            tracking_fingerprint(self.profile),
+            self._tracking_fingerprint(),
             self.world_calibration_index["active_id"],
             bool(self.world_calibration.get("valid")),
             solution.get("solved_at"),
             runtime_references,
             self.profile.get("camera", {}).get("fov"),
             self.profile.get("camera", {}).get("height"),
-            rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")),
+            self._rig_geometry_fingerprint(),
             zoom_points,
         )
 
@@ -368,10 +372,27 @@ class StateStore:
     def _read_profile(self, profile_id: str) -> dict[str, Any]:
         return self._normalise_profile(json.loads(self._profile_path(profile_id).read_text(encoding="utf-8")))
 
+    def _invalidate_profile_caches(self) -> None:
+        self._tracking_fingerprint_cache = None
+        self._rig_fingerprint_cache = None
+
+    def _tracking_fingerprint(self) -> str:
+        if self._tracking_fingerprint_cache is None:
+            self._tracking_fingerprint_cache = tracking_fingerprint(self.profile)
+        return self._tracking_fingerprint_cache
+
+    def _rig_geometry_fingerprint(self) -> str:
+        if self._rig_fingerprint_cache is None:
+            self._rig_fingerprint_cache = rig_geometry_fingerprint(
+                self.profile.get("camera", {}).get("rig_offset")
+            )
+        return self._rig_fingerprint_cache
+
     def _write_profile_index(self) -> None:
         self._atomic_write_path(self.profiles_dir / "index.json", self.profile_index)
 
     def _write_active_profile_locked(self) -> None:
+        self._invalidate_profile_caches()
         profile_id = self.profile_index["active_id"]
         meta = self._profile_meta(profile_id)
         now = _utc_now()
@@ -501,12 +522,10 @@ class StateStore:
         return self.world_calibration.get("setup_profile_id") == self.profile_index["active_id"]
 
     def _world_calibration_matches_tracking(self) -> bool:
-        return self.world_calibration.get("tracking_fingerprint") == tracking_fingerprint(self.profile)
+        return self.world_calibration.get("tracking_fingerprint") == self._tracking_fingerprint()
 
     def _world_calibration_matches_rig(self) -> bool:
-        return self.world_calibration.get("rig_geometry_fingerprint") == rig_geometry_fingerprint(
-            self.profile.get("camera", {}).get("rig_offset")
-        )
+        return self.world_calibration.get("rig_geometry_fingerprint") == self._rig_geometry_fingerprint()
 
     def _current_tracking_reference_identity(self) -> dict[str, str | None]:
         return {
@@ -839,6 +858,7 @@ class StateStore:
         return result
 
     def _refresh_tracking_from_profile(self, initial: bool = False) -> None:
+        self._invalidate_profile_caches()
         self.camera["fov"] = float(self.profile.get("camera", {}).get("fov", self.camera["fov"]))
         self.camera["height"] = float(self.profile.get("camera", {}).get("height", self.camera["height"]))
         for axis in AXES:
@@ -1061,7 +1081,7 @@ class StateStore:
             world["effective_status"] = "REFERENCE MISMATCH — RECALIBRATE"
         else:
             world["effective_status"] = world.get("status")
-        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": tracking_fingerprint(self.profile), "rig_geometry_fingerprint": rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset")), "tracking_reference_identity": self._current_tracking_reference_identity()}
+        world_state = {"active_id": self.world_calibration_index["active_id"], "items": deepcopy(self.world_calibration_index["calibrations"]), "active": world, "profile_match": self._world_calibration_matches_profile(), "fingerprint_match": self._world_calibration_matches_tracking(), "rig_match": rig_match, "reference_match": reference_match, "tracking_fingerprint": self._tracking_fingerprint(), "rig_geometry_fingerprint": self._rig_geometry_fingerprint(), "tracking_reference_identity": self._current_tracking_reference_identity()}
         transport = {
             "clients": len(self.clients),
             "queued_messages": sum(len(output.critical) + int(output.latest_pose is not None) for output in self.client_outputs.values()),
@@ -1185,7 +1205,8 @@ class StateStore:
     async def update_calibration_overlay(self, values: dict[str, Any]) -> dict[str, Any]:
         unknown = set(values) - {
             "enabled", "target_id", "editing", "draft_points", "reference_points", "reference_observation_id",
-            "selected_marker", "marker_scale", "show_labels", "show_vectors",
+            "selected_marker", "marker_scale", "marker_opacity", "marker_wedges",
+            "magnifier_enabled", "magnifier_scale", "show_labels", "show_vectors",
             "ground_grid_calibration", "ground_grid_gfx", "grid_spacing_m", "grid_extent_m", "grid_major_every",
         }
         if unknown:
@@ -1204,6 +1225,23 @@ class StateStore:
             if not math.isfinite(scale) or not 0.75 <= scale <= 4.0:
                 raise ValueError("Calibration overlay marker_scale must be between 0.75 and 4.0")
             candidate["marker_scale"] = scale
+        if "marker_opacity" in values:
+            opacity = float(values["marker_opacity"])
+            if not math.isfinite(opacity) or not 0.1 <= opacity <= 1.0:
+                raise ValueError("Calibration overlay marker_opacity must be between 0.1 and 1.0")
+            candidate["marker_opacity"] = opacity
+        if "marker_wedges" in values:
+            wedges = int(values["marker_wedges"])
+            if wedges not in {3, 4}:
+                raise ValueError("Calibration overlay marker_wedges must be 3 or 4")
+            candidate["marker_wedges"] = wedges
+        if "magnifier_enabled" in values:
+            candidate["magnifier_enabled"] = bool(values["magnifier_enabled"])
+        if "magnifier_scale" in values:
+            magnification = float(values["magnifier_scale"])
+            if not math.isfinite(magnification) or not 2.0 <= magnification <= 16.0:
+                raise ValueError("Calibration overlay magnifier_scale must be between 2 and 16")
+            candidate["magnifier_scale"] = magnification
         if "show_labels" in values:
             candidate["show_labels"] = bool(values["show_labels"])
         if "show_vectors" in values:
@@ -1386,6 +1424,85 @@ class StateStore:
         self.debug.app("dot_world_preview_solved", target_id=candidate["target_id"], rms_px=rms, valid=good)
         await self.broadcast_state()
         return candidate
+
+    async def dot_calibration_quality(
+        self, target_id: str | None = None, *, observation_id: str | None = None,
+        marker_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Calculate review-only residuals, optionally testing one exclusion.
+
+        Work is performed against deep-copied inputs in a worker thread. The
+        saved observations, accepted world solution and live camera are never
+        changed by this diagnostic.
+        """
+        async with self.lock:
+            dot_data = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            chosen = target_id or dot_data.get("active_target_id")
+            target = next((item for item in dot_data["targets"] if item["id"] == chosen), None)
+            if target is None:
+                raise DotCalibrationError("Select a measured rectangle target first")
+            captured_profile = deepcopy(self.profile)
+            captured_zoom = deepcopy(self.zoom_fov_mapping)
+            accepted = deepcopy(self.world_calibration.get("solution") or {})
+            if accepted.get("target_source") != target["id"]:
+                accepted = None
+
+        def calculate() -> dict[str, Any]:
+            baseline_result = ({"solution": accepted} if accepted else solve_dot_world_reference(
+                captured_profile, dot_data, captured_zoom, target_id=target["id"]
+            ))
+            baseline = evaluate_dot_world_solution(
+                captured_profile, dot_data, captured_zoom, target["id"], baseline_result["solution"]
+            )
+            response: dict[str, Any] = {
+                "target_id": target["id"], "baseline": baseline,
+                "review_only": True, "mutated": False, "exclusion": None,
+            }
+            if not observation_id:
+                return response
+
+            candidate_data = deepcopy(dot_data)
+            candidate_target = next(item for item in candidate_data["targets"] if item["id"] == target["id"])
+            candidate_observation = next(
+                (item for item in candidate_target["observations"] if item["id"] == observation_id), None
+            )
+            if candidate_observation is None:
+                raise DotCalibrationError("The selected observation no longer exists")
+            kind = "observation"
+            if marker_id:
+                if marker_id not in candidate_observation["points"]:
+                    raise DotCalibrationError("The selected marker no longer exists in that observation")
+                del candidate_observation["points"][marker_id]
+                kind = "marker"
+            else:
+                candidate_target["observations"] = [
+                    item for item in candidate_target["observations"] if item["id"] != observation_id
+                ]
+            candidate_result = solve_dot_world_reference(
+                captured_profile, candidate_data, captured_zoom, target_id=target["id"]
+            )
+            training = evaluate_dot_world_solution(
+                captured_profile, candidate_data, captured_zoom, target["id"], candidate_result["solution"]
+            )
+            held_out = evaluate_dot_world_solution(
+                captured_profile, dot_data, captured_zoom, target["id"], candidate_result["solution"]
+            )
+            response["exclusion"] = {
+                "kind": kind, "observation_id": observation_id, "marker_id": marker_id,
+                "training_fit": training, "all_observations_fit": held_out,
+                "baseline_rms_px": baseline["rms_pixel_error"],
+                "all_observations_rms_px": held_out["rms_pixel_error"],
+                "all_observations_improvement_px": baseline["rms_pixel_error"] - held_out["rms_pixel_error"],
+                "supports_exclusion": held_out["rms_pixel_error"] + 0.25 < baseline["rms_pixel_error"],
+            }
+            return response
+
+        result = await asyncio.to_thread(calculate)
+        self.debug.app(
+            "dot_calibration_quality_review", target_id=target["id"],
+            observation_id=observation_id, marker_id=marker_id,
+        )
+        return result
 
     async def apply_dot_calibration_solution(self) -> dict[str, Any]:
         async with self.lock:

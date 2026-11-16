@@ -10,12 +10,19 @@ from typing import Any
 
 CLIENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 PAGES = {"gfx", "preview", "control"}
-METRIC_FIELDS = {
+NUMERIC_FIELDS = {
     "incoming_pose_hz", "pose_interarrival_mean_ms", "pose_interarrival_p95_ms",
     "animation_frame_hz", "frame_interval_p95_ms", "render_mean_ms", "render_p95_ms",
     "held_poses", "missing_poses", "stale_poses", "invalid_tracking_frames",
     "duplicate_pose_messages", "canvas_width", "canvas_height", "device_pixel_ratio",
+    "incoming_pose_hz_5s", "incoming_pose_hz_30s", "animation_frame_hz_5s", "animation_frame_hz_30s",
+    "frame_interval_mean_ms_5s", "frame_interval_p50_ms_5s", "frame_interval_p95_ms_5s",
+    "frame_interval_p99_ms_5s", "missed_frame_deadlines_5s", "missed_frame_deadlines_30s",
+    "pose_interarrival_p95_ms_5s", "render_mean_ms_5s", "render_p95_ms_5s", "pose_age_ms",
+    "output_queue_queued", "output_queue_coalesced", "output_queue_overflows",
 }
+TEXT_FIELDS = {"visibility_state", "transport_mode"}
+BOOLEAN_FIELDS = {"presentation_timing_available"}
 
 
 class BrowserDiagnostics:
@@ -47,8 +54,8 @@ class BrowserDiagnostics:
         previous = self._reports.get(key)
         if previous and now - previous["received_mono"] < self.minimum_interval:
             return False
-        clean: dict[str, float | int | None] = {}
-        for field in METRIC_FIELDS:
+        clean: dict[str, float | int | str | bool | None] = {}
+        for field in NUMERIC_FIELDS:
             value = metrics.get(field)
             if value is None:
                 clean[field] = None
@@ -56,6 +63,11 @@ class BrowserDiagnostics:
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
                 raise ValueError(f"Browser diagnostic metric {field} must be finite")
             clean[field] = max(0, value)
+        for field in TEXT_FIELDS:
+            value = metrics.get(field)
+            clean[field] = str(value or "")[:32]
+        for field in BOOLEAN_FIELDS:
+            clean[field] = metrics.get(field) is True
         if key not in self._reports and len(self._reports) >= self.capacity:
             self._reports.popitem(last=False)
         self._reports[key] = {

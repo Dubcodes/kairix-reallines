@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import json, os, re, subprocess, sys, time
+from pathlib import Path
+
+CONFIG = Path(os.environ.get("KAIRIX_HDMI_CONFIG", "/var/lib/kairix-reallines/hdmi_output.json"))
+URL = os.environ.get("KAIRIX_GFX_URL", "http://127.0.0.1:8080/gfx?metrics_name=HDMI")
+
+def fail(message: str) -> None:
+    print(f"kairix-hdmi-launcher: {message}", file=sys.stderr, flush=True)
+    raise SystemExit(1)
+
+try:
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+except Exception as exc:
+    fail(f"cannot read {CONFIG}: {exc}")
+connector, mode = str(config.get("connector", "")), str(config.get("mode", ""))
+if not re.fullmatch(r"HDMI-A-\d+", connector): fail("invalid connector")
+if not re.fullmatch(r"\d{3,5}x\d{3,5}@[1-9]\d{0,2}(?:\.\d{1,3})?", mode): fail("invalid mode")
+matches = list(Path("/sys/class/drm").glob(f"card*-{connector}"))
+if len(matches) != 1: fail(f"connector {connector} is not uniquely available")
+status = matches[0] / "status"
+if not status.exists() or status.read_text(encoding="utf-8").strip() != "connected": fail(f"connector {connector} is disconnected")
+try:
+    modes = subprocess.run(["modetest", "-M", "vc4", "-c"], capture_output=True, text=True, timeout=5, check=True).stdout
+except Exception as exc:
+    fail(f"DRM mode discovery failed: {exc}")
+resolution, refresh = mode.split("@", 1)
+if not re.search(rf"^\s*#\d+\s+{re.escape(resolution)}\s+{re.escape(str(float(refresh)))}0*\b", modes, re.MULTILINE): fail(f"requested mode {mode} was not verified by DRM")
+card = matches[0].name.split("-", 1)[0]
+environment = os.environ.copy()
+environment.update({"WLR_BACKENDS":"drm", "WLR_DRM_DEVICES":f"/dev/dri/{card}", "WLR_LIBINPUT_NO_DEVICES":"1", "XDG_RUNTIME_DIR":os.environ.get("XDG_RUNTIME_DIR", "/run/kairix-hdmi"), "WAYLAND_DISPLAY":"wayland-0"})
+chromium = ["chromium", "--ozone-platform=wayland", "--enable-features=UseOzonePlatform", "--kiosk", "--no-first-run", "--disable-session-crashed-bubble", "--disable-infobars", "--disable-translate", "--disable-background-networking", "--autoplay-policy=no-user-gesture-required", URL]
+process = subprocess.Popen(["cage", "-d", "--", *chromium], env=environment)
+socket = Path(environment["XDG_RUNTIME_DIR"]) / environment["WAYLAND_DISPLAY"]
+for _ in range(100):
+    if process.poll() is not None: fail(f"Cage/Chromium exited with {process.returncode}")
+    if socket.exists(): break
+    time.sleep(0.05)
+else:
+    process.terminate(); fail("Wayland display did not become ready")
+selected = f"{resolution}@{float(refresh):.3f}Hz"
+result = subprocess.run(["wlr-randr", "--output", connector, "--mode", selected], env=environment, capture_output=True, text=True, timeout=5, check=False)
+if result.returncode != 0:
+    process.terminate(); fail(f"mode selection failed: {(result.stderr or result.stdout).strip()[:300]}")
+raise SystemExit(process.wait())

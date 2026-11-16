@@ -3,6 +3,9 @@ import base64
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import app.state as state_module
 
 from app.state import StateStore
 
@@ -23,6 +26,27 @@ class RecordingClient:
 class StoreCase(unittest.IsolatedAsyncioTestCase):
     def make_store(self, path):
         return StateStore(Path(path), SilentDebug())
+
+    async def test_static_profile_fingerprints_are_cached_and_invalidated_on_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("app.state.tracking_fingerprint", wraps=state_module.tracking_fingerprint) as tracking_hash:
+                store = self.make_store(directory)
+                tracking_hash.reset_mock()
+                store._invalidate_profile_caches()
+                first = store._tracking_fingerprint()
+                self.assertEqual(store._tracking_fingerprint(), first)
+                self.assertEqual(tracking_hash.call_count, 1)
+                store.profile["axes"]["pan"]["mapping"]["offset"] += 1
+                store._write_active_profile_locked()
+                second = store._tracking_fingerprint()
+                self.assertNotEqual(second, first)
+                self.assertEqual(tracking_hash.call_count, 2)
+
+            first_rig = store._rig_geometry_fingerprint()
+            self.assertEqual(store._rig_geometry_fingerprint(), first_rig)
+            store.profile["camera"]["rig_offset"]["forward_m"] = 0.25
+            store._write_active_profile_locked()
+            self.assertNotEqual(store._rig_geometry_fingerprint(), first_rig)
 
     async def test_provisional_gfx_override_defaults_off_and_persists(self):
         with tempfile.TemporaryDirectory() as directory:

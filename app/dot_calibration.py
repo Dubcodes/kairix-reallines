@@ -98,17 +98,27 @@ def normalise_dot_calibration(value: dict[str, Any] | None) -> dict[str, Any]:
                 y = _finite(point.get("y"), f"{marker_id} Y")
                 if not -0.25 <= x <= 1.25 or not -0.25 <= y <= 1.25:
                     raise DotCalibrationError("Dot coordinates are outside the supported viewport range")
-                clean_points[marker_id] = {"x": x, "y": y}
+                clean_point: dict[str, Any] = {"x": x, "y": y}
+                method = str(point.get("method") or "").strip().lower()
+                if method in {"manual", "automatic"}:
+                    clean_point["method"] = method
+                if point.get("confidence") is not None:
+                    confidence = _finite(point.get("confidence"), f"{marker_id} confidence")
+                    clean_point["confidence"] = max(0.0, min(1.0, confidence))
+                clean_points[marker_id] = clean_point
             axes = deepcopy(observation.get("axes") or {})
             camera = deepcopy(observation.get("camera") or {})
-            clean_observations.append({
+            clean_observation = {
                 "id": str(observation.get("id") or f"O{obs_index + 1}"),
                 "captured_mono": float(observation.get("captured_mono") or 0.0),
                 "references": deepcopy(observation.get("references") or {}),
                 "axes": axes,
                 "camera": camera,
                 "points": clean_points,
-            })
+            }
+            if observation.get("capture_method") in {"vision", "manual"}:
+                clean_observation["capture_method"] = observation["capture_method"]
+            clean_observations.append(clean_observation)
         model_points = raw_target.get("model_points") or {}
         clean_model: dict[str, dict[str, float]] = {}
         if isinstance(model_points, dict):
@@ -893,6 +903,7 @@ def evaluate_dot_world_solution(
     count = 0
     worst = 0.0
     views = []
+    markers = []
     for observation in deduped["targets"][0]["observations"]:
         marker_points = {mid: point for mid, point in observation["points"].items() if mid in world_points}
         if len(marker_points) < 3:
@@ -910,6 +921,7 @@ def evaluate_dot_world_solution(
                   "roll": float(solution.get("fixed_roll", 0.0)), "fov": fov}
         view_sum = 0.0
         view_worst = 0.0
+        view_worst_marker = None
         for marker_id, observed in marker_points.items():
             predicted = _project(world_points[marker_id], camera)
             if predicted is None:
@@ -918,8 +930,21 @@ def evaluate_dot_world_solution(
                 dx = (predicted["x"] - float(observed["x"])) * REFERENCE_WIDTH
                 dy = (predicted["y"] - float(observed["y"])) * REFERENCE_HEIGHT
             point_squared = dx * dx + dy * dy
+            total = math.sqrt(point_squared)
             view_sum += point_squared
-            view_worst = max(view_worst, math.sqrt(point_squared))
+            if total >= view_worst:
+                view_worst = total
+                view_worst_marker = marker_id
+            markers.append({
+                "observation_id": observation["id"],
+                "marker_id": marker_id,
+                "dx_px": dx,
+                "dy_px": dy,
+                "residual_px": total,
+                "inside_image": bool(predicted is not None and 0.0 <= predicted["x"] <= 1.0 and 0.0 <= predicted["y"] <= 1.0),
+                "method": str(observed.get("method") or "manual"),
+                "included": True,
+            })
         view_count = len(marker_points)
         squared += view_sum
         count += 2 * view_count
@@ -928,16 +953,34 @@ def evaluate_dot_world_solution(
             "observation_id": observation["id"],
             "rms_pixel_error": math.sqrt(view_sum / (2 * view_count)),
             "max_pixel_error": view_worst,
+            "worst_marker": view_worst_marker,
             "marker_count": view_count,
+            "camera": camera,
+            "references": deepcopy(observation.get("references") or {}),
         })
     if not count:
         raise DotCalibrationError("No measured marker positions are available to compare world models")
+    for view in views:
+        distances = []
+        for other in views:
+            if other is view:
+                continue
+            pan_delta = abs(_wrap_degrees(float(view["camera"]["pan"]) - float(other["camera"]["pan"])))
+            tilt_delta = abs(float(view["camera"]["tilt"]) - float(other["camera"]["tilt"]))
+            fov_delta = abs(float(view["camera"]["fov"]) - float(other["camera"]["fov"]))
+            distances.append(math.hypot(pan_delta, tilt_delta) + 0.1 * fov_delta)
+        nearest = min(distances) if distances else 0.0
+        view["diversity"] = {
+            "nearest_pose_delta_deg": nearest,
+            "contribution": "contributing" if nearest >= 0.25 else "limited" if distances else "insufficient views",
+        }
     return {
         "rms_pixel_error": math.sqrt(squared / count),
         "max_pixel_error": worst,
         "view_count": len(views),
         "marker_count": count // 2,
         "deduplicated_observations": duplicates,
+        "markers": sorted(markers, key=lambda item: item["residual_px"], reverse=True),
         "views": views,
     }
 

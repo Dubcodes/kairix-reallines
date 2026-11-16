@@ -1,0 +1,5 @@
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-hdmi-helper start
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-hdmi-helper stop
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-hdmi-helper restart
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-hdmi-helper enable
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-hdmi-helper disable

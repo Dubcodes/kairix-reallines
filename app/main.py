@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import platform
 import socket
 import time
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -26,6 +27,8 @@ from .power_control import MutationGate, PowerControlError, PowerControlService
 from .browser_diagnostics import BrowserDiagnostics
 from .stability import TrackingStabilityRecorder
 from .performance import RuntimeProfiler
+from .hdmi_output import ACTIONS as HDMI_ACTIONS, HdmiOutputError, HdmiOutputService
+from .vision_calibration import MAX_IMAGE_BYTES, VisionCalibrationError, VisionCalibrationService
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
@@ -52,6 +55,8 @@ store.runtime_profiler = runtime_profiler
 power_control = PowerControlService()
 mutation_gate = MutationGate()
 browser_diagnostics = BrowserDiagnostics()
+hdmi_output = HdmiOutputService(DATA_DIR)
+vision_calibration = VisionCalibrationService(DATA_DIR)
 
 
 class CameraUpdate(BaseModel):
@@ -179,6 +184,14 @@ class StabilityRecordingStart(BaseModel):
     mode: str = "live"
 
 
+class HdmiOutputUpdate(BaseModel):
+    values: dict
+
+
+class VisionCalibrationUpdate(BaseModel):
+    values: dict
+
+
 @app.middleware("http")
 async def power_transition_gate(request: Request, call_next):
     guarded = request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path not in {
@@ -202,7 +215,8 @@ async def request_logging(request: Request, call_next):
         debug.error("http_exception", path=request.url.path, error=repr(exc))
         raise
     elapsed = (time.monotonic() - start) * 1000.0
-    if not request.url.path.startswith("/static/"):
+    quiet_paths = {"/api/pose", "/api/browser-metrics", "/api/performance", "/api/tracking-stability"}
+    if not request.url.path.startswith("/static/") and request.url.path not in quiet_paths:
         debug.app("http_request", method=request.method, path=request.url.path, status=response.status_code, ms=round(elapsed, 3))
     if request.url.path.startswith("/static/") or request.url.path in {"/", "/engineering", "/calibration", "/control", "/gfx", "/preview"}:
         response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -234,6 +248,7 @@ async def stop_acquisition():
     acquisition_task = publication_task = imu_status_task = None
     source_manager.stop()
     imu_service.stop()
+    debug.flush()
 
 
 @app.get("/")
@@ -266,6 +281,11 @@ async def preview():
     return FileResponse(STATIC / "preview.html")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(STATIC / "favicon.ico", media_type="image/x-icon")
+
+
 @app.get("/api/state")
 async def get_state():
     return store.snapshot()
@@ -290,6 +310,54 @@ async def update_browser_metrics(body: BrowserMetricsReport):
     return {"accepted": accepted}
 
 
+def _hdmi_status() -> dict:
+    status = hdmi_output.status()
+    reports = browser_diagnostics.snapshot()
+    client = next((report for report in reports
+                   if report["page"] == "gfx" and report["label"].strip().lower() == "hdmi"), None)
+    if client:
+        metrics = client.get("metrics") or {}
+        status["application_connected"] = True
+        status["displayed_fps"] = metrics.get("animation_frame_hz_5s")
+        status["frame_interval_p95_ms"] = metrics.get("frame_interval_p95_ms_5s")
+        status["missed_frame_deadlines_5s"] = metrics.get("missed_frame_deadlines_5s")
+    return status
+
+
+@app.get("/api/hdmi-output")
+async def hdmi_output_status():
+    return _hdmi_status()
+
+
+@app.patch("/api/hdmi-output")
+async def update_hdmi_output(body: HdmiOutputUpdate):
+    try:
+        hdmi_output.update(body.values)
+        return _hdmi_status()
+    except HdmiOutputError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/hdmi-output/reset")
+async def reset_hdmi_output():
+    try:
+        hdmi_output.reset()
+        return _hdmi_status()
+    except HdmiOutputError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/hdmi-output/{action}")
+async def control_hdmi_output(action: str):
+    if action not in HDMI_ACTIONS:
+        raise HTTPException(404, "Unknown HDMI output action")
+    try:
+        hdmi_output.action(action)
+        return _hdmi_status()
+    except HdmiOutputError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.get("/api/system")
 async def system_info():
     return {
@@ -302,6 +370,7 @@ async def system_info():
         "uptime_seconds": round(time.monotonic(), 1),
         "data_dir": str(DATA_DIR),
         "debug_enabled": debug.enabled,
+        "debug_queue": debug.status(),
         "debug_session": debug.session_dir.name,
         "websocket_clients": len(store.clients),
     }
@@ -693,6 +762,94 @@ async def solve_dot_world_reference(body: DotCalibrationUpdate):
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/world-calibration/dot-calibration/quality")
+async def dot_calibration_quality(body: DotCalibrationUpdate):
+    try:
+        values = body.values or {}
+        return await store.dot_calibration_quality(
+            values.get("target_id"), observation_id=values.get("observation_id"),
+            marker_id=values.get("marker_id"),
+        )
+    except (DotCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _vision_capture_context() -> dict:
+    snapshot = store.snapshot()
+    tracking = snapshot.get("tracking") or {}
+    axes = tracking.get("axes") or {}
+    return {
+        "captured_mono": snapshot.get("server_mono", time.monotonic()),
+        "tracking_valid": bool(tracking.get("valid")),
+        "references": {axis: (axes.get(axis) or {}).get("reference_id") for axis in ("pan", "tilt", "zoom")},
+        "axes": {
+            axis: {key: (axes.get(axis) or {}).get(key) for key in
+                   ("raw_count", "reference_count", "reference_angle", "relative_count")}
+            for axis in ("pan", "tilt", "zoom")
+        },
+        "camera": snapshot.get("render_camera") or {},
+    }
+
+
+async def _read_vision_upload(file: UploadFile) -> bytes:
+    image = await file.read(MAX_IMAGE_BYTES + 1)
+    if len(image) > MAX_IMAGE_BYTES:
+        raise VisionCalibrationError("Calibration image exceeds 12 MiB")
+    return image
+
+
+@app.get("/api/vision-calibration")
+async def vision_calibration_status():
+    return vision_calibration.status()
+
+
+@app.post("/api/vision-calibration/start")
+async def start_vision_calibration():
+    return vision_calibration.start()
+
+
+@app.post("/api/vision-calibration/stop")
+async def stop_vision_calibration():
+    return vision_calibration.stop()
+
+
+@app.patch("/api/vision-calibration/obs")
+async def configure_vision_obs(body: VisionCalibrationUpdate):
+    try:
+        return vision_calibration.configure_obs(body.values)
+    except (VisionCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/vision-calibration/teach")
+async def teach_vision_target(
+    file: UploadFile = File(...), markers_json: str = Form(...), target_id: str = Form(...),
+):
+    try:
+        markers = json.loads(markers_json)
+        if not isinstance(markers, dict):
+            raise VisionCalibrationError("Taught markers must be an object keyed by marker id")
+        return await vision_calibration.teach(await _read_vision_upload(file), markers, target_id)
+    except (json.JSONDecodeError, VisionCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/vision-calibration/analyse")
+async def analyse_vision_still(file: UploadFile = File(...)):
+    try:
+        return await vision_calibration.analyse(await _read_vision_upload(file), _vision_capture_context(), source="manual")
+    except (VisionCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/vision-calibration/capture-obs")
+async def capture_vision_from_obs():
+    try:
+        return await vision_calibration.capture_obs_pair(_vision_capture_context)
+    except (VisionCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.post("/api/world-calibration/dot-calibration/restore-world")
 async def restore_previous_dot_world():
     try:
@@ -945,6 +1102,8 @@ async def frontend_log(body: FrontendLog):
 
 @app.post("/api/debug/{enabled}")
 async def debug_toggle(enabled: bool):
+    if not enabled:
+        debug.flush()
     debug.enabled = enabled
     store.engineering["debug_enabled"] = enabled
     store._save("engineering.json", store.engineering)

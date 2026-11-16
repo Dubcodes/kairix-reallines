@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="${1:-}"
+RESTART="${2:-}"
+SERVICE="kairix-reallines-dev.service"
+DROPIN_DIR="/etc/systemd/system/${SERVICE}.d"
+DROPIN="${DROPIN_DIR}/20-operation-mode.conf"
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Run with sudo from inside the RealLines checkout." >&2
+  exit 1
+fi
+if [[ "$MODE" != "stable" && "$MODE" != "reload" ]]; then
+  echo "Usage: sudo ./installer/kairix-dev-operation-mode stable|reload [--restart]" >&2
+  exit 2
+fi
+if [[ -n "$RESTART" && "$RESTART" != "--restart" ]]; then
+  echo "The only optional argument is --restart." >&2
+  exit 2
+fi
+
+DEV_USER="${SUDO_USER:-reallines}"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+VENV="${REPO}/.venv"
+
+if [[ "$MODE" == "stable" ]]; then
+  install -d -o root -g root -m 0755 "$DROPIN_DIR"
+  cat > "$DROPIN" <<EOF
+[Service]
+ExecStart=
+ExecStart=${VENV}/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080 --no-proxy-headers
+EOF
+  chown root:root "$DROPIN"
+  chmod 0644 "$DROPIN"
+else
+  rm -f "$DROPIN"
+fi
+
+systemctl daemon-reload
+echo "Configured ${SERVICE} for ${MODE} operation as ${DEV_USER}."
+if [[ "$RESTART" == "--restart" ]]; then
+  systemctl restart "$SERVICE"
+  systemctl is-active --quiet "$SERVICE"
+  echo "Restarted ${SERVICE}."
+else
+  echo "The running service was not interrupted. Apply during maintenance with:"
+  echo "  sudo systemctl restart ${SERVICE}"
+fi
+systemctl show "$SERVICE" -p ExecStart --no-pager

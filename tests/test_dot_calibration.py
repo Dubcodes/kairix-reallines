@@ -122,11 +122,18 @@ class DotCalibrationMathCase(unittest.TestCase):
         repeated = deepcopy(target["observations"][-1]); repeated["id"] = "O4"
         target["observations"].append(repeated)
         data = {"targets": [target], "active_target_id": target["id"]}
+        data["targets"][0]["observations"][0]["points"]["M1"]["method"] = "automatic"
+        data["targets"][0]["observations"][0]["points"]["M1"]["confidence"] = .97
         correct = evaluate_dot_world_solution(profile, data, {}, target["id"], solution)
         self.assertEqual(correct["view_count"], 3)
         self.assertEqual(correct["deduplicated_observations"], 1)
         self.assertEqual(correct["marker_count"], 12)
         self.assertLess(correct["rms_pixel_error"], 1e-6)
+        self.assertEqual(len(correct["markers"]), 12)
+        self.assertEqual(correct["markers"][0]["method"], "automatic")
+        self.assertIn("dx_px", correct["markers"][0])
+        self.assertEqual(correct["views"][0]["worst_marker"], "M4")
+        self.assertEqual(correct["views"][0]["diversity"]["contribution"], "contributing")
         worse = deepcopy(solution); worse["pivot"]["x"] += 0.025
         displaced = evaluate_dot_world_solution(profile, data, {}, target["id"], worse)
         self.assertGreater(displaced["rms_pixel_error"], correct["rms_pixel_error"] + 0.1)
@@ -462,6 +469,29 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(reloaded.zoom_fov_mapping["wide"])
             self.assertIsNone(reloaded.zoom_fov_mapping["tight"])
 
+    async def test_quality_exclusion_is_review_only_and_never_mutates_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            target = target_with([
+                observation("O1", points=BASE_POINTS),
+                observation("O2", pan_raw=100, points=BASE_POINTS),
+            ], type="rectangle", width_m=1.34, height_m=1.17, bottom_height_m=.35)
+            await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
+            before = deepcopy(store.world_calibration["dot_calibration"])
+            solved = {"solution": {"pivot": {"x": 0, "y": -5, "z": 2}}}
+            fits = [
+                {"rms_pixel_error": 4.0, "markers": [], "views": []},
+                {"rms_pixel_error": 2.0, "markers": [], "views": []},
+                {"rms_pixel_error": 3.0, "markers": [], "views": []},
+            ]
+            with patch("app.state.solve_dot_world_reference", return_value=solved), patch(
+                "app.state.evaluate_dot_world_solution", side_effect=fits
+            ):
+                result = await store.dot_calibration_quality(target["id"], observation_id="O1", marker_id="M1")
+            self.assertFalse(result["mutated"])
+            self.assertTrue(result["exclusion"]["supports_exclusion"])
+            self.assertEqual(store.world_calibration["dot_calibration"], before)
+
     async def test_world_preview_does_not_modify_live_camera_or_world_solution(self):
         with tempfile.TemporaryDirectory() as directory:
             store=self.make_store(directory)
@@ -524,13 +554,19 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
                 "draft_points": {"M1": {"x": 0.4, "y": 0.4}},
                 "reference_points": {"M1": {"x": 0.41, "y": 0.42}},
                 "reference_observation_id": "O1",
-                "marker_scale": 3.0, "show_labels": False, "show_vectors": False,
+                "marker_scale": 3.0, "marker_opacity": 0.75, "marker_wedges": 3,
+                "magnifier_enabled": True, "magnifier_scale": 10,
+                "show_labels": False, "show_vectors": False,
                 "ground_grid_calibration": True, "ground_grid_gfx": True,
                 "grid_spacing_m": 0.5, "grid_extent_m": 40.0, "grid_major_every": 4,
             })
             overlay = store.snapshot()["calibration_overlay"]
             self.assertTrue(overlay["enabled"])
             self.assertEqual(overlay["marker_scale"], 3.0)
+            self.assertEqual(overlay["marker_opacity"], 0.75)
+            self.assertEqual(overlay["marker_wedges"], 3)
+            self.assertTrue(overlay["magnifier_enabled"])
+            self.assertEqual(overlay["magnifier_scale"], 10)
             self.assertFalse(overlay["show_labels"])
             self.assertFalse(overlay["show_vectors"])
             self.assertEqual(overlay["reference_points"]["M1"], {"x": 0.41, "y": 0.42})
