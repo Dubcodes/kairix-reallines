@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,6 +24,8 @@ from .world_calibration import CalibrationError
 from .dot_calibration import DotCalibrationError
 from .power_control import MutationGate, PowerControlError, PowerControlService
 from .browser_diagnostics import BrowserDiagnostics
+from .stability import TrackingStabilityRecorder
+from .performance import RuntimeProfiler
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "app" / "static"
@@ -41,8 +43,12 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 acquisition_task: asyncio.Task | None = None
 publication_task: asyncio.Task | None = None
 imu_status_task: asyncio.Task | None = None
-source_manager = TrackingSourceManager()
+stability_recorder = TrackingStabilityRecorder()
+runtime_profiler = RuntimeProfiler()
+source_manager = TrackingSourceManager(stability_recorder=stability_recorder)
 store.pico_source_manager = source_manager
+store.stability_recorder = stability_recorder
+store.runtime_profiler = runtime_profiler
 power_control = PowerControlService()
 mutation_gate = MutationGate()
 browser_diagnostics = BrowserDiagnostics()
@@ -166,6 +172,11 @@ class BrowserMetricsReport(BaseModel):
     page: str
     label: str | None = None
     metrics: dict
+
+
+class StabilityRecordingStart(BaseModel):
+    duration_seconds: float = 10.0
+    mode: str = "live"
 
 
 @app.middleware("http")
@@ -362,6 +373,45 @@ async def update_camera(body: CameraUpdate):
 async def get_tracking():
     snapshot = store.snapshot()
     return {"tracking": snapshot["tracking"], "profiles": snapshot["profiles"], "camera": snapshot["camera"], "render_camera": snapshot["render_camera"], "sync": snapshot["sync"]}
+
+
+@app.get("/api/performance")
+async def performance_status():
+    result = runtime_profiler.snapshot()
+    result["pico"] = source_manager.pico_status()
+    return result
+
+
+@app.get("/api/tracking-stability")
+async def tracking_stability_status():
+    return stability_recorder.status()
+
+
+@app.post("/api/tracking-stability/start")
+async def start_tracking_stability(body: StabilityRecordingStart):
+    try:
+        return stability_recorder.start(
+            body.duration_seconds, mode=body.mode,
+            fixed_pose=store.camera if body.mode == "fixed_pose" else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/tracking-stability/stop")
+async def stop_tracking_stability():
+    return stability_recorder.stop()
+
+
+@app.get("/api/tracking-stability/export")
+async def export_tracking_stability(format: str = "jsonl"):
+    if format == "jsonl":
+        return Response(stability_recorder.export_jsonl(), media_type="application/x-ndjson",
+                        headers={"Content-Disposition": "attachment; filename=tracking-stability.jsonl"})
+    if format == "csv":
+        return Response(stability_recorder.export_csv(), media_type="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=tracking-stability.csv"})
+    raise HTTPException(400, "Tracking stability export format must be jsonl or csv")
 
 
 @app.get("/api/sync")

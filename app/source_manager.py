@@ -14,13 +14,14 @@ from .tracking import AXES, acquisition_signature
 class TrackingSourceManager:
     """Own independent GPIO workers and one shared Pan/Tilt/Zoom Pico reader."""
 
-    def __init__(self) -> None:
+    def __init__(self, stability_recorder: Any | None = None) -> None:
         self._lock = threading.Lock()
         self._workers: dict[str, Any] = {}
         self._pico: PicoUartWorker | None = None
         self._pico_axes: tuple[str, ...] = ()
         self._profile_id: str | None = None
         self._pico_processing = dict(DEFAULT_PICO_PROCESSING)
+        self._stability_recorder = stability_recorder
 
     def configure_pico_processing(self, values: dict[str, Any]) -> dict[str, Any]:
         settings = normalise_pico_processing(values)
@@ -86,7 +87,7 @@ class TrackingSourceManager:
             else:
                 if old_pico is not None:
                     old_pico.stop()
-                pico = PicoUartWorker()
+                pico = PicoUartWorker(stability_recorder=self._stability_recorder)
                 pico.configure_processing(self._pico_processing)
                 pico.start()
         elif old_pico is not None:

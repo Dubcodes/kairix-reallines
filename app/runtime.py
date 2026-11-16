@@ -8,19 +8,42 @@ from typing import Any
 async def sample_tracking_once(store: Any, source_manager: Any, timestamp: float | None = None) -> None:
     """Canonical acquisition step. It deliberately has no publication responsibility."""
     now = time.monotonic() if timestamp is None else float(timestamp)
+    profiler = getattr(store, "runtime_profiler", None)
+    if profiler is None:
+        samples = source_manager.snapshots()
+    else:
+        with profiler.measure("source_snapshot"):
+            samples = source_manager.snapshots()
     async with store.lock:
-        store.sample_tick(source_manager.snapshots(), now)
+        if profiler is None:
+            store.sample_tick(samples, now)
+        else:
+            with profiler.measure("tracking_mapping_and_pose"):
+                store.sample_tick(samples, now)
+        recorder = getattr(store, "stability_recorder", None)
+        if recorder is not None:
+            render_pose, _sync = store._render_pose_state(now)
+            recorder.record_acquisition(now, samples, store.tracking, store.camera, render_pose)
 
 
 async def publish_pose_once(store: Any) -> None:
     """Compact pose publication step, isolated from acquisition latency."""
-    await store.broadcast_pose()
+    profiler = getattr(store, "runtime_profiler", None)
+    if profiler is None:
+        await store.broadcast_pose()
+    else:
+        with profiler.measure("pose_snapshot_and_enqueue"):
+            await store.broadcast_pose()
 
 
 async def tracking_loop(store: Any, source_manager: Any, frequency_hz: float = 200.0) -> None:
     next_tick = time.monotonic()
     while True:
-        await sample_tracking_once(store, source_manager, time.monotonic())
+        actual = time.monotonic()
+        profiler = getattr(store, "runtime_profiler", None)
+        if profiler is not None:
+            profiler.observe("acquisition_loop_jitter_ms", (actual - next_tick) * 1000.0)
+        await sample_tracking_once(store, source_manager, actual)
         active_rate = float(getattr(source_manager, "acquisition_rate_hz", frequency_hz))
         interval = 1.0 / max(1.0, active_rate)
         next_tick += interval
@@ -33,6 +56,10 @@ async def pose_publication_loop(store: Any, frequency_hz: float = 50.0) -> None:
     interval = 1.0 / frequency_hz
     next_tick = time.monotonic()
     while True:
+        actual = time.monotonic()
+        profiler = getattr(store, "runtime_profiler", None)
+        if profiler is not None:
+            profiler.observe("publication_loop_jitter_ms", (actual - next_tick) * 1000.0)
         await publish_pose_once(store)
         next_tick += interval
         if next_tick < time.monotonic() - interval:

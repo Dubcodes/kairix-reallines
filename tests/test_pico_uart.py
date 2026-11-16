@@ -325,6 +325,23 @@ class PicoProtocolTests(unittest.TestCase):
         worker.feed(encode_packet(packet(101, pico_us=1000)), now=now+.005)
         self.assertFalse(worker.snapshot('tilt', now=now+.006)['referenced'])
 
+    def test_stability_observer_receives_accepted_packets_without_changing_processing(self):
+        class Recorder:
+            def __init__(self):
+                self.rows = []
+
+            def record_raw_packet(self, value, arrival):
+                self.rows.append((value.sequence, value.pan, arrival))
+
+        recorder = Recorder()
+        worker = PicoUartWorker('/dev/null', stability_recorder=recorder)
+        now = time.monotonic()
+        worker.feed(encode_packet(packet(1, pan=10)), now=now)
+        worker.feed(encode_packet(packet(1, pan=999)), now=now + .001)
+        worker.feed(encode_packet(packet(2, pan=11)), now=now + .002)
+        self.assertEqual(recorder.rows, [(1, 10, now), (2, 11, now + .002)])
+        self.assertEqual(worker.consume_snapshots(('pan',), now=now + .003)['pan']['raw_count'], 11)
+
 
 if __name__ == '__main__':
     unittest.main()

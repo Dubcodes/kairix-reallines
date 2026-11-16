@@ -192,6 +192,8 @@ class StateStore:
         self.layout_index = self._load_or_migrate_layouts()
         self.scene = self._read_layout(self.layout_index["active_id"])
         self.imu_service: Any = None
+        self.stability_recorder: Any = None
+        self.runtime_profiler: Any = None
 
     def _atomic_write_path(self, path: Path, data: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,6 +329,11 @@ class StateStore:
             "effective_difference_ms": round(max(0.0, effective), 3) if effective is not None else None,
             "before_timestamp": result.get("before"), "after_timestamp": result.get("after"),
         }
+        if self.stability_recorder is not None:
+            original = render
+            render = self.stability_recorder.override_render_pose(render, now)
+            if render is not original:
+                sync["diagnostic_fixed_pose"] = True
         return render, sync
 
     def _profile_path(self, profile_id: str) -> Path:
@@ -1109,10 +1116,24 @@ class StateStore:
             await output.stop()
 
     async def broadcast_state(self) -> None:
-        await self.broadcast({"type": "state", "data": self.snapshot()})
+        if self.runtime_profiler is None:
+            snapshot = self.snapshot()
+        else:
+            with self.runtime_profiler.measure("full_state_snapshot"):
+                snapshot = self.snapshot()
+        await self.broadcast({"type": "state", "data": snapshot})
 
     async def broadcast_pose(self) -> None:
-        await self.broadcast({"type": "pose", "data": self.pose_snapshot()})
+        pose = self.pose_snapshot()
+        if self.stability_recorder is not None:
+            transport = {
+                "clients": len(self.clients),
+                "queued_messages": sum(len(output.critical) + int(output.latest_pose is not None) for output in self.client_outputs.values()),
+                "coalesced_poses": sum(output.coalesced_poses for output in self.client_outputs.values()),
+                "critical_overflows": sum(output.critical_overflows for output in self.client_outputs.values()),
+            }
+            self.stability_recorder.record_publication(time.monotonic(), pose, transport)
+        await self.broadcast({"type": "pose", "data": pose})
 
     async def update_engineering_settings(self, values: dict[str, Any]) -> dict[str, Any]:
         unknown = set(values) - {"allow_provisional_gfx", "preview_source", "preview_url"}

@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from copy import deepcopy
+from typing import Any
 
 from .pico_protocol import PicoPacket, PicoStreamDecoder
 from .pico_processing import DEFAULT_PICO_PROCESSING, active_processing_rate, normalise_pico_processing
@@ -26,7 +27,7 @@ FIRMWARE_NOMINAL_RATE_HZ = 500
 
 
 class PicoUartWorker:
-    def __init__(self, device: str | None = None) -> None:
+    def __init__(self, device: str | None = None, stability_recorder: Any | None = None) -> None:
         self.device = device or os.getenv("KAIRIX_PICO_UART_DEVICE", DEFAULT_DEVICE)
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -60,6 +61,7 @@ class PicoUartWorker:
         self._stale_sample_rejections = 0
         self._buffer_clears = 0
         self._link_timeouts = 0
+        self._stability_recorder = stability_recorder
 
     def _clear_processing_queue_locked(self, *, stale: bool = False) -> int:
         discarded = len(self._queue)
@@ -68,6 +70,16 @@ class PicoUartWorker:
             self._processing_discards += discarded
             self._stale_sample_rejections += discarded if stale else 0
             self._buffer_clears += 1
+        return discarded
+
+    def _discard_stale_processing_locked(self, now: float) -> int:
+        discarded = 0
+        while len(self._queue) > 1 and now - self._queue[0][1] > PROCESSING_MAX_AGE_SECONDS:
+            self._queue.popleft()
+            discarded += 1
+        if discarded:
+            self._processing_discards += discarded
+            self._stale_sample_rejections += discarded
         return discarded
 
     def _invalidate_link_locked(self, *, timeout: bool = False) -> None:
@@ -212,8 +224,12 @@ class PicoUartWorker:
                     self._buffer_overflows += 1
                     self._processing_discards += 1
                 self._queue.append((packet, arrival))
+                if self._processing["mode"] == "every":
+                    self._discard_stale_processing_locked(arrival)
                 self._connected = True
                 self._last_error = None
+                if self._stability_recorder is not None:
+                    self._stability_recorder.record_raw_packet(packet, arrival)
 
     def _fresh(self, now: float) -> bool:
         return self._connected and self._packet is not None and self._received_at is not None and 0 <= now - self._received_at <= STALE_SECONDS
@@ -276,10 +292,7 @@ class PicoUartWorker:
                     self._processing_discards += skipped
                     self._queue.clear()
                 else:
-                    while len(self._queue) > 1 and now - self._queue[0][1] > PROCESSING_MAX_AGE_SECONDS:
-                        self._queue.popleft()
-                        self._processing_discards += 1
-                        self._stale_sample_rejections += 1
+                    self._discard_stale_processing_locked(now)
                     packet, received_at = self._queue.popleft()
                 self._samples_consumed += 1
                 self._processing_latencies.append(max(0.0, (now - received_at) * 1000.0))
