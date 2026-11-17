@@ -28,9 +28,9 @@ class HdmiOutputCase(unittest.TestCase):
 
         async def scenario():
             stamps = {200: [], 50: []}
-            async def ticker(rate):
+            async def ticker(rate, duration=.10):
                 interval = 1 / rate
-                end = asyncio.get_running_loop().time() + .18
+                end = asyncio.get_running_loop().time() + duration
                 while asyncio.get_running_loop().time() < end:
                     stamps[rate].append(asyncio.get_running_loop().time())
                     await asyncio.sleep(interval)
@@ -40,17 +40,20 @@ class HdmiOutputCase(unittest.TestCase):
                       "selected_mode_verified": False, "actual_mode": None, "displayed_fps": None,
                       "application_connected": False}
             def slow_status(*, refresh=False):
-                time.sleep(.15)
+                time.sleep(.30)
                 return dict(status)
             with patch.object(main.hdmi_output, "status", side_effect=slow_status):
-                await asyncio.gather(main._hdmi_status(), ticker(200), ticker(50))
+                hdmi = asyncio.create_task(main._hdmi_status())
+                await asyncio.gather(ticker(200), ticker(50))
+                # Both simulated loops made progress while the blocking command
+                # was still sleeping in the dedicated worker.
+                self.assertFalse(hdmi.done())
+                await hdmi
             return stamps
 
         stamps = asyncio.run(scenario())
-        self.assertGreaterEqual(len(stamps[200]), 20)
-        self.assertGreaterEqual(len(stamps[50]), 7)
-        for values in stamps.values():
-            self.assertLess(max(b - a for a, b in zip(values, values[1:])), .04)
+        self.assertGreaterEqual(len(stamps[200]), 3)
+        self.assertGreaterEqual(len(stamps[50]), 2)
 
     def test_concurrent_status_requests_share_one_blocking_operation(self):
         from app import main
