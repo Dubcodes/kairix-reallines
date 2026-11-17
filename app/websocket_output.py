@@ -14,6 +14,7 @@ class ClientOutput:
         self.critical_capacity = critical_capacity
         self.critical: deque[dict[str, Any]] = deque()
         self.latest_pose: dict[str, Any] | None = None
+        self.latest_overlay: dict[str, Any] | None = None
         self.event = asyncio.Event()
         self.task: asyncio.Task | None = None
         self.closed = False
@@ -32,6 +33,8 @@ class ClientOutput:
             if self.latest_pose is not None:
                 self.coalesced_poses += 1
             self.latest_pose = message
+        elif message.get("type") == "calibration_overlay":
+            self.latest_overlay = message
         else:
             if len(self.critical) >= self.critical_capacity:
                 self.critical_overflows += 1
@@ -53,7 +56,11 @@ class ClientOutput:
                     pose, self.latest_pose = self.latest_pose, None
                     await self.websocket.send_json(pose)
                     self.sent_messages += 1
-                if not self.critical and self.latest_pose is None:
+                if self.latest_overlay is not None and not self.closed:
+                    overlay, self.latest_overlay = self.latest_overlay, None
+                    await self.websocket.send_json(overlay)
+                    self.sent_messages += 1
+                if not self.critical and self.latest_pose is None and self.latest_overlay is None:
                     self.event.clear()
         except asyncio.CancelledError:
             raise
@@ -76,6 +83,7 @@ class ClientOutput:
         return {
             "critical_queued": len(self.critical),
             "pose_queued": int(self.latest_pose is not None),
+            "overlay_queued": int(self.latest_overlay is not None),
             "coalesced_poses": self.coalesced_poses,
             "sent_messages": self.sent_messages,
             "critical_overflows": self.critical_overflows,

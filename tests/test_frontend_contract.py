@@ -232,11 +232,30 @@ class FrontendContractCase(unittest.TestCase):
     def test_engineering_exposes_bounded_pico_processing_controls_and_confidence_boundaries(self):
         html = (STATIC / "engineering.html").read_text(encoding="utf-8")
         source = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
-        for control in ("picoProcessingMode", "picoLatestRate", "picoEveryRate", "picoBufferCapacity", "resetPicoProcessing"):
+        for control in ("picoProcessingMode", "picoLatestRate", "picoEveryRate", "picoBufferCapacity", "picoGlitchFilter", "resetPicoProcessing"):
             self.assertIn(f'id="{control}"', html)
         self.assertIn("/api/pico/processing", source)
         self.assertIn("Samples consumed / discarded", source)
         self.assertIn("Firmware V1 does not report missed physical quadrature transitions", html)
+        self.assertIn("Raw Pan / Tilt / Zoom", source)
+        self.assertIn("Nominal filter delay", source)
+
+    def test_hdmi_polling_is_cached_refreshable_and_off_event_loop(self):
+        html = (STATIC / "engineering.html").read_text(encoding="utf-8")
+        engineering = (STATIC / "js" / "engineering.js").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('id="refreshHdmi"', html)
+        self.assertIn("/api/hdmi-output/refresh", engineering)
+        self.assertIn("ThreadPoolExecutor(max_workers=1", main)
+        self.assertIn("run_in_executor(hdmi_executor", main)
+
+    def test_marker_edit_updates_use_coalesced_overlay_messages(self):
+        state = (ROOT / "app" / "state.py").read_text(encoding="utf-8")
+        common = (STATIC / "js" / "common.js").read_text(encoding="utf-8")
+        output = (ROOT / "app" / "websocket_output.py").read_text(encoding="utf-8")
+        self.assertIn('"type": "calibration_overlay"', state)
+        self.assertIn("deliverCalibrationOverlay", common)
+        self.assertIn('message.get("type") == "calibration_overlay"', output)
 
     def test_measured_target_editor_is_separate_and_does_not_advertise_fake_vision_actions(self):
         html = (STATIC / "calibration.html").read_text(encoding="utf-8")

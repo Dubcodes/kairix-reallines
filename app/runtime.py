@@ -22,8 +22,9 @@ async def sample_tracking_once(store: Any, source_manager: Any, timestamp: float
                 store.sample_tick(samples, now)
         recorder = getattr(store, "stability_recorder", None)
         if recorder is not None:
-            render_pose, _sync = store._render_pose_state(now)
-            recorder.record_acquisition(now, samples, store.tracking, store.camera, render_pose)
+            if recorder.observe_acquisition(now, samples, store.tracking, store.camera):
+                render_pose, _sync = store._render_pose_state(now)
+                recorder.record_acquisition(now, samples, store.tracking, store.camera, render_pose)
 
 
 async def publish_pose_once(store: Any) -> None:
@@ -42,7 +43,11 @@ async def tracking_loop(store: Any, source_manager: Any, frequency_hz: float = 2
         actual = time.monotonic()
         profiler = getattr(store, "runtime_profiler", None)
         if profiler is not None:
-            profiler.observe("acquisition_loop_jitter_ms", (actual - next_tick) * 1000.0)
+            gap_ms = (actual - next_tick) * 1000.0
+            profiler.observe("acquisition_loop_jitter_ms", gap_ms)
+            recorder = getattr(store, "stability_recorder", None)
+            if recorder is not None:
+                recorder.observe_scheduling("acquisition", gap_ms, actual)
         await sample_tracking_once(store, source_manager, actual)
         active_rate = float(getattr(source_manager, "acquisition_rate_hz", frequency_hz))
         interval = 1.0 / max(1.0, active_rate)
@@ -59,7 +64,11 @@ async def pose_publication_loop(store: Any, frequency_hz: float = 50.0) -> None:
         actual = time.monotonic()
         profiler = getattr(store, "runtime_profiler", None)
         if profiler is not None:
-            profiler.observe("publication_loop_jitter_ms", (actual - next_tick) * 1000.0)
+            gap_ms = (actual - next_tick) * 1000.0
+            profiler.observe("publication_loop_jitter_ms", gap_ms)
+            recorder = getattr(store, "stability_recorder", None)
+            if recorder is not None:
+                recorder.observe_scheduling("publication", gap_ms, actual)
         await publish_pose_once(store)
         next_tick += interval
         if next_tick < time.monotonic() - interval:

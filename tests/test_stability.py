@@ -1,10 +1,12 @@
 import csv
+import asyncio
 import io
 import json
 import unittest
 from types import SimpleNamespace
 
 from app.stability import TrackingStabilityRecorder
+from app.runtime import sample_tracking_once
 
 
 class FakeClock:
@@ -26,6 +28,37 @@ class TrackingStabilityRecorderCase(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
         self.recorder = TrackingStabilityRecorder(clock=self.clock)
+
+    def test_automatic_pre_post_trigger_on_pose_jump(self):
+        samples = {axis: {"raw_count": 0, "input_raw_count": 0, "filtered_count": 0} for axis in ("pan", "tilt", "zoom")}
+        axes = {axis: {"value": 0.0, "reference_id": f"{axis}-1"} for axis in ("pan", "tilt", "zoom")}
+        tracking = {"axes": axes, "valid": True}
+        camera = {"pan": 0.0, "tilt": 0.0}
+        self.assertFalse(self.recorder.observe_acquisition(100.0, samples, tracking, camera))
+        axes["pan"]["value"] = 1.0
+        samples["pan"].update({"raw_count": 5, "input_raw_count": 5, "filtered_count": 5})
+        self.assertTrue(self.recorder.observe_acquisition(100.01, samples, tracking, camera))
+        status = self.recorder.status()
+        self.assertTrue(status["automatic"])
+        self.assertEqual(status["trigger_reason"], "large_pan_pose_change")
+        self.assertGreaterEqual(status["event_count"], 2)
+
+    def test_pose_jump_with_constant_input_is_classified_downstream(self):
+        samples = {axis: {"raw_count": 0, "filtered_count": 0} for axis in ("pan", "tilt", "zoom")}
+        axes = {axis: {"value": 0.0, "reference_id": f"{axis}-1"} for axis in ("pan", "tilt", "zoom")}
+        tracking = {"axes": axes, "valid": True}
+        self.recorder.observe_acquisition(100.0, samples, tracking, {"pan": 0.0, "tilt": 0.0})
+        axes["tilt"]["value"] = 2.0
+        self.recorder.observe_acquisition(100.01, samples, tracking, {"pan": 0.0, "tilt": 2.0})
+        self.assertEqual(self.recorder.status()["trigger_reason"],
+                         "downstream_large_tilt_pose_change_constant_counts")
+
+    def test_large_scheduling_gap_automatically_records_correlation_event(self):
+        self.recorder.observe_scheduling("acquisition", 75.0, 100.0)
+        status = self.recorder.status()
+        self.assertTrue(status["active"])
+        self.assertIn("acquisition_scheduling_gap", status["trigger_reason"])
+        self.assertEqual(status["summary"]["events_by_stage"]["scheduling_gap"], 1)
 
     def test_duration_and_mode_are_strict_and_inactive_path_records_nothing(self):
         self.recorder.record_raw_packet(packet(1), self.clock())
@@ -89,6 +122,33 @@ class TrackingStabilityRecorderCase(unittest.TestCase):
         status = recorder.status()
         self.assertEqual(status["event_count"], 1_000)
         self.assertEqual(status["dropped_by_capacity"], 5)
+
+
+class StabilityInactiveRuntimeCase(unittest.IsolatedAsyncioTestCase):
+    async def test_inactive_probe_does_not_request_an_extra_render_pose(self):
+        recorder = TrackingStabilityRecorder()
+
+        class Store:
+            def __init__(self):
+                self.lock = asyncio.Lock()
+                self.runtime_profiler = None
+                self.stability_recorder = recorder
+                self.camera = {"pan": 0.0, "tilt": 0.0}
+                self.tracking = {"valid": True, "axes": {
+                    axis: {"value": 0.0, "reference_id": f"{axis}-ref"}
+                    for axis in ("pan", "tilt", "zoom")}}
+
+            def sample_tick(self, samples, now):
+                pass
+
+            def _render_pose_state(self, now):
+                raise AssertionError("inactive recorder must not calculate render pose")
+
+        class Source:
+            def snapshots(self):
+                return {axis: {"raw_count": 0} for axis in ("pan", "tilt", "zoom")}
+
+        await sample_tracking_once(Store(), Source(), 100.0)
 
 
 if __name__ == "__main__":

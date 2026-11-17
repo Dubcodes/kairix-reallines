@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, os, re, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 CONFIG = Path(os.environ.get("KAIRIX_HDMI_CONFIG", "/var/lib/kairix-reallines/hdmi_output.json"))
@@ -9,6 +9,10 @@ URL = os.environ.get("KAIRIX_GFX_URL", "http://127.0.0.1:8080/gfx?metrics_name=H
 def fail(message: str) -> None:
     print(f"kairix-hdmi-launcher: {message}", file=sys.stderr, flush=True)
     raise SystemExit(1)
+
+for executable in ("cage", "chromium", "modetest", "wlr-randr"):
+    if not shutil.which(executable):
+        fail(f"required executable is missing: {executable}")
 
 try:
     config = json.loads(CONFIG.read_text(encoding="utf-8"))

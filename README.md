@@ -325,6 +325,8 @@ Graphics Editor properties report calibrated camera-to-object 3D/horizontal grou
 
 ## V1.4 dedicated HDMI output
 
+V1.4.1 scheduling, encoder-filter, electrical-check, acceptance, and rollback guidance is in [`docs/V1.4.1_HANDOVER.md`](docs/V1.4.1_HANDOVER.md).
+
 The optional HDMI output reuses the clean `/gfx` renderer in a separate Cage/Wayland/Chromium service. It discovers DRM connectors from sysfs and exact refresh modes from `modetest`; Engineering accepts only modes verified by DRM. The default requested mode is `1920x1080@50.00` on `HDMI-A-2`. The output contains graphics only and has no controls, camera video or diagnostics overlay.
 
 Installation is deliberately separate and leaves the service disabled and stopped:

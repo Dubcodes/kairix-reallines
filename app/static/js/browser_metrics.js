@@ -56,6 +56,7 @@ export function browserMetricsSummary(metrics,now=metrics.lastFrame??metrics.las
     canvas_width:metrics.canvasWidth,canvas_height:metrics.canvasHeight,device_pixel_ratio:metrics.dpr,
     visibility_state:globalThis.document?.visibilityState||'unavailable',transport_mode:metrics.transportMode,
     output_queue_queued:metrics.outputQueueQueued,output_queue_coalesced:metrics.outputQueueCoalesced,output_queue_overflows:metrics.outputQueueOverflows,
+    last_pose_identity:metrics.lastIncomingPoseKey,last_rendered_pose_identity:metrics.lastPoseKey,
     pose_age_ms:null,presentation_timing_available:false,
     measured_at_browser_ms:now,
   };

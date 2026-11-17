@@ -869,7 +869,7 @@ class StateStore:
         """Apply pure mapping changes without discarding live encoder state."""
         runtime = self.tracking["axes"][axis]
         config = self.profile["axes"][axis]
-        raw_count = runtime.get("raw_count")
+        raw_count = runtime.get("filtered_count", runtime.get("raw_count"))
         reference_count = runtime.get("reference_count")
         if raw_count is None or not runtime.get("referenced") or reference_count is None or not runtime.get("reference_id"):
             return
@@ -893,6 +893,7 @@ class StateStore:
             runtime = self.tracking["axes"][axis]
             previous_integrity = runtime.get("integrity")
             raw_count = int(sample.get("raw_count", runtime.get("raw_count", 0)))
+            mapping_count = int(sample.get("filtered_count", raw_count))
             referenced = bool(sample.get("referenced", False))
             reference_count = sample.get("reference_count")
             reference_angle = float(sample.get("reference_angle", 0.0))
@@ -902,6 +903,7 @@ class StateStore:
             runtime.update({
                 "raw": raw_count,
                 "raw_count": raw_count,
+                "filtered_count": mapping_count,
                 "referenced": referenced,
                 "reference_count": reference_count,
                 "reference_angle": reference_angle,
@@ -914,14 +916,14 @@ class StateStore:
                 "calibration_confidence": sample.get("calibration_confidence", "UNREFERENCED"),
                 "integrity_policy": sample.get("integrity_policy", "strict"),
                 "updated_mono": float(sample.get("sample_mono") or 0.0) if self.profile["axes"][axis]["source"] == "pico_uart" else now,
-                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "health", "status"}},
+                "diagnostics": {key: deepcopy(value) for key, value in sample.items() if key not in {"axis", "raw_count", "filtered_count", "referenced", "reference_count", "reference_angle", "reference_id", "configured", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "health", "status"}},
             })
             if axis in POSITION_ENCODER_AXES:
-                runtime["relative_count"] = relative_position_count(self.profile["axes"][axis], raw_count, int(reference_count)) if referenced and reference_count is not None else None
+                runtime["relative_count"] = relative_position_count(self.profile["axes"][axis], mapping_count, int(reference_count)) if referenced and reference_count is not None else None
                 runtime.pop("relative_angle", None)
                 runtime.pop("reference_angle", None)
             else:
-                runtime["relative_angle"] = (raw_count - int(reference_count)) * degrees_per_count(self.profile["axes"][axis]) if referenced and reference_count is not None else None
+                runtime["relative_angle"] = (mapping_count - int(reference_count)) * degrees_per_count(self.profile["axes"][axis]) if referenced and reference_count is not None else None
                 runtime.pop("relative_count", None)
             if sample.get("health") == "ERROR":
                 runtime.update({"valid": False, "value": None, "health": "ERROR", "status": sample.get("status", "GPIO driver error")})
@@ -933,9 +935,9 @@ class StateStore:
                 runtime.update({"valid": False, "value": None, "health": "REFERENCE_REQUIRED", "status": sample.get("status", "Set an encoder reference")})
             else:
                 mapped_value = (
-                    relative_position_count(self.profile["axes"][axis], raw_count, int(reference_count))
+                    relative_position_count(self.profile["axes"][axis], mapping_count, int(reference_count))
                     if axis in POSITION_ENCODER_AXES else
-                    map_referenced_count(self.profile["axes"][axis], raw_count, int(reference_count), reference_angle)
+                    map_referenced_count(self.profile["axes"][axis], mapping_count, int(reference_count), reference_angle)
                 )
                 runtime.update({
                     "valid": True,
@@ -1098,7 +1100,7 @@ class StateStore:
         self._refresh_camera_from_tracking(sample=False)
         render_camera, sync = self._render_pose_state(now)
         compact_axes = {
-            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "diagnostics") if key in runtime}
+            axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "filtered_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
         return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "zoom_fov": deepcopy(self.zoom_fov_mapping), "sync": sync, "server_mono": now}
@@ -1295,7 +1297,9 @@ class StateStore:
         async with self.lock:
             self.calibration_overlay = candidate
             result = deepcopy(candidate)
-        await self.broadcast_state()
+        # Marker drags can arrive at pointer-event rate. Send only the overlay
+        # payload instead of repeatedly constructing and queueing full state.
+        await self.broadcast({"type": "calibration_overlay", "data": result})
         return result
 
     async def update_dot_calibration(self, values: dict[str, Any]) -> dict[str, Any]:

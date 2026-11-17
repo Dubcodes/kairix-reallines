@@ -64,3 +64,20 @@ class WebSocketOutputCase(unittest.IsolatedAsyncioTestCase):
         finally:
             socket.release.set()
             await output.stop()
+
+    async def test_calibration_overlay_edits_coalesce_to_latest_payload(self):
+        socket = FakeSocket(blocked=True)
+        async def failed(_exc):
+            return None
+        output = ClientOutput(socket, failed, critical_capacity=1)
+        output.start()
+        try:
+            for marker in range(20):
+                self.assertTrue(output.enqueue({"type": "calibration_overlay", "data": {"marker": marker}}))
+            self.assertEqual(output.stats()["overlay_queued"], 1)
+            self.assertEqual(output.critical_overflows, 0)
+            socket.release.set()
+            await asyncio.sleep(.01)
+            self.assertEqual(socket.messages[-1]["data"]["marker"], 19)
+        finally:
+            await output.stop()

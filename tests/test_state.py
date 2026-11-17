@@ -82,6 +82,23 @@ class StoreCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "capacity"):
                 await store.update_pico_processing({"buffer_capacity": 99999})
 
+    async def test_pico_raw_count_is_preserved_while_filtered_count_drives_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            store.profile["axes"]["pan"]["source"] = "pico_uart"
+            store._refresh_tracking_from_profile()
+            store.apply_tracking_samples({"pan": {
+                "raw_count": 101, "filtered_count": 100, "referenced": True,
+                "reference_count": 100, "reference_angle": 0.0, "reference_id": "pan-ref",
+                "configured": True, "driver_alive": True, "availability": "AVAILABLE",
+                "integrity": "TRUSTED", "calibration_confidence": "TRUSTED",
+                "health": "VALID", "status": "Referenced", "sample_mono": 100.0,
+            }}, 100.0)
+            runtime = store.tracking["axes"]["pan"]
+            self.assertEqual(runtime["raw_count"], 101)
+            self.assertEqual(runtime["filtered_count"], 100)
+            self.assertEqual(runtime["value"], 0.0)
+
     async def test_ground_offset_is_calibration_scoped_persistent_and_non_destructive(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)

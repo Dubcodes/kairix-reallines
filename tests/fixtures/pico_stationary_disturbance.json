@@ -1,0 +1,9 @@
+{
+  "description": "Representative excerpt reconstructed from the supplied stationary 10-second observations: isolated Pan +/-1, Tilt +/-2, Zoom +/-1 and grouped channel disturbances.",
+  "rate_hz": 500,
+  "counts": [
+    [1000, 2000, 3000], [1000, 2000, 3000], [1001, 2000, 3000], [1000, 2000, 3000],
+    [1000, 2002, 3000], [1000, 2000, 3000], [999, 1998, 2999], [1000, 2000, 3000],
+    [1000, 2000, 3001], [1000, 2000, 3000], [1000, 1999, 3000], [1000, 2000, 3000]
+  ]
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import concurrent.futures
 import json
 import os
 import platform
@@ -56,6 +57,9 @@ power_control = PowerControlService()
 mutation_gate = MutationGate()
 browser_diagnostics = BrowserDiagnostics()
 hdmi_output = HdmiOutputService(DATA_DIR)
+hdmi_operation_lock = asyncio.Lock()
+hdmi_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="reallines-hdmi")
+hdmi_status_inflight: asyncio.Task | None = None
 vision_calibration = VisionCalibrationService(DATA_DIR)
 
 
@@ -215,7 +219,7 @@ async def request_logging(request: Request, call_next):
         debug.error("http_exception", path=request.url.path, error=repr(exc))
         raise
     elapsed = (time.monotonic() - start) * 1000.0
-    quiet_paths = {"/api/pose", "/api/browser-metrics", "/api/performance", "/api/tracking-stability"}
+    quiet_paths = {"/api/pose", "/api/browser-metrics", "/api/performance", "/api/tracking-stability", "/api/hdmi-output"}
     if not request.url.path.startswith("/static/") and request.url.path not in quiet_paths:
         debug.app("http_request", method=request.method, path=request.url.path, status=response.status_code, ms=round(elapsed, 3))
     if request.url.path.startswith("/static/") or request.url.path in {"/", "/engineering", "/calibration", "/control", "/gfx", "/preview"}:
@@ -307,11 +311,11 @@ async def update_browser_metrics(body: BrowserMetricsReport):
         accepted = browser_diagnostics.report(body.client_id, body.page, body.label, body.metrics)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    stability_recorder.record_browser_metrics(body.model_dump(), time.monotonic())
     return {"accepted": accepted}
 
 
-def _hdmi_status() -> dict:
-    status = hdmi_output.status()
+def _hdmi_status_data(status: dict) -> dict:
     reports = browser_diagnostics.snapshot()
     client = next((report for report in reports
                    if report["page"] == "gfx" and report["label"].strip().lower() == "hdmi"), None)
@@ -324,16 +328,54 @@ def _hdmi_status() -> dict:
     return status
 
 
+async def _run_hdmi_blocking(name: str, function, *args):
+    async with hdmi_operation_lock:
+        started = time.monotonic()
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(hdmi_executor, function, *args)
+        elapsed = (time.monotonic() - started) * 1000.0
+        runtime_profiler.observe(f"{name}_ms", elapsed)
+        stability_recorder.record_blocking_operation(name, elapsed, time.monotonic())
+        return result
+
+
+async def _compute_hdmi_status(*, refresh: bool = False) -> dict:
+    # Serialize bounded blocking discovery/service operations and keep them off
+    # the acquisition/publication event loop.
+    status = await _run_hdmi_blocking("hdmi_status", lambda: hdmi_output.status(refresh=refresh))
+    return _hdmi_status_data(status)
+
+
+async def _hdmi_status(*, refresh: bool = False) -> dict:
+    global hdmi_status_inflight
+    if refresh:
+        return await _compute_hdmi_status(refresh=True)
+    task = hdmi_status_inflight
+    if task is None or task.done():
+        task = asyncio.create_task(_compute_hdmi_status(), name="hdmi-status-singleflight")
+        hdmi_status_inflight = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if hdmi_status_inflight is task and task.done():
+            hdmi_status_inflight = None
+
+
 @app.get("/api/hdmi-output")
 async def hdmi_output_status():
-    return _hdmi_status()
+    return await _hdmi_status()
+
+
+@app.post("/api/hdmi-output/refresh")
+async def refresh_hdmi_output():
+    return await _hdmi_status(refresh=True)
 
 
 @app.patch("/api/hdmi-output")
 async def update_hdmi_output(body: HdmiOutputUpdate):
     try:
-        hdmi_output.update(body.values)
-        return _hdmi_status()
+        await _run_hdmi_blocking("hdmi_update", hdmi_output.update, body.values)
+        return await _hdmi_status()
     except HdmiOutputError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -341,8 +383,8 @@ async def update_hdmi_output(body: HdmiOutputUpdate):
 @app.post("/api/hdmi-output/reset")
 async def reset_hdmi_output():
     try:
-        hdmi_output.reset()
-        return _hdmi_status()
+        await _run_hdmi_blocking("hdmi_reset", hdmi_output.reset)
+        return await _hdmi_status()
     except HdmiOutputError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -352,8 +394,8 @@ async def control_hdmi_output(action: str):
     if action not in HDMI_ACTIONS:
         raise HTTPException(404, "Unknown HDMI output action")
     try:
-        hdmi_output.action(action)
-        return _hdmi_status()
+        result = await _run_hdmi_blocking(f"hdmi_{action}", hdmi_output.action, action)
+        return _hdmi_status_data(result)
     except HdmiOutputError as exc:
         raise HTTPException(503, str(exc)) from exc
 

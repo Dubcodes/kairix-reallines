@@ -17,6 +17,7 @@ from typing import Any
 
 from .pico_protocol import PicoPacket, PicoStreamDecoder
 from .pico_processing import DEFAULT_PICO_PROCESSING, active_processing_rate, normalise_pico_processing
+from .pico_glitch_filter import PicoCountGlitchFilter
 
 AXIS_NAMES = ("pan", "tilt", "zoom")
 DEFAULT_DEVICE = "/dev/serial0"
@@ -53,6 +54,8 @@ class PicoUartWorker:
         self._processing_intervals = deque(maxlen=1024)
         self._last_consumed_at: float | None = None
         self._processing = dict(DEFAULT_PICO_PROCESSING)
+        self._glitch_filter = PicoCountGlitchFilter(self._processing["glitch_filter"])
+        self._filtered_packets: dict[int, PicoPacket] = {}
         self._queue: deque[tuple[PicoPacket, float]] = deque()
         self._bytes_received = 0
         self._samples_consumed = 0
@@ -87,6 +90,8 @@ class PicoUartWorker:
         self._references.clear()
         self._packet = None
         self._received_at = None
+        self._glitch_filter.reset()
+        self._filtered_packets.clear()
         if timeout:
             self._link_timeouts += 1
 
@@ -95,6 +100,12 @@ class PicoUartWorker:
         with self._lock:
             if settings["mode"] != self._processing["mode"]:
                 self._clear_processing_queue_locked()
+            if settings["glitch_filter"] != self._processing["glitch_filter"]:
+                # A filter change can alter the accepted count by its bounded
+                # history delay. Require an explicit fresh reference.
+                self._references.clear()
+                self._glitch_filter.configure(settings["glitch_filter"])
+                self._filtered_packets.clear()
             capacity = settings["buffer_capacity"]
             while len(self._queue) > capacity:
                 self._queue.popleft()
@@ -193,6 +204,8 @@ class PicoUartWorker:
                     self._restarts += 1
                     self._last_sequence = None
                     self._last_press_counts = None
+                    self._glitch_filter.reset()
+                    self._filtered_packets.clear()
                 if self._session_id != packet.session_id:
                     if self._session_id is not None:
                         self._restarts += 1
@@ -201,6 +214,8 @@ class PicoUartWorker:
                     self._clear_processing_queue_locked()
                     self._last_sequence = None
                     self._last_press_counts = None
+                    self._glitch_filter.reset()
+                    self._filtered_packets.clear()
                 if self._last_sequence is not None:
                     diff = (packet.sequence - self._last_sequence) & 0xFFFFFFFF
                     if diff == 0 or diff >= 0x80000000:
@@ -219,6 +234,17 @@ class PicoUartWorker:
                 self._received_at = arrival
                 self._packets += 1
                 self._recent_packets.append(arrival)
+                raw_counts = {axis: int(getattr(packet, axis)) for axis in AXIS_NAMES}
+                accepted = self._glitch_filter.process(raw_counts)
+                filtered = PicoPacket(
+                    sequence=packet.sequence, session_id=packet.session_id, pico_us=packet.pico_us,
+                    pan=accepted["pan"], tilt=accepted["tilt"], zoom=accepted["zoom"],
+                    button_bits=packet.button_bits, button_presses=packet.button_presses,
+                    focus=packet.focus, flags=packet.flags,
+                )
+                self._filtered_packets[packet.sequence] = filtered
+                if len(self._filtered_packets) > self._processing["buffer_capacity"] * 2:
+                    self._filtered_packets.pop(next(iter(self._filtered_packets)))
                 if len(self._queue) >= self._processing["buffer_capacity"]:
                     self._queue.popleft()
                     self._buffer_overflows += 1
@@ -240,7 +266,8 @@ class PicoUartWorker:
         with self._lock:
             if not self._fresh(time.monotonic()):
                 raise ValueError("Pico has no fresh UART count; verify wiring before referencing")
-            count = getattr(self._packet, axis)
+            packet = self._filtered_packets.get(self._packet.sequence, self._packet)
+            count = getattr(packet, axis)
             reference_id = uuid.uuid4().hex
             self._references[axis] = {"reference_count": count, "reference_angle": angle, "reference_id": reference_id}
             return reference_id
@@ -252,14 +279,17 @@ class PicoUartWorker:
     def _snapshot(self, axis: str, packet: PicoPacket | None, received_at: float | None, now: float) -> dict:
         fresh = self._connected and packet is not None and received_at is not None and 0 <= now - received_at <= STALE_SECONDS
         reference = self._references.get(axis) or {}
-        count = getattr(packet, axis) if packet else 0
+        raw_count = getattr(packet, axis) if packet else 0
+        accepted_packet = self._filtered_packets.get(packet.sequence, packet) if packet else None
+        count = getattr(accepted_packet, axis) if accepted_packet else 0
         age = (now - received_at) * 1000 if received_at is not None else None
         integrity = "TRUSTED" if fresh else "UNKNOWN"
         status = ("Referenced" if fresh and reference else
                   "Set a new encoder reference" if fresh else
                   "Pico UART stale or disconnected")
         return {
-            "raw_count": count, "configured": True, "driver_alive": fresh,
+            "raw_count": raw_count, "input_raw_count": raw_count, "filtered_count": count,
+            "configured": True, "driver_alive": fresh,
             "referenced": bool(reference), "reference_count": reference.get("reference_count"),
             "reference_angle": reference.get("reference_angle", 0.0), "reference_id": reference.get("reference_id"),
             "sample_mono": received_at, "availability": "AVAILABLE" if fresh else "UNAVAILABLE",
@@ -355,8 +385,13 @@ class PicoUartWorker:
                 "acquisition_rate_hz": consumed_rate,
                 "link_health": "RECEIVING" if self._fresh(now) else "WAITING" if self._connected else "DISCONNECTED",
                 "processing_settings": deepcopy(self._processing),
+                "glitch_filter": self._glitch_filter.diagnostics(active_processing_rate(self._processing)),
                 "link_timeouts": self._link_timeouts,
                 "counts": {axis: getattr(packet, axis) if packet else None for axis in AXIS_NAMES},
+                "filtered_counts": {
+                    axis: self._glitch_filter.diagnostics(active_processing_rate(self._processing))["accepted_counts"].get(axis)
+                    for axis in AXIS_NAMES
+                },
                 "button_bits": packet.button_bits if packet else 0,
                 "button_presses": deepcopy(self._press_events),
                 "packet_gaps": self._missed_packets,

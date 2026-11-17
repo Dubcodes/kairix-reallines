@@ -27,6 +27,7 @@ class TrackingStabilityRecorder:
         self.clock = clock
         self._lock = threading.Lock()
         self._events: deque[dict[str, Any]] = deque(maxlen=self.capacity)
+        self._pre_events: deque[dict[str, Any]] = deque(maxlen=1_000)
         self._active = False
         self._started_mono: float | None = None
         self._ends_mono: float | None = None
@@ -39,6 +40,9 @@ class TrackingStabilityRecorder:
         self._raw_session: int | None = None
         self._publication_sequence = 0
         self._dropped_by_capacity = 0
+        self._automatic = False
+        self._trigger_reason: str | None = None
+        self._previous_probe: dict[str, Any] | None = None
 
     def start(self, duration_seconds: float, *, mode: str = "live",
               fixed_pose: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -65,6 +69,8 @@ class TrackingStabilityRecorder:
             self._raw_session = None
             self._publication_sequence = 0
             self._dropped_by_capacity = 0
+            self._automatic = False
+            self._trigger_reason = None
         return self.status()
 
     @staticmethod
@@ -108,6 +114,99 @@ class TrackingStabilityRecorder:
             self._dropped_by_capacity += 1
         self._events.append(event)
 
+    def _trigger_locked(self, now: float, reason: str) -> None:
+        if self._active:
+            return
+        self._events.clear()
+        for event in self._pre_events:
+            self._append_locked(deepcopy(event))
+        self._active = True
+        self._automatic = True
+        self._trigger_reason = str(reason)[:120]
+        self._started_mono = now
+        self._ends_mono = now + 5.0
+        self._stopped_mono = None
+        self._duration_seconds = 5.0
+        self._mode = "live"
+        self._stop_reason = "automatic_post_event"
+
+    def observe_acquisition(self, timestamp: float, samples: dict[str, dict[str, Any]],
+                            tracking: dict[str, Any], camera: dict[str, Any]) -> bool:
+        """Cheap always-on probe; returns whether full correlation is required."""
+        axes = tracking.get("axes", {})
+        probe = {
+            "stage": "pre_event", "mono": float(timestamp),
+            "raw_counts": {axis: samples.get(axis, {}).get("input_raw_count", samples.get(axis, {}).get("raw_count")) for axis in AXES},
+            "filtered_counts": {axis: samples.get(axis, {}).get("filtered_count", samples.get(axis, {}).get("raw_count")) for axis in AXES},
+            "mapped": {axis: axes.get(axis, {}).get("value") for axis in ("pan", "tilt")},
+            "references": {axis: axes.get(axis, {}).get("reference_id") for axis in AXES},
+            "tracking_valid": bool(tracking.get("valid")),
+            "camera": self._pose_fields(camera),
+        }
+        with self._lock:
+            self._expire_locked(timestamp)
+            while self._pre_events and timestamp - self._pre_events[0]["mono"] > 2.0:
+                self._pre_events.popleft()
+            self._pre_events.append(probe)
+            previous = self._previous_probe
+            self._previous_probe = probe
+            if previous is not None and not self._active:
+                reason = None
+                if previous["references"] != probe["references"]:
+                    reason = "reference_identity_changed"
+                elif previous["tracking_valid"] != probe["tracking_valid"]:
+                    reason = "tracking_validity_changed"
+                else:
+                    for axis in ("pan", "tilt"):
+                        before, after = previous["mapped"].get(axis), probe["mapped"].get(axis)
+                        if isinstance(before, (int, float)) and isinstance(after, (int, float)) and abs(after - before) >= 0.25:
+                            counts_constant = (
+                                previous["raw_counts"].get(axis) == probe["raw_counts"].get(axis)
+                                and previous["filtered_counts"].get(axis) == probe["filtered_counts"].get(axis)
+                            )
+                            reason = (f"downstream_large_{axis}_pose_change_constant_counts"
+                                      if counts_constant else f"large_{axis}_pose_change")
+                            break
+                if reason:
+                    self._trigger_locked(timestamp, reason)
+            return self._active
+
+    def observe_scheduling(self, stage: str, gap_ms: float, timestamp: float) -> None:
+        if gap_ms < 40.0:
+            return
+        with self._lock:
+            if not self._active:
+                self._trigger_locked(timestamp, f"{stage}_scheduling_gap_{gap_ms:.1f}ms")
+            self._append_locked({"stage": "scheduling_gap", "mono": float(timestamp),
+                                 "loop": stage, "gap_ms": round(float(gap_ms), 3)})
+
+    def record_blocking_operation(self, name: str, elapsed_ms: float, timestamp: float) -> None:
+        with self._lock:
+            if elapsed_ms >= 40.0 and not self._active:
+                self._trigger_locked(timestamp, f"blocking_{name}_{elapsed_ms:.1f}ms")
+            if self._active:
+                self._append_locked({"stage": "blocking_operation", "mono": float(timestamp),
+                                     "operation": str(name), "elapsed_ms": round(float(elapsed_ms), 3)})
+
+    def record_browser_metrics(self, report: dict[str, Any], timestamp: float) -> None:
+        if not self._active:
+            return
+        metrics = report.get("metrics") or {}
+        with self._lock:
+            if self._active:
+                self._append_locked({
+                    "stage": "browser_metrics", "mono": float(timestamp),
+                    "client_id": report.get("client_id"), "page": report.get("page"),
+                    "label": report.get("label"),
+                    "pose_identity": metrics.get("last_pose_identity"),
+                    "rendered_pose_identity": metrics.get("last_rendered_pose_identity"),
+                    "incoming_pose_hz_5s": metrics.get("incoming_pose_hz_5s"),
+                    "animation_frame_hz_5s": metrics.get("animation_frame_hz_5s"),
+                    "frame_interval_p95_ms_5s": metrics.get("frame_interval_p95_ms_5s"),
+                    "missed_frame_deadlines_5s": metrics.get("missed_frame_deadlines_5s"),
+                    "transport_mode": metrics.get("transport_mode"),
+                })
+
     def record_raw_packet(self, packet: Any, received_mono: float) -> None:
         if not self._active:
             return
@@ -142,7 +241,8 @@ class TrackingStabilityRecorder:
                 sample = samples.get(axis, {})
                 runtime = tracking.get("axes", {}).get(axis, {})
                 axes[axis] = {
-                    "raw_count": sample.get("raw_count", runtime.get("raw_count")),
+                    "raw_count": sample.get("input_raw_count", sample.get("raw_count", runtime.get("raw_count"))),
+                    "filtered_count": sample.get("filtered_count", sample.get("raw_count", runtime.get("raw_count"))),
                     "mapped_value": runtime.get("value"),
                     "reference_id": runtime.get("reference_id"),
                     "health": runtime.get("health"),
@@ -208,6 +308,7 @@ class TrackingStabilityRecorder:
             ends = self._ends_mono
             result = {
                 "active": active, "mode": self._mode, "duration_seconds": self._duration_seconds,
+                "automatic": self._automatic, "trigger_reason": self._trigger_reason,
                 "elapsed_seconds": round(max(0.0, now - started), 3) if started is not None else 0.0,
                 "remaining_seconds": round(max(0.0, ends - now), 3) if active and ends is not None else 0.0,
                 "event_count": len(events), "capacity": self.capacity,

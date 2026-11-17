@@ -8,6 +8,7 @@ DEFAULT_PICO_PROCESSING = {
     "latest_rate_hz": 200,
     "every_rate_hz": 500,
     "buffer_capacity": 256,
+    "glitch_filter": "off",
 }
 
 
@@ -28,11 +29,15 @@ def normalise_pico_processing(value: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("Every Sample rate must be between 20 and 1000 Hz")
     if not 16 <= capacity <= 4096:
         raise ValueError("Pico buffer capacity must be between 16 and 4096 samples")
+    glitch_filter = str(source.get("glitch_filter", "off"))
+    if glitch_filter not in {"off", "conservative", "experimental"}:
+        raise ValueError("Pico glitch filter must be off, conservative or experimental")
     return {
         "mode": mode,
         "latest_rate_hz": latest,
         "every_rate_hz": every,
         "buffer_capacity": capacity,
+        "glitch_filter": glitch_filter,
     }
 
 

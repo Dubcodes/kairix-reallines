@@ -30,6 +30,34 @@ def packet(seq=1, session=10, pan=120, tilt=-34, zoom=5,
 
 
 class PicoProtocolTests(unittest.TestCase):
+    def test_glitch_filter_preserves_raw_and_exposes_filtered_counts(self):
+        worker = PicoUartWorker('/dev/null')
+        worker.configure_processing({**DEFAULT_PICO_PROCESSING, "glitch_filter": "conservative"})
+        now = time.monotonic()
+        for sequence, count in enumerate((100, 100, 101), 1):
+            worker.feed(encode_packet(packet(sequence, pan=count)), now=now + sequence * .002)
+        sample = worker.snapshot("pan", now=now + .01)
+        self.assertEqual(sample["input_raw_count"], 101)
+        self.assertEqual(sample["filtered_count"], 100)
+        self.assertEqual(worker.status(now + .01)["glitch_filter"]["profile"], "conservative")
+
+    def test_filter_change_clears_reference_without_silent_rereference(self):
+        worker = PicoUartWorker('/dev/null')
+        now = time.monotonic()
+        worker.feed(encode_packet(packet(1, pan=20)), now=now)
+        worker.set_reference("pan", 3.0)
+        self.assertTrue(worker.snapshot("pan", now=now)["referenced"])
+        worker.configure_processing({**DEFAULT_PICO_PROCESSING, "glitch_filter": "conservative"})
+        self.assertFalse(worker.snapshot("pan", now=now)["referenced"])
+
+    def test_new_pico_session_resets_filter_history(self):
+        worker = PicoUartWorker('/dev/null')
+        worker.configure_processing({**DEFAULT_PICO_PROCESSING, "glitch_filter": "experimental"})
+        now = time.monotonic()
+        for sequence in range(1, 8):
+            worker.feed(encode_packet(packet(sequence, session=1, pan=100)), now=now + sequence * .002)
+        worker.feed(encode_packet(packet(8, session=2, pan=500)), now=now + .02)
+        self.assertEqual(worker.snapshot("pan", now=now + .02)["filtered_count"], 500)
     def test_processing_settings_defaults_and_validation(self):
         self.assertEqual(normalise_pico_processing({}), DEFAULT_PICO_PROCESSING)
         with self.assertRaisesRegex(ValueError, "mode"):

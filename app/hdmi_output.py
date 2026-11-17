@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
@@ -73,11 +75,18 @@ class HdmiOutputError(ValueError):
 class HdmiOutputService:
     def __init__(self, data_dir: Path, *, sysfs_root: Path = Path("/sys/class/drm"),
                  runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-                 helper: str | None = None) -> None:
+                 helper: str | None = None, clock: Callable[[], float] = time.monotonic,
+                 discovery_ttl: float = 30.0, status_ttl: float = 5.0) -> None:
         self.path = Path(data_dir) / "hdmi_output.json"
         self.sysfs_root = sysfs_root
         self.runner = runner
         self.helper = helper or os.getenv("KAIRIX_HDMI_HELPER", "/usr/local/sbin/kairix-hdmi-helper")
+        self.clock = clock
+        self.discovery_ttl = max(1.0, float(discovery_ttl))
+        self.status_ttl = max(1.0, float(status_ttl))
+        self._operation_lock = threading.Lock()
+        self._connector_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._systemd_cache: tuple[float, dict[str, Any]] | None = None
         self.config = self._load()
 
     def _load(self) -> dict[str, str]:
@@ -109,8 +118,21 @@ class HdmiOutputService:
         except (OSError, subprocess.SubprocessError):
             return ""
 
+    def _connectors(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+        now = self.clock()
+        with self._operation_lock:
+            cached = self._connector_cache
+            if not refresh and cached is not None and now - cached[0] < self.discovery_ttl:
+                return deepcopy(cached[1])
+            result = discover_connectors(self.sysfs_root, self._modetest())
+            self._connector_cache = (self.clock(), result)
+            return deepcopy(result)
+
     def connectors(self) -> list[dict[str, Any]]:
-        return discover_connectors(self.sysfs_root, self._modetest())
+        return self._connectors()
+
+    def refresh_connectors(self) -> list[dict[str, Any]]:
+        return self._connectors(refresh=True)
 
     def update(self, values: dict[str, Any]) -> dict[str, str]:
         unknown = set(values) - {"connector", "mode"}
@@ -133,7 +155,7 @@ class HdmiOutputService:
     def reset(self) -> dict[str, str]:
         return self.update(DEFAULT_CONFIG)
 
-    def _systemd_status(self) -> dict[str, Any]:
+    def _systemd_status_uncached(self) -> dict[str, Any]:
         try:
             result = self.runner(
                 ["systemctl", "show", UNIT, "--property=LoadState,ActiveState,SubState,UnitFileState,ExecMainStatus"],
@@ -150,17 +172,44 @@ class HdmiOutputService:
             "exit_status": int(values["ExecMainStatus"]) if values.get("ExecMainStatus", "").isdigit() else None,
         }
 
-    def status(self) -> dict[str, Any]:
-        connectors = self.connectors()
+    def _systemd_status(self, *, refresh: bool = False) -> dict[str, Any]:
+        now = self.clock()
+        with self._operation_lock:
+            cached = self._systemd_cache
+            if not refresh and cached is not None and now - cached[0] < self.status_ttl:
+                return deepcopy(cached[1])
+            result = self._systemd_status_uncached()
+            self._systemd_cache = (self.clock(), result)
+            return deepcopy(result)
+
+    def status(self, *, refresh: bool = False) -> dict[str, Any]:
+        connectors = self.refresh_connectors() if refresh else self.connectors()
         selected = next((item for item in connectors if item["name"] == self.config["connector"]), None)
         helper_available = Path(self.helper).is_file() and os.access(self.helper, os.X_OK)
+        systemd = self._systemd_status(refresh=refresh)
+        issues = []
+        if not systemd["installed"]:
+            issues.append("HDMI service is not installed; run installer/install-hdmi-output.sh during maintenance")
+        if not helper_available:
+            issues.append("Privileged HDMI helper is not installed or executable")
+        if selected is None:
+            issues.append(f"Configured connector {self.config['connector']} was not discovered; refresh connectors")
+        elif not selected["connected"]:
+            issues.append(f"Configured connector {self.config['connector']} has no connected display")
+        if selected is not None and self.config["mode"] not in selected["modes"]:
+            issues.append(f"Configured mode {self.config['mode']} was not verified by DRM/KMS")
+        if systemd.get("exit_status") not in {None, 0}:
+            issues.append(f"HDMI service last exited with status {systemd['exit_status']}; inspect journalctl")
         return {
-            **self._systemd_status(), "helper_available": helper_available,
+            **systemd, "helper_available": helper_available,
             "config": deepcopy(self.config), "connectors": connectors,
             "selected_connected": bool(selected and selected["connected"]),
             "selected_mode_verified": bool(selected and self.config["mode"] in selected["modes"]),
             "actual_mode": None, "displayed_fps": None,
             "application_connected": False,
+            "discovery_cached": not refresh,
+            "refresh_available": True,
+            "issues": issues,
             "limitations": "Actual presentation FPS and display latency require compositor/browser telemetry and physical capture validation.",
         }
 
@@ -177,4 +226,5 @@ class HdmiOutputService:
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "helper failed").strip()[:240]
             raise HdmiOutputError(f"HDMI output action failed: {detail}")
+        self._systemd_cache = None
         return self.status()

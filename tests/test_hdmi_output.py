@@ -1,5 +1,8 @@
 import os
 import tempfile
+import time
+import asyncio
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +23,75 @@ id encoder status name size (mm) modes encoders
 
 
 class HdmiOutputCase(unittest.TestCase):
+    def test_slow_hdmi_commands_do_not_stall_200hz_or_50hz_event_loop_work(self):
+        from app import main
+
+        async def scenario():
+            stamps = {200: [], 50: []}
+            async def ticker(rate):
+                interval = 1 / rate
+                end = asyncio.get_running_loop().time() + .18
+                while asyncio.get_running_loop().time() < end:
+                    stamps[rate].append(asyncio.get_running_loop().time())
+                    await asyncio.sleep(interval)
+            status = {"installed": False, "active": False, "state": "unavailable",
+                      "enabled": False, "exit_status": None, "helper_available": False,
+                      "config": DEFAULT_CONFIG, "connectors": [], "selected_connected": False,
+                      "selected_mode_verified": False, "actual_mode": None, "displayed_fps": None,
+                      "application_connected": False}
+            def slow_status(*, refresh=False):
+                time.sleep(.15)
+                return dict(status)
+            with patch.object(main.hdmi_output, "status", side_effect=slow_status):
+                await asyncio.gather(main._hdmi_status(), ticker(200), ticker(50))
+            return stamps
+
+        stamps = asyncio.run(scenario())
+        self.assertGreaterEqual(len(stamps[200]), 20)
+        self.assertGreaterEqual(len(stamps[50]), 7)
+        for values in stamps.values():
+            self.assertLess(max(b - a for a, b in zip(values, values[1:])), .04)
+
+    def test_concurrent_status_requests_share_one_blocking_operation(self):
+        from app import main
+        calls = 0
+        status = {"installed": False, "active": False, "state": "unavailable",
+                  "enabled": False, "exit_status": None, "helper_available": False,
+                  "config": DEFAULT_CONFIG, "connectors": [], "selected_connected": False,
+                  "selected_mode_verified": False, "actual_mode": None, "displayed_fps": None,
+                  "application_connected": False}
+        def slow_status(*, refresh=False):
+            nonlocal calls
+            calls += 1
+            time.sleep(.05)
+            return dict(status)
+        async def scenario():
+            with patch.object(main.hdmi_output, "status", side_effect=slow_status):
+                await asyncio.gather(*(main._hdmi_status() for _ in range(8)))
+        asyncio.run(scenario())
+        self.assertEqual(calls, 1)
+    def test_discovery_and_system_status_are_cached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+            def runner(args, **_kwargs):
+                calls.append(args[0])
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            service = HdmiOutputService(Path(directory), runner=runner)
+            service._modetest = lambda: calls.append("modetest") or MODETEST
+            service.status()
+            service.status()
+            self.assertEqual(calls.count("modetest"), 1)
+            self.assertEqual(calls.count("systemctl"), 1)
+
+    def test_explicit_refresh_repeats_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = HdmiOutputService(Path(directory))
+            calls = []
+            service._modetest = lambda: calls.append(True) or MODETEST
+            service.connectors()
+            service.connectors()
+            service.refresh_connectors()
+            self.assertEqual(len(calls), 2)
     def test_modetest_parser_preserves_exact_refresh_modes(self):
         modes = parse_modetest_modes(MODETEST)
         self.assertEqual(modes["HDMI-A-2"], ["1920x1080@50.00", "1920x1080@60.00"])

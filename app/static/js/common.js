@@ -29,7 +29,7 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
   };
   const deliver = (data, type='state') => {
     currentState = data;
-    recordIncomingPose(page,poseIdentity(data),performance.now(),data?.transport||null);
+    if(type!=='calibration_overlay')recordIncomingPose(page,poseIdentity(data),performance.now(),data?.transport||null);
     try {
       onState(data, {type});
       return true;
@@ -43,6 +43,11 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
     if (!currentState) return;
     currentState = {...currentState, ...pose, tracking:{...currentState.tracking, ...pose.tracking, axes:{...currentState.tracking.axes, ...(pose.tracking?.axes||{})}}};
     deliver(currentState, 'pose');
+  };
+  const deliverCalibrationOverlay = (overlay) => {
+    if (!currentState) return;
+    currentState = {...currentState, calibration_overlay:overlay};
+    deliver(currentState, 'calibration_overlay');
   };
   const fetchState = async () => {
     try {
@@ -106,6 +111,7 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'state') deliver(msg.data, 'state');
         if (msg.type === 'pose') deliverPose(msg.data);
+        if (msg.type === 'calibration_overlay') deliverCalibrationOverlay(msg.data);
       } catch (e) {
         console.error(e);
         logFrontend(page, page === 'control' ? 'control_initialization_failed' : 'ws_message_error', {error:String(e)});
