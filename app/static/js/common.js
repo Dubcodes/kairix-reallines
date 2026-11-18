@@ -1,5 +1,6 @@
 import {poseIdentity,recordIncomingPose,setBrowserTransport} from './browser_metrics.js?v=world-media1';
 import {shouldApplyOverlayRevision} from './dot_lock.js?v=world-media1';
+import {mergeOrderedFullState,mergeOrderedPose} from './pose_order.js?v=world-media1';
 
 export async function api(path, options={}) {
   const init = { ...options };
@@ -42,7 +43,9 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
   };
   const deliverPose = (pose) => {
     if (!currentState) return;
-    currentState = {...currentState, ...pose, tracking:{...currentState.tracking, ...pose.tracking, axes:{...currentState.tracking.axes, ...(pose.tracking?.axes||{})}}};
+    const merged=mergeOrderedPose(currentState,pose);
+    if(!merged.applied)return;
+    currentState=merged.state;
     deliver(currentState, 'pose');
   };
   const deliverCalibrationOverlay = (overlay) => {
@@ -55,7 +58,8 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
     try {
       const response = await fetch('/api/state', {cache:'no-store'});
       if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-      if (deliver(await response.json(), 'state')) status('state-received');
+      const incoming=await response.json();
+      if (deliver(mergeOrderedFullState(currentState,incoming), 'state')) status('state-received');
     } catch (e) {
       console.error(e);
       logFrontend(page, 'state_fetch_error', {error:String(e)});
@@ -111,7 +115,7 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === 'state') deliver(msg.data, 'state');
+        if (msg.type === 'state') deliver(mergeOrderedFullState(currentState,msg.data), 'state');
         if (msg.type === 'pose') deliverPose(msg.data);
         if (msg.type === 'calibration_overlay') deliverCalibrationOverlay(msg.data);
       } catch (e) {

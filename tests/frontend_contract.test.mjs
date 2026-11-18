@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
 
 import {
   ENGINEERING_AXES,
@@ -16,9 +17,27 @@ import {
   zoomFovDraftValue,
 } from '../app/static/js/engineering_contract.js';
 
-import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
+import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectPoint, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
 import {withoutObservation,replaceObservation,nudgeDotPointPx,pinnedObservation,shouldApplyOverlayRevision} from '../app/static/js/dot_lock.js';
+import {mergeOrderedFullState,mergeOrderedPose} from '../app/static/js/pose_order.js';
+
+test('older full state cannot roll back a newer pose',()=>{
+  const current={pose_sequence:12,camera:{pan:12},tracking:{axes:{pan:{raw:12}}},scene:{background:'old'}};
+  const merged=mergeOrderedFullState(current,{pose_sequence:10,camera:{pan:10},tracking:{axes:{pan:{raw:10}}},scene:{background:'new'}});
+  assert.equal(merged.pose_sequence,12);
+  assert.equal(merged.camera.pan,12);
+  assert.equal(merged.scene.background,'new');
+  assert.equal(mergeOrderedPose(merged,{pose_sequence:11,camera:{pan:11},tracking:{axes:{}}}).applied,false);
+  const latest=mergeOrderedPose(merged,{pose_sequence:13,camera:{pan:13},tracking:{axes:{}}});
+  assert.equal(latest.applied,true);
+  assert.equal(latest.state.camera.pan,13);
+});
+
+test('native projection fixture remains identical to browser mathematics',()=>{
+  const rows=fs.readFileSync(new URL('./fixtures/native_projection.csv',import.meta.url),'utf8').trim().split(/\r?\n/).slice(1);
+  for(const row of rows){const [name,...numbers]=row.split(','),v=numbers.map(Number),[px,py,pz,cx,cy,cz,pan,tilt,roll,fov,width,height,expectedX,expectedY]=v;const point=projectPoint({x:px,y:py,z:pz},{x:cx,y:cy,z:cz,pan,tilt,roll,fov},width,height);assert.ok(point,name);assert.ok(Math.abs(point.x-expectedX)<1e-6,name);assert.ok(Math.abs(point.y-expectedY)<1e-6,name);}
+});
 
 test('stale calibration overlay revisions cannot replace newer operator intent',()=>{
   assert.equal(shouldApplyOverlayRevision({revision:8},{revision:7}),false);

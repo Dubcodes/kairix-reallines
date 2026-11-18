@@ -20,6 +20,13 @@ async def sample_tracking_once(store: Any, source_manager: Any, timestamp: float
         else:
             with profiler.measure("tracking_mapping_and_pose"):
                 store.sample_tick(samples, now)
+        native_pose_writer = getattr(store, "native_pose_writer", None)
+        if native_pose_writer is not None:
+            if profiler is None:
+                native_pose_writer.publish_store(store, samples, now)
+            else:
+                with profiler.measure("native_pose_publish"):
+                    native_pose_writer.publish_store(store, samples, now)
         recorder = getattr(store, "stability_recorder", None)
         if recorder is not None:
             if recorder.observe_acquisition(now, samples, store.tracking, store.camera):

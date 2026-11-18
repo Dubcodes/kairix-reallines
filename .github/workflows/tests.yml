@@ -37,4 +37,18 @@ jobs:
           node --check app/static/js/preview.js
           node --check app/static/js/preview_media.js
           node --check app/static/js/render.js
+          node --check app/static/js/pose_order.js
       - run: python -m compileall -q app tests
+
+  native-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native renderer build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libsdl2-dev
+      - name: Build native core and SDL2 renderer
+        run: cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build native/build --parallel
+      - name: Run native projection and timing tests
+        run: ctest --test-dir native/build --output-on-failure
+      - name: Validate service and installer syntax
+        run: bash -n installer/install-native-renderer.sh && python -m py_compile installer/kairix-native-helper

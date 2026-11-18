@@ -30,6 +30,9 @@ from .stability import TrackingStabilityRecorder
 from .performance import RuntimeProfiler
 from .hdmi_output import ACTIONS as HDMI_ACTIONS, HdmiOutputError, HdmiOutputService
 from .power_health import PowerHealthService
+from .hang_watchdog import EventLoopWatchdog
+from .native_pose import LatestPoseWriter
+from .native_output import ACTIONS as NATIVE_ACTIONS, NativeOutputError, NativeOutputService
 from .vision_calibration import MAX_IMAGE_BYTES, VisionCalibrationError, VisionCalibrationService
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +51,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 acquisition_task: asyncio.Task | None = None
 publication_task: asyncio.Task | None = None
 imu_status_task: asyncio.Task | None = None
+watchdog_heartbeat_task: asyncio.Task | None = None
 stability_recorder = TrackingStabilityRecorder()
 runtime_profiler = RuntimeProfiler()
 source_manager = TrackingSourceManager(stability_recorder=stability_recorder)
@@ -65,6 +69,14 @@ diagnostic_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, threa
 power_health = PowerHealthService()
 power_status_inflight: asyncio.Task | None = None
 vision_calibration = VisionCalibrationService(DATA_DIR)
+event_loop_watchdog = EventLoopWatchdog(debug.session_dir)
+native_output = NativeOutputService()
+native_output_lock = asyncio.Lock()
+native_output_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="reallines-native-output")
+native_status_inflight: asyncio.Task | None = None
+native_pose_default = "/dev/shm/kairix-reallines-pose-v1" if os.name == "posix" else str(DATA_DIR / "native_pose.bin")
+native_pose_writer = LatestPoseWriter(Path(os.getenv("KAIRIX_NATIVE_POSE_PATH", native_pose_default)))
+store.native_pose_writer = native_pose_writer
 
 
 class CameraUpdate(BaseModel):
@@ -235,29 +247,34 @@ async def request_logging(request: Request, call_next):
 
 @app.on_event("startup")
 async def start_acquisition():
-    global acquisition_task, publication_task, imu_status_task
+    global acquisition_task, publication_task, imu_status_task, watchdog_heartbeat_task
     source_manager.configure_pico_processing(store.pico_processing)
     source_manager.configure(store.profile_index["active_id"], store.profile)
     imu_service.start()
     runtime_profiler.install_gc_monitoring()
+    event_loop_watchdog.start()
+    native_pose_writer.open()
     acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
     publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
     imu_status_task = asyncio.create_task(imu_status_publication_loop(store, imu_service), name="optional-imu-status")
+    watchdog_heartbeat_task = asyncio.create_task(event_loop_watchdog.heartbeat_loop(), name="event-loop-heartbeat")
 
 
 @app.on_event("shutdown")
 async def stop_acquisition():
-    global acquisition_task, publication_task, imu_status_task
-    tasks = [task for task in (acquisition_task, publication_task, imu_status_task) if task]
+    global acquisition_task, publication_task, imu_status_task, watchdog_heartbeat_task
+    tasks = [task for task in (acquisition_task, publication_task, imu_status_task, watchdog_heartbeat_task) if task]
     for task in tasks:
         task.cancel()
     if tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.gather(*tasks)
-    acquisition_task = publication_task = imu_status_task = None
+    acquisition_task = publication_task = imu_status_task = watchdog_heartbeat_task = None
     source_manager.stop()
     imu_service.stop()
     runtime_profiler.uninstall_gc_monitoring()
+    event_loop_watchdog.stop()
+    native_pose_writer.close()
     debug.flush()
 
 
@@ -504,6 +521,7 @@ async def performance_status():
         )
     result = runtime_profiler.snapshot()
     result["pico"] = source_manager.pico_status()
+    result["event_loop_watchdog"] = event_loop_watchdog.status()
     result["power"] = await asyncio.shield(power_status_inflight)
     if power_status_inflight.done():
         power_status_inflight = None
@@ -523,6 +541,36 @@ async def start_tracking_stability(body: StabilityRecordingStart):
             fixed_pose=store.camera if body.mode in {"fixed_pose", "fixed_fov"} else None,
         )
     except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+async def _run_native_output(function, *args):
+    async with native_output_lock:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(native_output_executor, function, *args)
+
+
+@app.get("/api/native-output")
+async def native_output_status():
+    global native_status_inflight
+    task = native_status_inflight
+    if task is None or task.done():
+        task = asyncio.create_task(_run_native_output(native_output.status), name="native-status-singleflight")
+        native_status_inflight = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if native_status_inflight is task and task.done():
+            native_status_inflight = None
+
+
+@app.post("/api/native-output/{action}")
+async def control_native_output(action: str):
+    if action not in NATIVE_ACTIONS:
+        raise HTTPException(404, "Unknown native output action")
+    try:
+        return await _run_native_output(native_output.action, action)
+    except NativeOutputError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 

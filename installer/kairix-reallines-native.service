@@ -1,0 +1,32 @@
+[Unit]
+Description=Kairix RealLines native KMSDRM graphics output
+After=seatd.service kairix-reallines-dev.service
+Requires=seatd.service kairix-reallines-dev.service
+Conflicts=kairix-reallines-hdmi.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=reallines
+Group=reallines
+SupplementaryGroups=kairix-seat render
+RuntimeDirectory=kairix-native
+RuntimeDirectoryMode=0750
+Environment=SDL_VIDEODRIVER=KMSDRM
+Environment=LIBSEAT_BACKEND=seatd
+Environment=SEATD_VTBOUND=0
+EnvironmentFile=-/etc/default/kairix-reallines-native
+ExecStart=/usr/local/bin/kairix-native-renderer $KAIRIX_NATIVE_OPTIONS
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=-/dev/shm/kairix-reallines-pose-v1
+ReadWritePaths=/run/kairix-native
+
+[Install]
+WantedBy=multi-user.target

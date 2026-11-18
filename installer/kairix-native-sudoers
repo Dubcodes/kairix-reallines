@@ -1,0 +1,6 @@
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-native-helper start
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-native-helper stop
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-native-helper restart
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-native-helper enable
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-native-helper disable
+reallines ALL=(root) NOPASSWD: /usr/local/sbin/kairix-native-helper reset-failed

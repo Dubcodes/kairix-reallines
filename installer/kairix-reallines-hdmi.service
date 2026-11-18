@@ -3,6 +3,7 @@ Description=Kairix RealLines dedicated HDMI graphics output
 After=network-online.target seatd.service kairix-reallines-dev.service
 Wants=network-online.target
 Requires=seatd.service
+Conflicts=kairix-reallines-native.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 

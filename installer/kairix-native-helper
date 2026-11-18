@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+
+UNIT = "kairix-reallines-native.service"
+COMMANDS = {"start", "stop", "restart", "enable", "disable", "reset-failed"}
+if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
+    raise SystemExit("usage: kairix-native-helper start|stop|restart|enable|disable|reset-failed")
+raise SystemExit(subprocess.call(["/usr/bin/systemctl", sys.argv[1], UNIT]))

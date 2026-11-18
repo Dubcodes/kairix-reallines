@@ -161,6 +161,7 @@ class StateStore:
         self._last_history_debug_mono = 0.0
         self._last_render_debug_mono = 0.0
         self._last_sync_status: str | None = None
+        self.pose_sequence = 0
         self.tracking: dict[str, Any] = {
             "axes": {}, "valid": False, "available": False, "integrity": "UNKNOWN",
             "calibration_confidence": "UNAVAILABLE", "warnings": [],
@@ -302,6 +303,7 @@ class StateStore:
             self.debug.tracking("tracking_history_reset", reason="tracking reference changed", generation=self.pose_history.generation)
         self._pose_reference_key = reference
         self._record_pose_sample()
+        self.pose_sequence += 1
 
     def _render_pose_state(self, now: float) -> tuple[dict[str, Any], dict[str, Any]]:
         requested = now - self.sync_config["graphics_delay_ms"] / 1000.0
@@ -1098,7 +1100,7 @@ class StateStore:
         }
         measured_targets = deepcopy(self.measured_targets)
         measured_targets["validation"] = {target["id"]: validate_measured_target(target) for target in measured_targets["targets"]}
-        return {"pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "measured_targets": measured_targets, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "transport": transport, "server_mono": now}
+        return {"pose_sequence": self.pose_sequence, "pico_controller": self.pico_source_manager.pico_status() if getattr(self, "pico_source_manager", None) else {"connected": False, "enabled_axes": [], "processing_settings": deepcopy(self.pico_processing)}, "camera": camera, "live_camera": deepcopy(camera), "render_camera": render_camera, "sync": sync, "tracking": tracking, "zoom_fov": deepcopy(self.zoom_fov_mapping), "calibration_overlay": deepcopy(self.calibration_overlay), "profiles": {"active_id": self.profile_index["active_id"], "items": deepcopy(self.profile_index["profiles"]), "active": deepcopy(self.profile)}, "world_calibrations": world_state, "measured_targets": measured_targets, "scene": deepcopy(self.scene), "calibration": deepcopy(self.calibration), "engineering": deepcopy(self.engineering), "imu": self.imu_service.snapshot() if self.imu_service else {"optional": True, "enabled": False, "source": "disabled", "health": "DISABLED", "status": "Optional IMU assistance is off", "proposals": {"pan": None, "tilt": None}, "observations": {"pan": [], "tilt": []}}, "layouts": {"active_id": self.layout_index["active_id"], "items": deepcopy(self.layout_index["layouts"]), "dirty": self.layout_dirty, "save_error": self.layout_save_error}, "clients": len(self.clients), "transport": transport, "server_mono": now}
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -1109,7 +1111,7 @@ class StateStore:
             axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "filtered_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "diagnostics") if key in runtime}
             for axis, runtime in self.tracking["axes"].items()
         }
-        return {"camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "zoom_fov": deepcopy(self.zoom_fov_mapping), "sync": sync, "server_mono": now}
+        return {"pose_sequence": self.pose_sequence, "camera": deepcopy(self.camera), "live_camera": deepcopy(self.camera), "render_camera": render_camera, "tracking": {"valid": self.tracking["valid"], "available": self.tracking["available"], "integrity": self.tracking["integrity"], "calibration_confidence": self.tracking["calibration_confidence"], "warnings": deepcopy(self.tracking["warnings"]), "axes": compact_axes}, "zoom_fov": deepcopy(self.zoom_fov_mapping), "sync": sync, "server_mono": now}
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         dead: list[WebSocket] = []

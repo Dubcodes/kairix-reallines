@@ -297,6 +297,7 @@ class PicoUartWorker:
             "calibration_confidence": "TRUSTED" if reference and fresh else "UNREFERENCED",
             "integrity_policy": "strict", "health": "VALID" if fresh else "STALE", "status": status,
             "pico_session": self._session_id, "packet_seq": packet.sequence if packet else None,
+            "pico_timestamp_us": packet.pico_us if packet else None,
             "packet_age_ms": round(age, 2) if age is not None else None,
             "packet_gaps": self._missed_packets, "crc_errors": self._decoder.crc_errors,
             "protocol_errors": self._decoder.protocol_errors,
