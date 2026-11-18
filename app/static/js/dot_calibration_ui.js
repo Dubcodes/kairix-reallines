@@ -3,6 +3,7 @@ import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
   rectangleTemplatePoints,rmsOverlayError,withoutObservation,replaceObservation,nudgeDotPointPx,magnifierCrop,pinnedObservation,
+  calibrationViewportPresentation,
 } from './dot_lock.js?v=world-media1';
 
 const clone=value=>structuredClone(value);
@@ -11,6 +12,7 @@ const finite=value=>Number.isFinite(Number(value));
 const fmt=(value,digits=2)=>finite(value)?Number(value).toFixed(digits):'—';
 const inViewport=point=>point&&point.x>=0&&point.x<=1&&point.y>=0&&point.y<=1;
 const MARKER_COORDINATE_FIELDS=Object.freeze({X:'dotMarkerX',Y:'dotMarkerY'});
+const MARKERS_ONLY_STORAGE_KEY='kairix.dotCalibration.markersOnly.v1';
 
 export class DotCalibrationUi {
   constructor(byId){
@@ -27,6 +29,11 @@ export class DotCalibrationUi {
     this.overlayRevision=0;
     this.overlayTimer=null;
     this.controlsBound=false;
+    this.markersOnly=true;
+    try{
+      const saved=globalThis.localStorage?.getItem(MARKERS_ONLY_STORAGE_KEY);
+      if(saved!==null&&saved!==undefined)this.markersOnly=saved!=='false';
+    }catch(_error){}
   }
 
   activeTarget(){return this.data.targets.find(target=>target.id===this.data.active_target_id)||null;}
@@ -155,6 +162,11 @@ export class DotCalibrationUi {
     };
     id('dotOverlayVectors').onchange=async event=>{
       await this.patchOverlay({show_vectors:event.target.checked});
+    };
+    id('dotMarkersOnly').onchange=event=>{
+      this.markersOnly=event.target.checked;
+      try{globalThis.localStorage?.setItem(MARKERS_ONLY_STORAGE_KEY,String(this.markersOnly));}catch(_error){}
+      this.draw();
     };
     id('dotGroundGridHere').onchange=async event=>{
       await this.patchOverlay({ground_grid_calibration:event.target.checked});
@@ -571,6 +583,7 @@ export class DotCalibrationUi {
     id('dotMagnifierScale').value=String(overlay.magnifier_scale??6);
     id('dotOverlayLabels').checked=overlay.show_labels!==false;
     id('dotOverlayVectors').checked=overlay.show_vectors!==false;
+    id('dotMarkersOnly').checked=this.markersOnly;
     id('dotGroundGridHere').checked=!!overlay.ground_grid_calibration;
     id('dotGroundGridGfx').checked=!!overlay.ground_grid_gfx;
     id('dotGroundGridSpacing').value=String(overlay.grid_spacing_m??1);
@@ -799,15 +812,16 @@ export class DotCalibrationUi {
     if(!this.state)return;const target=this.activeTarget(),{canvas,width,height}=this.canvasSize(),ctx=canvas.getContext('2d');ctx.clearRect(0,0,width,height);
     if(!target)return;
     const overlay=this.state.calibration_overlay||{};
-    if(overlay.ground_grid_calibration){
+    const anchor=this.anchorObservation(),samePose=!anchor||this.observationMatchesCurrentPose(anchor);
+    const presentation=calibrationViewportPresentation(this.markersOnly,overlay,samePose,target.type);
+    if(presentation.showGrid){
       drawGroundGrid(ctx,this.state.render_camera,width,height,{spacingM:overlay.grid_spacing_m??1,extentM:overlay.grid_extent_m??20,majorEvery:overlay.grid_major_every??5,z:groundOffsetMetres(this.state)});
     }
     const predicted=projectModelPoints(target.model_points||{},this.state.render_camera,width,height);
-    const anchor=this.anchorObservation(),observed=this.editor.editing?this.editor.draft:(anchor?.points||{});
-    const samePose=!anchor||this.observationMatchesCurrentPose(anchor);
-    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:target.type==='rectangle',markers:target.markers,markerScale:overlay.marker_scale??1,markerOpacity:overlay.marker_opacity??.95,markerWedges:overlay.marker_wedges??4,showLabels:overlay.show_labels!==false,showVectors:samePose&&overlay.show_vectors!==false});
+    const observed=this.editor.editing?this.editor.draft:(anchor?.points||{});
+    drawDotCalibrationOverlay(ctx,width,height,{predicted,observed,selected:this.editor.selected,showConnections:presentation.showConnections,markers:target.markers,markerScale:overlay.marker_scale??1,markerOpacity:overlay.marker_opacity??.95,markerWedges:overlay.marker_wedges??4,showLabels:presentation.showLabels,showVectors:presentation.showVectors});
     const error=samePose?rmsOverlayError(predicted,this.editor.editing?this.observationPoints():observed,1920,1080):null;
-    if(error!==null){ctx.save();ctx.fillStyle='rgba(7,16,24,.84)';ctx.fillRect(10,10,260,34);ctx.fillStyle=this.editor.editing?'#ffce67':'#9fe6ff';ctx.font='700 14px system-ui';ctx.fillText(`${this.editor.editing?'Current':'Saved-view'} error ${fmt(error,1)} px RMS`,20,32);ctx.restore();}
+    if(presentation.showErrorText&&error!==null){ctx.save();ctx.fillStyle='rgba(7,16,24,.84)';ctx.fillRect(10,10,260,34);ctx.fillStyle=this.editor.editing?'#ffce67':'#9fe6ff';ctx.font='700 14px system-ui';ctx.fillText(`${this.editor.editing?'Current':'Saved-view'} error ${fmt(error,1)} px RMS`,20,32);ctx.restore();}
     this.drawMagnifier(canvas,observed,overlay);
   }
 

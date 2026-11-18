@@ -20,7 +20,7 @@
   <label class="tool-check"><input id="dotMagnifierEnabled" type="checkbox"> Selected-marker magnifier</label>
   <label>Magnification<select id="dotMagnifierScale"><option value="3">3×</option><option value="6" selected>6×</option><option value="10">10×</option><option value="16">16×</option></select></label>
   <label class="tool-check"><input id="dotOverlayLabels" type="checkbox" checked> Labels</label>
-  <label class="tool-check"><input id="dotOverlayVectors" type="checkbox" checked> Error arrows</label>
+  <label class="tool-check"><input id="dotOverlayVectors" type="checkbox"> Error arrows</label>
   <label class="tool-check"><input id="dotGroundGridHere" type="checkbox"> Ground grid here</label>
   <label class="tool-check calibration-gfx-toggle"><input id="dotGroundGridGfx" type="checkbox"> Ground grid on GFX</label>
   <label>Grid spacing (m)<select id="dotGroundGridSpacing"><option value="0.25">0.25</option><option value="0.5">0.5</option><option value="1" selected>1</option><option value="2">2</option><option value="5">5</option></select></label>
@@ -47,6 +47,7 @@
 </div>
 <strong id="dotLockStatus" class="status-warn">CREATE OR SELECT A TARGET</strong>
 <div class="row dot-coordinates"><strong id="dotSelectedLabel">Selected marker: —</strong><label>X (1920px reference)<input id="dotMarkerX" type="number" step="0.25" disabled></label><label>Y (1080px reference)<input id="dotMarkerY" type="number" step="0.25" disabled></label><span class="small">Arrow keys: 1 px · Shift: 10 px · Ctrl: 0.25 px. Select a gold marker while adjusting a view.</span></div>
+<label class="tool-check"><input id="dotMarkersOnly" type="checkbox" checked> Show calibration markers only</label>
 <div id="dotLockViewport" class="calibration-overlay media-stage dot-lock-viewport">
   <img data-preview-image class="preview-media" alt="Camera preview" hidden>
   <video data-preview-video class="preview-media" muted autoplay playsinline loop hidden></video>

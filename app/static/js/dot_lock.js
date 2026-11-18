@@ -168,6 +168,17 @@ export function rmsOverlayError(predicted=[],observed={},width=1920,height=1080)
   return errors.length?Math.sqrt(errors.reduce((sum,value)=>sum+value*value,0)/errors.length):null;
 }
 
+export function calibrationViewportPresentation(markersOnly,overlay={},samePose=true,targetType='free'){
+  const clean=markersOnly!==false;
+  return{
+    showGrid:!clean&&!!overlay.ground_grid_calibration,
+    showConnections:!clean&&targetType==='rectangle',
+    showLabels:!clean&&overlay.show_labels!==false,
+    showVectors:!clean&&samePose&&overlay.show_vectors!==false,
+    showErrorText:!clean,
+  };
+}
+
 export function drawGfxCalibrationOverlay(canvas,state){
   const overlay=state?.calibration_overlay;if(!overlay?.enabled)return false;
   const dotData=state?.world_calibrations?.active?.dot_calibration,target=(dotData?.targets||[]).find(item=>item.id===overlay.target_id)||null;

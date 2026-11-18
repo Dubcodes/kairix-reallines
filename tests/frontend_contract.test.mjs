@@ -19,7 +19,7 @@ import {
 
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectPoint, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
-import {withoutObservation,replaceObservation,nudgeDotPointPx,pinnedObservation,shouldApplyOverlayRevision} from '../app/static/js/dot_lock.js';
+import {withoutObservation,replaceObservation,nudgeDotPointPx,pinnedObservation,shouldApplyOverlayRevision,calibrationViewportPresentation} from '../app/static/js/dot_lock.js';
 import {mergeOrderedFullState,mergeOrderedPose} from '../app/static/js/pose_order.js';
 
 test('older full state cannot roll back a newer pose',()=>{
@@ -43,6 +43,17 @@ test('stale calibration overlay revisions cannot replace newer operator intent',
   assert.equal(shouldApplyOverlayRevision({revision:8},{revision:7}),false);
   assert.equal(shouldApplyOverlayRevision({revision:8},{revision:8}),true);
   assert.equal(shouldApplyOverlayRevision({revision:8},{revision:9}),true);
+});
+
+test('markers-only calibration view changes presentation without changing overlay preferences',()=>{
+  const overlay={ground_grid_calibration:true,show_labels:true,show_vectors:true};
+  assert.deepEqual(calibrationViewportPresentation(true,overlay,true,'rectangle'),{
+    showGrid:false,showConnections:false,showLabels:false,showVectors:false,showErrorText:false,
+  });
+  assert.deepEqual(calibrationViewportPresentation(false,overlay,true,'rectangle'),{
+    showGrid:true,showConnections:true,showLabels:true,showVectors:true,showErrorText:true,
+  });
+  assert.deepEqual(overlay,{ground_grid_calibration:true,show_labels:true,show_vectors:true});
 });
 
 test('saved observation identity stays explicitly pinned across count thresholds',()=>{

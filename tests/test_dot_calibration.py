@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from copy import deepcopy
@@ -24,7 +26,7 @@ from app.dot_calibration import (
     zoom_fov_for_count,
 )
 from app.state import StateStore
-from app.tracking import default_profile, tracking_fingerprint
+from app.tracking import TrackingConfigError, default_profile, tracking_fingerprint
 from app.kinematics import camera_position, rig_geometry_fingerprint
 
 
@@ -458,6 +460,64 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
         await store.update_axis_config(profile_id, "pan", {"source": "quadrature_gpio", "source_config": {"line_a": 17, "line_b": 27}})
         await store.update_axis_config(profile_id, "tilt", {"source": "quadrature_gpio", "source_config": {"line_a": 22, "line_b": 23}})
 
+    async def test_refinement_solver_releases_state_lock_and_discards_stale_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            target = target_with([])
+            await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
+            started, release = threading.Event(), threading.Event()
+
+            def slow_solver(*_args, **_kwargs):
+                started.set()
+                release.wait(2)
+                return {"solved": True, "apply_allowed": False}
+
+            with patch("app.state.solve_dot_calibration", side_effect=slow_solver):
+                task = asyncio.create_task(store.solve_dot_calibration())
+                self.assertTrue(await asyncio.wait_for(asyncio.to_thread(started.wait, 1), 1.5))
+                pose_sequence = store.pose_sequence
+                store.sample_tick()
+                self.assertGreater(store.pose_sequence, pose_sequence, "tracking acquisition must continue during a fit")
+                await asyncio.wait_for(store.update_calibration_overlay({"selected_marker": "M1"}), .5)
+                changed = deepcopy(target)
+                changed["name"] = "Changed while fitting"
+                await store.update_dot_calibration({"targets": [changed], "active_target_id": changed["id"]})
+                release.set()
+                with self.assertRaisesRegex(DotCalibrationError, "changed while solving"):
+                    await task
+            self.assertIsNone(store.world_calibration["dot_calibration"]["last_solution"])
+            self.assertEqual(store.world_calibration["dot_calibration"]["targets"][0]["name"], "Changed while fitting")
+
+    async def test_world_solver_releases_state_lock_and_discards_stale_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_angle_axes(store)
+            store.sample_tick({"pan": self.axis_sample("P1"), "tilt": self.axis_sample("T1")})
+            target = target_with([
+                observation("O1", points=BASE_POINTS, refs={"pan": "P1", "tilt": "T1", "zoom": None}),
+                observation("O2", pan_raw=100, points=BASE_POINTS, refs={"pan": "P1", "tilt": "T1", "zoom": None}),
+            ], type="rectangle", width_m=1.34, height_m=1.17, bottom_height_m=.35)
+            await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
+            before = deepcopy(store.world_calibration.get("solution"))
+            started, release = threading.Event(), threading.Event()
+
+            def slow_solver(*_args, **_kwargs):
+                started.set()
+                release.wait(2)
+                return {"solution": {"converged": True, "rms_pixel_error": 2.0, "max_pixel_error": 3.0}, "target": {}}
+
+            with patch("app.state.solve_dot_world_reference", side_effect=slow_solver):
+                task = asyncio.create_task(store.solve_dot_world_reference(target["id"]))
+                self.assertTrue(await asyncio.wait_for(asyncio.to_thread(started.wait, 1), 1.5))
+                await asyncio.wait_for(store.update_calibration_overlay({"selected_marker": "M2"}), .5)
+                changed = deepcopy(target)
+                changed["approx_distance_m"] = 12.0
+                await store.update_dot_calibration({"targets": [changed], "active_target_id": changed["id"]})
+                release.set()
+                with self.assertRaisesRegex(DotCalibrationError, "changed while solving"):
+                    await task
+            self.assertEqual(store.world_calibration.get("solution"), before)
+
     async def test_lens_fov_preferences_persist_but_endpoint_counts_do_not(self):
         with tempfile.TemporaryDirectory() as directory:
             store=self.make_store(directory)
@@ -763,6 +823,91 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertIn("DOT CALIBRATION APPLIED", store.world_calibration["status"])
             applied_model = store.world_calibration["dot_calibration"]["targets"][0]["model_points"]["M1"]
             self.assertEqual(applied_model, refined_model["M1"])
+
+    async def test_pico_gearing_apply_preserves_zero_references_and_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            profile_id = store.profile_index["active_id"]
+            for axis in ("pan", "tilt"):
+                await store.update_axis_config(profile_id, axis, {"source": "pico_uart"})
+            store.sample_tick({
+                "pan": self.axis_sample("PAN-ZERO", raw_count=950, filtered_count=950, reference_count=125, reference_angle=0.0, pico_session=41),
+                "tilt": self.axis_sample("TILT-ZERO", raw_count=-360, filtered_count=-360, reference_count=-40, reference_angle=0.0, pico_session=41),
+            })
+            before = {axis: deepcopy(store.tracking["axes"][axis]) for axis in ("pan", "tilt")}
+            target = target_with([])
+            current = {
+                "pan_ratio": store.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"],
+                "tilt_ratio": store.profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"],
+            }
+            solution = {
+                "solved": True, "apply_allowed": True, "parameters": ["pan_ratio", "tilt_ratio"],
+                "current": current, "proposed": {"pan_ratio": 3.5, "tilt_ratio": 2.75},
+                "solve_context": {"references": {"pan": "PAN-ZERO", "tilt": "TILT-ZERO", "zoom": None}},
+                "target_models": {},
+            }
+            await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
+            store.world_calibration["dot_calibration"]["last_solution"] = deepcopy(solution)
+            store.world_calibration["valid"] = True
+            generation = store.pose_history.generation
+
+            with (patch("app.source_manager.TrackingSourceManager.configure") as configure_source,
+                  patch("app.pico_source.PicoUartWorker.start") as start_pico,
+                  patch("app.pico_source.PicoUartWorker.stop") as stop_pico,
+                  patch("app.pico_source.PicoUartWorker.set_reference") as set_reference,
+                  patch("app.pico_source.PicoUartWorker.clear_reference") as clear_reference):
+                await store.apply_dot_calibration_solution()
+            configure_source.assert_not_called()
+            start_pico.assert_not_called()
+            stop_pico.assert_not_called()
+            set_reference.assert_not_called()
+            clear_reference.assert_not_called()
+
+            for axis in ("pan", "tilt"):
+                runtime = store.tracking["axes"][axis]
+                for key in ("raw_count", "filtered_count", "reference_count", "reference_angle", "reference_id", "referenced", "driver_alive"):
+                    self.assertEqual(runtime[key], before[axis][key])
+                self.assertEqual(runtime["diagnostics"]["pico_session"], 41)
+                expected = (runtime["raw_count"] - runtime["reference_count"]) * (
+                    360.0 / (store.profile["axes"][axis]["mapping"]["ppr"] * 4 * store.profile["axes"][axis]["mapping"]["encoder_revs_per_camera_rev"])
+                )
+                self.assertAlmostEqual(runtime["value"], expected)
+                at_reference = self.axis_sample(
+                    runtime["reference_id"], raw_count=runtime["reference_count"],
+                    filtered_count=runtime["reference_count"], reference_count=runtime["reference_count"],
+                    reference_angle=0.0, pico_session=41,
+                )
+                store.sample_tick({axis: at_reference})
+                self.assertAlmostEqual(store.tracking["axes"][axis]["value"], 0.0)
+            self.assertFalse(store.world_calibration["valid"])
+            self.assertGreater(store.pose_history.generation, generation)
+
+    async def test_rejected_multi_axis_gearing_apply_is_atomic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            await self.configure_angle_axes(store)
+            store.sample_tick({
+                "pan": self.axis_sample("PAN-REF", raw_count=400, reference_count=10),
+                "tilt": self.axis_sample("TILT-REF", raw_count=200, reference_count=20),
+            })
+            target = target_with([])
+            before_profile = deepcopy(store.profile)
+            before_runtime = deepcopy(store.tracking["axes"])
+            solution = {
+                "solved": True, "apply_allowed": True, "parameters": ["pan_ratio", "tilt_ratio"],
+                "current": {
+                    "pan_ratio": store.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"],
+                    "tilt_ratio": store.profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"],
+                },
+                "proposed": {"pan_ratio": 3.5, "tilt_ratio": 0.0},
+                "solve_context": {"references": {"pan": "PAN-REF", "tilt": "TILT-REF", "zoom": None}},
+            }
+            await store.update_dot_calibration({"targets": [target], "active_target_id": target["id"]})
+            store.world_calibration["dot_calibration"]["last_solution"] = solution
+            with self.assertRaisesRegex(TrackingConfigError, "greater than zero"):
+                await store.apply_dot_calibration_solution()
+            self.assertEqual(store.profile, before_profile)
+            self.assertEqual(store.tracking["axes"], before_runtime)
 
     async def test_apply_preserves_gold_positions_in_latest_stationary_view(self):
         with tempfile.TemporaryDirectory() as directory:

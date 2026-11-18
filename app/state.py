@@ -101,6 +101,11 @@ def _new_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
+def _dot_zoom_solver_identity(mapping: dict[str, Any]) -> dict[str, Any]:
+    """Return only Zoom state that can change a saved-view calibration fit."""
+    return deepcopy({key: mapping.get(key) for key in ("wide", "tight", "curvature", "active", "reference_id")})
+
+
 def _demo_scene() -> dict[str, Any]:
     group_id = "home-run"
     items: list[dict[str, Any]] = []
@@ -185,7 +190,7 @@ class StateStore:
             "selected_marker": None,
             "marker_scale": 2.0, "marker_opacity": 0.95, "marker_wedges": 4,
             "magnifier_enabled": False, "magnifier_scale": 6.0,
-            "show_labels": True, "show_vectors": True,
+            "show_labels": True, "show_vectors": False,
             "ground_grid_calibration": False, "ground_grid_gfx": False,
             "grid_spacing_m": 1.0, "grid_extent_m": 20.0, "grid_major_every": 5,
         }
@@ -193,6 +198,7 @@ class StateStore:
         self.clients: set[WebSocket] = set()
         self.client_outputs: dict[WebSocket, ClientOutput] = {}
         self.lock = asyncio.Lock()
+        self._dot_solver_semaphore = asyncio.Semaphore(1)
         self.layout_dirty = False
         self.layout_save_error: str | None = None
         self.layout_index = self._load_or_migrate_layouts()
@@ -1371,13 +1377,29 @@ class StateStore:
                             raise DotCalibrationError(f"{target['name']} contains {axis.title()} observations from an older encoder reference — clear observations and realign the saved target")
                     if stored.get("zoom") is not None and stored.get("zoom") != current_refs.get("zoom"):
                         raise DotCalibrationError(f"{target['name']} contains Zoom observations from an older encoder reference — clear observations and realign the saved target")
-            solution = solve_dot_calibration(self.profile, dot_data, self.zoom_fov_mapping)
+            captured_profile_id = self.profile_index["active_id"]
+            captured_calibration_id = self.world_calibration_index["active_id"]
+            captured_profile = deepcopy(self.profile)
+            captured_zoom = deepcopy(self.zoom_fov_mapping)
+            captured_zoom_identity = _dot_zoom_solver_identity(captured_zoom)
+        async with self._dot_solver_semaphore:
+            solution = await asyncio.to_thread(solve_dot_calibration, captured_profile, dot_data, captured_zoom)
+        async with self.lock:
+            latest_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+            latest_dot_data = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            if (self.profile_index["active_id"] != captured_profile_id
+                or self.world_calibration_index["active_id"] != captured_calibration_id
+                or self.profile != captured_profile
+                or _dot_zoom_solver_identity(self.zoom_fov_mapping) != captured_zoom_identity
+                or latest_dot_data != dot_data
+                or latest_refs != current_refs):
+                raise DotCalibrationError("Calibration changed while solving — result discarded; calculate again")
             solution["solve_context"] = {
                 "references": deepcopy(current_refs),
-                "pan_ratio": float(self.profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]),
-                "tilt_ratio": float(self.profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"]),
-                "horizontal_fov": float(self.profile.get("camera", {}).get("fov", 60.0)),
-                "zoom_curvature": float(self.zoom_fov_mapping.get("curvature", 0.0)),
+                "pan_ratio": float(captured_profile["axes"]["pan"]["mapping"]["encoder_revs_per_camera_rev"]),
+                "tilt_ratio": float(captured_profile["axes"]["tilt"]["mapping"]["encoder_revs_per_camera_rev"]),
+                "horizontal_fov": float(captured_profile.get("camera", {}).get("fov", 60.0)),
+                "zoom_curvature": float(captured_zoom.get("curvature", 0.0)),
             }
             # Calculating a refinement must not change the active projection.
             # The proposed target model was built using the proposed gearing /
@@ -1567,11 +1589,16 @@ class StateStore:
                 if key in expected and not math.isclose(float(expected[key]), current_value, rel_tol=0.0, abs_tol=1e-6):
                     raise DotCalibrationError("Camera/tracking model changed after this refinement was calculated — calculate again before applying")
             proposed = solution.get("proposed") or {}
+            axis_candidates: dict[str, dict[str, Any]] = {}
             for axis, key in (("pan", "pan_ratio"), ("tilt", "tilt_ratio")):
                 if key not in (solution.get("parameters") or []):
                     continue
                 previous = self.profile["axes"][axis]
-                candidate = merge_axis_update(axis, previous, {"mapping": {"encoder_revs_per_camera_rev": round(float(proposed[key]), 9)}})
+                axis_candidates[axis] = merge_axis_update(
+                    axis, previous,
+                    {"mapping": {"encoder_revs_per_camera_rev": round(float(proposed[key]), 9)}},
+                )
+            for axis, candidate in axis_candidates.items():
                 self.profile["axes"][axis] = candidate
                 self._remap_axis_runtime(axis)
             if "horizontal_fov" in (solution.get("parameters") or []):
@@ -1651,32 +1678,54 @@ class StateStore:
                         raise DotCalibrationError(f"{target['name']} contains {axis.title()} observations from an older encoder reference — clear observations and realign the saved target")
                 if stored.get("zoom") is not None and stored.get("zoom") != current_refs.get("zoom"):
                     raise DotCalibrationError(f"{target['name']} contains Zoom observations from an older encoder reference — clear observations and realign the saved target")
-            result = solve_dot_world_reference(self.profile, dot_data, self.zoom_fov_mapping, target_id=target.get("id"))
-            solution = result["solution"]
-            rms_px = float(solution.get("rms_pixel_error", float("inf")))
-            max_px = float(solution.get("max_pixel_error", float("inf")))
-            world_valid = bool(solution.get("converged") and math.isfinite(rms_px) and rms_px <= 6.0 and max_px <= 18.0)
-            precision_ready = bool(solution.get("precision_ready"))
-            experimental = False
-            if not world_valid and accept_review_only:
-                preview = dot_data.get("world_candidate") or {}
-                expected_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
-                if (preview.get("target_id") != target["id"]
-                    or preview.get("observation_ids") != [obs["id"] for obs in target.get("observations") or []]
-                    or preview.get("references") != expected_refs
-                    or preview.get("tracking_fingerprint") != tracking_fingerprint(self.profile)
-                    or preview.get("rig_geometry_fingerprint") != rig_geometry_fingerprint(self.profile.get("camera", {}).get("rig_offset"))
-                    or not preview.get("review_only_eligible")):
-                    raise DotCalibrationError("World candidate changed or was not approved for a supervised trial — calculate again")
-                active = self.world_calibration.get("solution") or {}
-                if (not self.world_calibration.get("valid")
-                    or active.get("target_source") != target["id"]
-                    or self.world_calibration.get("target") != result["target"]):
-                    raise DotCalibrationError("A valid previous world calibration is required for a supervised trial")
-                current_fit = evaluate_dot_world_solution(self.profile, dot_data, self.zoom_fov_mapping, target["id"], active)
-                if not review_only_world_eligible(solution, current_fit):
-                    raise DotCalibrationError("New world model does not improve the existing model sufficiently over the same views")
-                experimental = True
+            captured_profile_id = self.profile_index["active_id"]
+            captured_calibration_id = self.world_calibration_index["active_id"]
+            captured_profile = deepcopy(self.profile)
+            captured_zoom = deepcopy(self.zoom_fov_mapping)
+            captured_zoom_identity = _dot_zoom_solver_identity(captured_zoom)
+            captured_world = deepcopy(self.world_calibration)
+            captured_target = deepcopy(target)
+        async with self._dot_solver_semaphore:
+            result = await asyncio.to_thread(
+                solve_dot_world_reference, captured_profile, dot_data, captured_zoom, target_id=target.get("id")
+            )
+        solution = result["solution"]
+        rms_px = float(solution.get("rms_pixel_error", float("inf")))
+        max_px = float(solution.get("max_pixel_error", float("inf")))
+        world_valid = bool(solution.get("converged") and math.isfinite(rms_px) and rms_px <= 6.0 and max_px <= 18.0)
+        precision_ready = bool(solution.get("precision_ready"))
+        experimental = False
+        if not world_valid and accept_review_only:
+            preview = dot_data.get("world_candidate") or {}
+            if (preview.get("target_id") != captured_target["id"]
+                or preview.get("observation_ids") != [obs["id"] for obs in captured_target.get("observations") or []]
+                or preview.get("references") != current_refs
+                or preview.get("tracking_fingerprint") != tracking_fingerprint(captured_profile)
+                or preview.get("rig_geometry_fingerprint") != rig_geometry_fingerprint(captured_profile.get("camera", {}).get("rig_offset"))
+                or not preview.get("review_only_eligible")):
+                raise DotCalibrationError("World candidate changed or was not approved for a supervised trial — calculate again")
+            active = captured_world.get("solution") or {}
+            if (not captured_world.get("valid")
+                or active.get("target_source") != captured_target["id"]
+                or captured_world.get("target") != result["target"]):
+                raise DotCalibrationError("A valid previous world calibration is required for a supervised trial")
+            current_fit = await asyncio.to_thread(
+                evaluate_dot_world_solution, captured_profile, dot_data, captured_zoom, captured_target["id"], active
+            )
+            if not review_only_world_eligible(solution, current_fit):
+                raise DotCalibrationError("New world model does not improve the existing model sufficiently over the same views")
+            experimental = True
+        async with self.lock:
+            latest_refs = {axis: self.tracking["axes"].get(axis, {}).get("reference_id") for axis in ("pan", "tilt", "zoom")}
+            latest_dot_data = normalise_dot_calibration(self.world_calibration.get("dot_calibration"))
+            if (self.profile_index["active_id"] != captured_profile_id
+                or self.world_calibration_index["active_id"] != captured_calibration_id
+                or self.profile != captured_profile
+                or _dot_zoom_solver_identity(self.zoom_fov_mapping) != captured_zoom_identity
+                or self.world_calibration != captured_world
+                or latest_dot_data != dot_data
+                or latest_refs != current_refs):
+                raise DotCalibrationError("Calibration changed while solving — result discarded; calculate again")
             if world_valid and precision_ready:
                 status = f"DOT TARGET WORLD CALIBRATION VALID — {rms_px:.2f} px RMS"
             elif world_valid:

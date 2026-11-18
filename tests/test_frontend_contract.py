@@ -423,6 +423,7 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn('id="dotOverlayGfx"', html)
         self.assertIn('id="dotGroundGridHere"', html)
         self.assertIn('id="dotGroundGridGfx"', html)
+        self.assertIn('id="dotMarkersOnly" type="checkbox" checked', html)
         self.assertIn("Saved gold observations are measurements and never move", html)
         self.assertIn("Save observation (auto-fit)", html)
         self.assertIn("this.state.render_camera", dot_ui)
@@ -442,6 +443,8 @@ class FrontendContractCase(unittest.TestCase):
         self.assertIn("Test excluding", dot_ui)
         self.assertIn("Vision Calibration (operator-triggered)", html)
         self.assertIn("captureVisionObs", dot_ui)
+        self.assertIn("localStorage?.setItem(MARKERS_ONLY_STORAGE_KEY", dot_ui)
+        self.assertIn("calibrationViewportPresentation", dot_ui)
 
     def test_timing_control_is_calibration_only_and_favicons_are_complete(self):
         calibration = (STATIC / "calibration.html").read_text(encoding="utf-8")
