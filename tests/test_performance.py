@@ -1,3 +1,4 @@
+import threading
 import unittest
 
 from app.performance import RuntimeProfiler
@@ -31,6 +32,25 @@ class RuntimeProfilerCase(unittest.TestCase):
         profiler = RuntimeProfiler()
         profiler.observe("bad", float("nan"))
         self.assertNotIn("bad", profiler.snapshot()["gauges"])
+
+    def test_gc_callback_never_reenters_general_profiler_lock(self):
+        profiler = RuntimeProfiler(capacity=32)
+        completed = threading.Event()
+
+        def invoke_while_owned():
+            with profiler._lock:
+                profiler._gc_callback("start", {})
+                profiler._gc_callback("stop", {"uncollectable": 2})
+            completed.set()
+
+        thread = threading.Thread(target=invoke_while_owned, daemon=True)
+        thread.start()
+        self.assertTrue(completed.wait(0.5), "GC callback self-deadlocked on profiler lock")
+        thread.join(0.5)
+        snapshot = profiler.snapshot()
+        self.assertEqual(snapshot["garbage_collection"]["collections_since_monitor_start"], 1)
+        self.assertEqual(snapshot["garbage_collection"]["uncollectable_since_monitor_start"], 2)
+        self.assertEqual(snapshot["gauges"]["gc_pause_ms"]["samples"], 1)
 
 
 if __name__ == "__main__":

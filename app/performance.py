@@ -24,6 +24,15 @@ class RuntimeProfiler:
         self._loop_targets: dict[str, float] = {}
         self._missed_deadlines: dict[str, int] = defaultdict(int)
         self._gc_started: float | None = None
+        # gc.callbacks run synchronously at arbitrary Python allocation points,
+        # including while this profiler's ordinary lock is owned.  Keep the
+        # callback on a separate, preallocated lock-free path.  CPython holds
+        # the GIL while invoking callbacks, so scalar/ring assignments are
+        # coherent; snapshots may be one collection behind, which is preferable
+        # to risking a process-wide self-deadlock.
+        self._gc_pauses = [0.0] * self.capacity
+        self._gc_pause_index = 0
+        self._gc_pause_count = 0
         self._gc_collections = 0
         self._gc_uncollectable = 0
         self._gc_installed = False
@@ -68,10 +77,11 @@ class RuntimeProfiler:
             return
         started, self._gc_started = self._gc_started, None
         if started is not None:
-            self.observe("gc_pause_ms", (time.perf_counter() - started) * 1000.0)
-        with self._lock:
-            self._gc_collections += 1
-            self._gc_uncollectable += int(info.get("uncollectable", 0) or 0)
+            self._gc_pauses[self._gc_pause_index] = (time.perf_counter() - started) * 1000.0
+            self._gc_pause_index = (self._gc_pause_index + 1) % self.capacity
+            self._gc_pause_count = min(self.capacity, self._gc_pause_count + 1)
+        self._gc_collections += 1
+        self._gc_uncollectable += int(info.get("uncollectable", 0) or 0)
 
     def install_gc_monitoring(self) -> None:
         if not self._gc_installed:
@@ -108,8 +118,13 @@ class RuntimeProfiler:
             loops = {name: list(values) for name, values in self._loop_ticks.items()}
             targets = dict(self._loop_targets)
             missed = dict(self._missed_deadlines)
-            gc_collections = self._gc_collections
-            gc_uncollectable = self._gc_uncollectable
+        gc_collections = self._gc_collections
+        gc_uncollectable = self._gc_uncollectable
+        gc_count, gc_index = self._gc_pause_count, self._gc_pause_index
+        if gc_count < self.capacity:
+            gc_pauses = list(self._gc_pauses[:gc_count])
+        else:
+            gc_pauses = list(self._gc_pauses[gc_index:] + self._gc_pauses[:gc_index])
         wall_elapsed = max(1e-9, time.perf_counter() - self._cpu_wall_started)
         process_elapsed = max(0.0, time.process_time() - self._cpu_process_started)
         return {
@@ -120,7 +135,10 @@ class RuntimeProfiler:
                 }
                 for name, values in timings.items()
             },
-            "gauges": {name: self._statistics(values) for name, values in gauges.items()},
+            "gauges": {
+                **{name: self._statistics(values) for name, values in gauges.items()},
+                "gc_pause_ms": self._statistics(gc_pauses),
+            },
             "loops": {
                 name: {
                     "target_hz": targets.get(name),
