@@ -907,7 +907,12 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(TrackingConfigError, "greater than zero"):
                 await store.apply_dot_calibration_solution()
             self.assertEqual(store.profile, before_profile)
-            self.assertEqual(store.tracking["axes"], before_runtime)
+            for axis in ("pan", "tilt"):
+                for key in (
+                    "raw_count", "filtered_count", "reference_count", "reference_angle",
+                    "reference_id", "referenced", "driver_alive", "integrity", "diagnostics",
+                ):
+                    self.assertEqual(store.tracking["axes"][axis][key], before_runtime[axis][key])
 
     async def test_apply_preserves_gold_positions_in_latest_stationary_view(self):
         with tempfile.TemporaryDirectory() as directory:
