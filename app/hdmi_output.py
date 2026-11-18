@@ -187,6 +187,13 @@ class HdmiOutputService:
         selected = next((item for item in connectors if item["name"] == self.config["connector"]), None)
         helper_available = Path(self.helper).is_file() and os.access(self.helper, os.X_OK)
         systemd = self._systemd_status(refresh=refresh)
+        runtime_path = self.path.with_name("hdmi_runtime_status.json")
+        try:
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            if not isinstance(runtime, dict):
+                runtime = {}
+        except (OSError, json.JSONDecodeError):
+            runtime = {}
         issues = []
         if not systemd["installed"]:
             issues.append("HDMI service is not installed; run installer/install-hdmi-output.sh during maintenance")
@@ -200,13 +207,23 @@ class HdmiOutputService:
             issues.append(f"Configured mode {self.config['mode']} was not verified by DRM/KMS")
         if systemd.get("exit_status") not in {None, 0}:
             issues.append(f"HDMI service last exited with status {systemd['exit_status']}; inspect journalctl")
+        runtime_state = str(runtime.get("state") or "")
+        if runtime_state.endswith("_failure"):
+            issues.append(str(runtime.get("detail") or runtime_state))
+        operational_state = (
+            "not_installed" if not systemd["installed"] else
+            "stopped" if not systemd["active"] and not runtime_state.endswith("_failure") else
+            runtime_state or ("starting" if systemd["active"] else "failed")
+        )
         return {
             **systemd, "helper_available": helper_available,
             "config": deepcopy(self.config), "connectors": connectors,
             "selected_connected": bool(selected and selected["connected"]),
             "selected_mode_verified": bool(selected and self.config["mode"] in selected["modes"]),
-            "actual_mode": None, "displayed_fps": None,
+            "actual_mode": runtime.get("actual_mode"), "displayed_fps": None,
             "application_connected": False,
+            "operational_state": operational_state,
+            "runtime_status": runtime,
             "discovery_cached": not refresh,
             "refresh_available": True,
             "issues": issues,

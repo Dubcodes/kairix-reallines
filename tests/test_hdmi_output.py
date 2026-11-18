@@ -147,6 +147,22 @@ class HdmiOutputCase(unittest.TestCase):
             with self.assertRaises(HdmiOutputError):
                 service.action("status kairix-reallines.service")
 
+    def test_launcher_runtime_failure_is_reported_without_claiming_output_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "hdmi_runtime_status.json").write_text(
+                '{"state":"seat_failure","detail":"seatd socket denied"}', encoding="utf-8")
+            service = HdmiOutputService(root)
+            service.connectors = lambda: []
+            service._systemd_status = lambda **_kwargs: {
+                "installed": True, "active": True, "state": "running",
+                "enabled": False, "exit_status": 1,
+            }
+            result = service.status()
+            self.assertEqual(result["operational_state"], "seat_failure")
+            self.assertIn("seatd socket denied", result["issues"])
+            self.assertFalse(result["application_connected"])
+
 
 if __name__ == "__main__":
     unittest.main()

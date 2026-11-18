@@ -5,8 +5,9 @@ DEV_USER="${SUDO_USER:-}"
 if [[ -z "$DEV_USER" || "$DEV_USER" == "root" ]]; then echo "Run with sudo from the normal RealLines account." >&2; exit 1; fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 apt-get update
-apt-get install -y cage chromium wlr-randr libdrm-tests
-usermod -a -G video,render,input "$DEV_USER"
+apt-get install -y cage chromium wlr-randr libdrm-tests seatd
+groupadd --system --force kairix-seat
+usermod -a -G kairix-seat,render "$DEV_USER"
 install -d -o root -g root -m 0755 /usr/local/lib/kairix-reallines
 install -d -o "$DEV_USER" -g "$DEV_USER" -m 0750 "$REPO/data"
 if [[ ! -e "$REPO/data/hdmi_output.json" ]]; then
@@ -17,12 +18,15 @@ if [[ ! -e "$REPO/data/hdmi_output.json" ]]; then
 fi
 install -o root -g root -m 0755 installer/kairix-hdmi-launcher /usr/local/lib/kairix-reallines/kairix-hdmi-launcher
 install -o root -g root -m 0755 installer/kairix-hdmi-helper /usr/local/sbin/kairix-hdmi-helper
+install -d -o root -g root -m 0755 /etc/systemd/system/seatd.service.d
+install -o root -g root -m 0644 installer/seatd-kairix.conf /etc/systemd/system/seatd.service.d/kairix-reallines.conf
 install -o root -g root -m 0440 installer/kairix-hdmi-sudoers /etc/sudoers.d/kairix-reallines-hdmi
 visudo -cf /etc/sudoers.d/kairix-reallines-hdmi
 sed -e "s|User=reallines|User=${DEV_USER}|" -e "s|Group=reallines|Group=${DEV_USER}|" -e "s|/home/reallines/kairix-reallines|${REPO}|g" installer/kairix-reallines-hdmi.service > /etc/systemd/system/kairix-reallines-hdmi.service
 chown root:root /etc/systemd/system/kairix-reallines-hdmi.service
 chmod 0644 /etc/systemd/system/kairix-reallines-hdmi.service
 systemctl daemon-reload
+systemctl enable --now seatd.service
 systemctl disable kairix-reallines-hdmi.service >/dev/null 2>&1 || true
 echo "HDMI components installed but NOT started or enabled. Review modes with: modetest -M vc4 -c"
 echo "Verify HDMI-A-2 offers 1920x1080 at exactly 50.00 Hz before starting the service."

@@ -1,21 +1,26 @@
 [Unit]
 Description=Kairix RealLines dedicated HDMI graphics output
-After=network-online.target kairix-reallines-dev.service
+After=network-online.target seatd.service kairix-reallines-dev.service
 Wants=network-online.target
+Requires=seatd.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=reallines
 Group=reallines
-SupplementaryGroups=video render input
+SupplementaryGroups=kairix-seat render
 RuntimeDirectory=kairix-hdmi
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/kairix-hdmi
 Environment=KAIRIX_HDMI_CONFIG=/home/reallines/kairix-reallines/data/hdmi_output.json
 Environment=KAIRIX_GFX_URL=http://127.0.0.1:8080/gfx?metrics_name=HDMI
+Environment=LIBSEAT_BACKEND=seatd
+Environment=SEATD_VTBOUND=0
 ExecStart=/usr/local/lib/kairix-reallines/kairix-hdmi-launcher
 Restart=on-failure
-RestartSec=3
+RestartSec=5
 TimeoutStopSec=10
 
 [Install]

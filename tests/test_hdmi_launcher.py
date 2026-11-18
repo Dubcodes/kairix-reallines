@@ -23,7 +23,7 @@ Connectors:
 
 
 class HdmiLauncherCase(unittest.TestCase):
-    def run_launcher(self, *, connected=True, modetest=MODETEST_50, process_exit=1):
+    def run_launcher(self, *, connected=True, modetest=MODETEST_50, process_exit=1, seat_accessible=True):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "hdmi_output.json"
@@ -31,13 +31,19 @@ class HdmiLauncherCase(unittest.TestCase):
             connector = root / "card1-HDMI-A-2"
             connector.mkdir()
             (connector / "status").write_text("connected" if connected else "disconnected", encoding="utf-8")
+            seat_socket = root / "seatd.sock"
+            seat_socket.write_text("seat", encoding="utf-8")
             completed = SimpleNamespace(returncode=0, stdout=modetest, stderr="")
             process = SimpleNamespace(poll=lambda: process_exit, returncode=process_exit,
                                       terminate=lambda: None, wait=lambda: process_exit)
             stderr = io.StringIO()
-            with patch.dict(os.environ, {"KAIRIX_HDMI_CONFIG": str(config)}, clear=False), \
+            with patch.dict(os.environ, {"KAIRIX_HDMI_CONFIG": str(config),
+                                         "KAIRIX_HDMI_STATUS": str(root / "runtime.json"),
+                                         "KAIRIX_HDMI_RECONNECT_WAIT_SECONDS": "0",
+                                         "SEATD_SOCK": str(seat_socket)}, clear=False), \
                  patch("shutil.which", return_value="/usr/bin/tool"), \
                  patch("pathlib.Path.glob", return_value=[connector]), \
+                 patch("os.access", return_value=seat_accessible), \
                  patch("subprocess.run", return_value=completed), \
                  patch("subprocess.Popen", return_value=process), \
                  contextlib.redirect_stderr(stderr):
@@ -60,16 +66,28 @@ class HdmiLauncherCase(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Cage/Chromium exited with 23", error)
 
+    def test_seat_socket_permission_failure_is_actionable(self):
+        code, error = self.run_launcher(seat_accessible=False)
+        self.assertEqual(code, 1)
+        self.assertIn("seatd socket is not accessible", error)
+
     def test_service_declares_automatic_failure_recovery(self):
         service = (ROOT / "installer" / "kairix-reallines-hdmi.service").read_text(encoding="utf-8")
         self.assertIn("Restart=on-failure", service)
-        self.assertIn("RestartSec=3", service)
+        self.assertIn("RestartSec=5", service)
+        self.assertIn("StartLimitBurst=3", service)
+        self.assertIn("Requires=seatd.service", service)
+        self.assertIn("LIBSEAT_BACKEND=seatd", service)
+        self.assertIn("SupplementaryGroups=kairix-seat render", service)
 
     def test_installer_creates_default_only_when_absent_and_leaves_service_off(self):
         installer = (ROOT / "installer" / "install-hdmi-output.sh").read_text(encoding="utf-8")
         self.assertIn('if [[ ! -e "$REPO/data/hdmi_output.json" ]]', installer)
+        self.assertIn("apt-get install -y cage chromium wlr-randr libdrm-tests seatd", installer)
+        self.assertIn("systemctl enable --now seatd.service", installer)
+        self.assertIn("kairix-seat", installer)
         self.assertIn("systemctl disable kairix-reallines-hdmi.service", installer)
-        self.assertNotIn("systemctl enable", installer)
+        self.assertNotIn("systemctl enable kairix-reallines-hdmi.service", installer)
         self.assertNotIn("systemctl start", installer)
 
 
