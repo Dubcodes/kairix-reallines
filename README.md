@@ -329,6 +329,8 @@ V1.4.1 scheduling, encoder-filter, electrical-check, acceptance, and rollback gu
 
 The optional HDMI output reuses the clean `/gfx` renderer in a separate Cage/Wayland/Chromium service. It discovers DRM connectors from sysfs and exact refresh modes from `modetest`; Engineering accepts only modes verified by DRM. The default requested mode is `1920x1080@50.00` on `HDMI-A-2`. The output contains graphics only and has no controls, camera video or diagnostics overlay.
 
+V1.5 also includes a disabled-by-default native SDL2/KMSDRM prototype for direct 1080p50 comparison. It uses a bounded, versioned mmap pose ring rather than per-frame HTTP/WebSocket JSON, provides internal deterministic motion plus latest/interpolated live-pose modes, and remains mutually exclusive with Cage/Chromium. It currently renders only benchmark primitives and a simple projected line/marker; it is not a feature-complete replacement. See [the V1.5 native renderer handover](docs/V1.5_NATIVE_RENDERER_HANDOVER.md) and [pose protocol](docs/NATIVE_POSE_PROTOCOL_V1.md). Physical Pi/HDMI acceptance is still required.
+
 Installation is deliberately separate and leaves the service disabled and stopped:
 
 ```bash
