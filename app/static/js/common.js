@@ -1,4 +1,5 @@
 import {poseIdentity,recordIncomingPose,setBrowserTransport} from './browser_metrics.js?v=world-media1';
+import {shouldApplyOverlayRevision} from './dot_lock.js?v=world-media1';
 
 export async function api(path, options={}) {
   const init = { ...options };
@@ -46,6 +47,7 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
   };
   const deliverCalibrationOverlay = (overlay) => {
     if (!currentState) return;
+    if (!shouldApplyOverlayRevision(currentState.calibration_overlay, overlay)) return;
     currentState = {...currentState, calibration_overlay:overlay};
     deliver(currentState, 'calibration_overlay');
   };

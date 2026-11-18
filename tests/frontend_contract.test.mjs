@@ -18,7 +18,23 @@ import {
 
 import {groundOffsetMetres, planeWorldCorners, pointInProjectedQuad, projectItemGeometry, projectionMode} from '../app/static/js/render.js';
 import {calculateMovementCalibration} from '../app/static/js/calibration_contract.js';
-import {withoutObservation,replaceObservation,nudgeDotPointPx} from '../app/static/js/dot_lock.js';
+import {withoutObservation,replaceObservation,nudgeDotPointPx,pinnedObservation,shouldApplyOverlayRevision} from '../app/static/js/dot_lock.js';
+
+test('stale calibration overlay revisions cannot replace newer operator intent',()=>{
+  assert.equal(shouldApplyOverlayRevision({revision:8},{revision:7}),false);
+  assert.equal(shouldApplyOverlayRevision({revision:8},{revision:8}),true);
+  assert.equal(shouldApplyOverlayRevision({revision:8},{revision:9}),true);
+});
+
+test('saved observation identity stays explicitly pinned across count thresholds',()=>{
+  const observations=[
+    {id:'O1',axes:{pan:{raw_count:100}},points:{M1:{x:.1,y:.2}}},
+    {id:'O2',axes:{pan:{raw_count:103}},points:{M1:{x:.8,y:.7}}},
+  ];
+  assert.equal(pinnedObservation(observations,'O1').id,'O1');
+  assert.deepEqual(pinnedObservation(observations,'O1').points,{M1:{x:.1,y:.2}});
+  assert.equal(pinnedObservation(observations,null),null);
+});
 
 test('editing a saved observation preserves its identity, camera pose and other views', () => {
   const original=[

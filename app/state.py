@@ -178,6 +178,7 @@ class StateStore:
         # Calibration overlay is deliberately session-only and defaults OFF so
         # calibration markers cannot accidentally survive a service restart.
         self.calibration_overlay: dict[str, Any] = {
+            "revision": 0,
             "enabled": False, "target_id": None, "editing": False,
             "draft_points": {}, "reference_points": {}, "reference_observation_id": None,
             "selected_marker": None,
@@ -337,7 +338,8 @@ class StateStore:
             original = render
             render = self.stability_recorder.override_render_pose(render, now)
             if render is not original:
-                sync["diagnostic_fixed_pose"] = True
+                sync["diagnostic_fixed_pose"] = render.get("source") == "diagnostic_fixed_pose"
+                sync["diagnostic_fixed_fov"] = render.get("diagnostic_fixed_fov") is True
         return render, sync
 
     def _profile_path(self, profile_id: str) -> Path:
@@ -690,7 +692,11 @@ class StateStore:
         self.camera["world_status"] = "VALID" if calibration_valid else "REFERENCE MISMATCH — RECALIBRATE" if not reference_match else "NOT VALID"
         self.camera["updated_mono"] = max((self.tracking["axes"][axis]["updated_mono"] for axis in REQUIRED_AXES), default=0.0)
         if sample:
-            self._refresh_pose_reference_and_sample()
+            if getattr(self, "runtime_profiler", None) is None:
+                self._refresh_pose_reference_and_sample()
+            else:
+                with self.runtime_profiler.measure("pose_history_update"):
+                    self._refresh_pose_reference_and_sample()
 
     def _saved_lens_fovs(self) -> dict[str, float]:
         stored = self.zoom_lens_profiles.get(self.profile_index["active_id"]) or {}
@@ -1126,7 +1132,7 @@ class StateStore:
             self.debug.error("websocket_sender_error", error=repr(exc))
             self.clients.discard(client)
             self.client_outputs.pop(client, None)
-        output = ClientOutput(client, failed)
+        output = ClientOutput(client, failed, profiler=self.runtime_profiler)
         self.client_outputs[client] = output
         output.start()
         return output
@@ -1154,7 +1160,18 @@ class StateStore:
                 "coalesced_poses": sum(output.coalesced_poses for output in self.client_outputs.values()),
                 "critical_overflows": sum(output.critical_overflows for output in self.client_outputs.values()),
             }
-            self.stability_recorder.record_publication(time.monotonic(), pose, transport)
+            self.stability_recorder.record_publication(time.monotonic(), pose, transport, {
+                "world_calibration_id": self.world_calibration_index["active_id"],
+                "world_valid": bool(self.world_calibration.get("valid")),
+                "fov_source": self.zoom_fov_mapping.get("fov_source"),
+                "live_fov": self.zoom_fov_mapping.get("live_fov"),
+                "overlay_revision": self.calibration_overlay.get("revision"),
+                "overlay_target_id": self.calibration_overlay.get("target_id"),
+                "reference_observation_id": self.calibration_overlay.get("reference_observation_id"),
+                "reference_points": deepcopy(self.calibration_overlay.get("reference_points") or {}),
+                "selected_marker": self.calibration_overlay.get("selected_marker"),
+                "editing": bool(self.calibration_overlay.get("editing")),
+            })
         await self.broadcast({"type": "pose", "data": pose})
 
     async def update_engineering_settings(self, values: dict[str, Any]) -> dict[str, Any]:
@@ -1206,6 +1223,7 @@ class StateStore:
 
     async def update_calibration_overlay(self, values: dict[str, Any]) -> dict[str, Any]:
         unknown = set(values) - {
+            "request_revision",
             "enabled", "target_id", "editing", "draft_points", "reference_points", "reference_observation_id",
             "selected_marker", "marker_scale", "marker_opacity", "marker_wedges",
             "magnifier_enabled", "magnifier_scale", "show_labels", "show_vectors",
@@ -1213,7 +1231,15 @@ class StateStore:
         }
         if unknown:
             raise ValueError(f"Unknown calibration overlay setting: {sorted(unknown)[0]}")
+        requested_revision = values.get("request_revision")
+        if requested_revision is not None:
+            if not isinstance(requested_revision, int) or isinstance(requested_revision, bool) or requested_revision < 1:
+                raise ValueError("Calibration overlay request revision must be a positive integer")
+            if requested_revision <= int(self.calibration_overlay.get("revision", 0)):
+                return deepcopy(self.calibration_overlay)
         candidate = deepcopy(self.calibration_overlay)
+        candidate["revision"] = (requested_revision if requested_revision is not None
+                                 else int(candidate.get("revision", 0)) + 1)
         if "enabled" in values:
             candidate["enabled"] = bool(values["enabled"])
         if "target_id" in values:
@@ -1294,12 +1320,19 @@ class StateStore:
                     raise ValueError("Calibration overlay reference point is outside the supported viewport")
                 points[str(marker_id)] = {"x": x, "y": y}
             candidate["reference_points"] = points
+        accepted = True
         async with self.lock:
-            self.calibration_overlay = candidate
-            result = deepcopy(candidate)
+            if (requested_revision is not None
+                    and requested_revision <= int(self.calibration_overlay.get("revision", 0))):
+                accepted = False
+                result = deepcopy(self.calibration_overlay)
+            else:
+                self.calibration_overlay = candidate
+                result = deepcopy(candidate)
         # Marker drags can arrive at pointer-event rate. Send only the overlay
         # payload instead of repeatedly constructing and queueing full state.
-        await self.broadcast({"type": "calibration_overlay", "data": result})
+        if accepted:
+            await self.broadcast({"type": "calibration_overlay", "data": result})
         return result
 
     async def update_dot_calibration(self, values: dict[str, Any]) -> dict[str, Any]:

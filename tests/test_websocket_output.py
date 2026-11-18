@@ -1,6 +1,8 @@
 import asyncio
+import json
 import unittest
 
+from app.performance import RuntimeProfiler
 from app.websocket_output import ClientOutput
 
 
@@ -19,6 +21,9 @@ class FakeSocket:
         await self.release.wait()
         self.messages.append(message)
         self.active_writers -= 1
+
+    async def send_text(self, payload):
+        await self.send_json(json.loads(payload))
 
 
 class WebSocketOutputCase(unittest.IsolatedAsyncioTestCase):
@@ -79,5 +84,21 @@ class WebSocketOutputCase(unittest.IsolatedAsyncioTestCase):
             socket.release.set()
             await asyncio.sleep(.01)
             self.assertEqual(socket.messages[-1]["data"]["marker"], 19)
+        finally:
+            await output.stop()
+
+    async def test_production_path_measures_json_serialization_separately(self):
+        socket = FakeSocket()
+        profiler = RuntimeProfiler(capacity=32)
+        async def failed(_exc):
+            return None
+        output = ClientOutput(socket, failed, profiler=profiler)
+        output.start()
+        try:
+            output.enqueue({"type": "state", "data": {"value": "✓"}})
+            await asyncio.sleep(.01)
+            self.assertEqual(socket.messages[-1]["data"]["value"], "✓")
+            timing = profiler.snapshot()["timings_ms"]["websocket_state_serialization"]
+            self.assertEqual(timing["wall"]["samples"], 1)
         finally:
             await output.stop()

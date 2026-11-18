@@ -29,6 +29,7 @@ from .browser_diagnostics import BrowserDiagnostics
 from .stability import TrackingStabilityRecorder
 from .performance import RuntimeProfiler
 from .hdmi_output import ACTIONS as HDMI_ACTIONS, HdmiOutputError, HdmiOutputService
+from .power_health import PowerHealthService
 from .vision_calibration import MAX_IMAGE_BYTES, VisionCalibrationError, VisionCalibrationService
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +61,9 @@ hdmi_output = HdmiOutputService(DATA_DIR)
 hdmi_operation_lock = asyncio.Lock()
 hdmi_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="reallines-hdmi")
 hdmi_status_inflight: asyncio.Task | None = None
+diagnostic_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="reallines-diagnostics")
+power_health = PowerHealthService()
+power_status_inflight: asyncio.Task | None = None
 vision_calibration = VisionCalibrationService(DATA_DIR)
 
 
@@ -235,6 +239,7 @@ async def start_acquisition():
     source_manager.configure_pico_processing(store.pico_processing)
     source_manager.configure(store.profile_index["active_id"], store.profile)
     imu_service.start()
+    runtime_profiler.install_gc_monitoring()
     acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
     publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
     imu_status_task = asyncio.create_task(imu_status_publication_loop(store, imu_service), name="optional-imu-status")
@@ -252,6 +257,7 @@ async def stop_acquisition():
     acquisition_task = publication_task = imu_status_task = None
     source_manager.stop()
     imu_service.stop()
+    runtime_profiler.uninstall_gc_monitoring()
     debug.flush()
 
 
@@ -325,6 +331,8 @@ def _hdmi_status_data(status: dict) -> dict:
         status["displayed_fps"] = metrics.get("animation_frame_hz_5s")
         status["frame_interval_p95_ms"] = metrics.get("frame_interval_p95_ms_5s")
         status["missed_frame_deadlines_5s"] = metrics.get("missed_frame_deadlines_5s")
+        status["operational_state"] = ("rendering" if metrics.get("animation_frame_hz_5s")
+                                       else "browser_connected")
     return status
 
 
@@ -488,8 +496,17 @@ async def get_tracking():
 
 @app.get("/api/performance")
 async def performance_status():
+    global power_status_inflight
+    if power_status_inflight is None or power_status_inflight.done():
+        loop = asyncio.get_running_loop()
+        power_status_inflight = asyncio.ensure_future(
+            loop.run_in_executor(diagnostic_executor, power_health.status)
+        )
     result = runtime_profiler.snapshot()
     result["pico"] = source_manager.pico_status()
+    result["power"] = await asyncio.shield(power_status_inflight)
+    if power_status_inflight.done():
+        power_status_inflight = None
     return result
 
 
@@ -503,7 +520,7 @@ async def start_tracking_stability(body: StabilityRecordingStart):
     try:
         return stability_recorder.start(
             body.duration_seconds, mode=body.mode,
-            fixed_pose=store.camera if body.mode == "fixed_pose" else None,
+            fixed_pose=store.camera if body.mode in {"fixed_pose", "fixed_fov"} else None,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

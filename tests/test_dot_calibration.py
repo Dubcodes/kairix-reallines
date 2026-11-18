@@ -580,6 +580,24 @@ class DotCalibrationStateCase(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(reloaded.snapshot()["calibration_overlay"]["enabled"])
             self.assertEqual(reloaded.world_calibration["dot_calibration"]["targets"][0]["name"], "Measured sign")
 
+    async def test_stale_overlay_request_revision_cannot_overwrite_newer_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.make_store(directory)
+            newest = await store.update_calibration_overlay({
+                "request_revision": 12,
+                "reference_observation_id": "O2",
+                "reference_points": {"M1": {"x": 0.8, "y": 0.7}},
+            })
+            stale = await store.update_calibration_overlay({
+                "request_revision": 11,
+                "reference_observation_id": "O1",
+                "reference_points": {"M1": {"x": 0.1, "y": 0.2}},
+            })
+            self.assertEqual(newest["revision"], 12)
+            self.assertEqual(stale["revision"], 12)
+            self.assertEqual(stale["reference_observation_id"], "O2")
+            self.assertEqual(stale["reference_points"]["M1"], {"x": 0.8, "y": 0.7})
+
     async def test_old_encoder_reference_observations_are_rejected_but_target_is_retained(self):
         with tempfile.TemporaryDirectory() as directory:
             store = self.make_store(directory)

@@ -2,7 +2,7 @@ import {api,logFrontend} from './common.js?v=world-media1';
 import {drawGroundGrid,groundOffsetMetres} from './render.js?v=world-media1';
 import {
   drawDotCalibrationOverlay,hitTestDot,modelPointsFromObservation,projectModelPoints,
-  rectangleTemplatePoints,rmsOverlayError,withoutObservation,replaceObservation,nudgeDotPointPx,magnifierCrop,
+  rectangleTemplatePoints,rmsOverlayError,withoutObservation,replaceObservation,nudgeDotPointPx,magnifierCrop,pinnedObservation,
 } from './dot_lock.js?v=world-media1';
 
 const clone=value=>structuredClone(value);
@@ -24,6 +24,7 @@ export class DotCalibrationUi {
     this.quality=null;
     this.visionCandidate=null;
     this.lastOverlayAnchorId=undefined;
+    this.overlayRevision=0;
     this.overlayTimer=null;
     this.controlsBound=false;
   }
@@ -86,11 +87,9 @@ export class DotCalibrationUi {
   anchorObservation(){
     const target=this.activeTarget();if(!target||this.editor.editing)return null;
     const observations=target.observations||[];
-    const selected=observations.find(obs=>obs.id===this.selectedObservationId);
-    if(selected)return selected; // Explicit review: gold points are historical until the pose matches.
-    const preferred=observations.find(obs=>obs.id===this.anchorObservationId);
-    if(preferred&&this.observationMatchesCurrentPose(preferred))return preferred;
-    return observations.find(obs=>this.observationMatchesCurrentPose(obs))||null;
+    // Selection is operator intent. Encoder proximity may label the selected
+    // observation in/out of pose, but must never replace its identity.
+    return pinnedObservation(observations,this.selectedObservationId);
   }
 
   async updateOverlay(immediate=false){
@@ -98,20 +97,27 @@ export class DotCalibrationUi {
     const send=async()=>{
       try{
         const anchor=this.anchorObservation();
-        await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{
+        await this.patchOverlay({
           target_id:this.data.active_target_id,
           editing:this.editor.editing,
           draft_points:this.editor.editing?this.editor.draft:{},
-          // Do not draw misleading historical error arrows on GFX if the
-          // physical camera is no longer at this observation's encoder pose.
-          reference_points:anchor&&this.observationMatchesCurrentPose(anchor)?anchor.points:{},
+          // Gold coordinates remain the immutable explicitly selected saved
+          // observation. Pose matching controls labels/vectors, not identity.
+          reference_points:anchor?.points||{},
           reference_observation_id:anchor?.id??null,
           selected_marker:this.editor.selected,
-        }})});
+        });
       }catch(error){logFrontend('calibration','dot_overlay_update_failed',{error:String(error)});}
     };
     if(immediate)return send();
     this.overlayTimer=setTimeout(send,45);
+  }
+
+  async patchOverlay(values){
+    this.overlayRevision=Math.max(this.overlayRevision+1,Date.now()*1000);
+    const result=await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{...values,request_revision:this.overlayRevision}})});
+    this.overlayRevision=Math.max(this.overlayRevision,Number(result?.revision)||0);
+    return result;
   }
 
   setStatus(message,kind='warn'){
@@ -135,32 +141,32 @@ export class DotCalibrationUi {
     id('solveDotCalibration').onclick=()=>this.solve();
     id('applyDotCalibration').onclick=()=>this.apply();
     id('dotOverlayGfx').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{enabled:event.target.checked,target_id:this.data.active_target_id}})});
+      await this.patchOverlay({enabled:event.target.checked,target_id:this.data.active_target_id});
     };
     id('dotOverlayScale').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_scale:Number(event.target.value)}})});
+      await this.patchOverlay({marker_scale:Number(event.target.value)});
     };
-    id('dotMarkerWedges').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_wedges:Number(event.target.value)}})});};
-    id('dotMarkerOpacity').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{marker_opacity:Number(event.target.value)}})});};
-    id('dotMagnifierEnabled').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{magnifier_enabled:event.target.checked}})});};
-    id('dotMagnifierScale').onchange=async event=>{await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{magnifier_scale:Number(event.target.value)}})});};
+    id('dotMarkerWedges').onchange=async event=>{await this.patchOverlay({marker_wedges:Number(event.target.value)});};
+    id('dotMarkerOpacity').onchange=async event=>{await this.patchOverlay({marker_opacity:Number(event.target.value)});};
+    id('dotMagnifierEnabled').onchange=async event=>{await this.patchOverlay({magnifier_enabled:event.target.checked});};
+    id('dotMagnifierScale').onchange=async event=>{await this.patchOverlay({magnifier_scale:Number(event.target.value)});};
     id('dotOverlayLabels').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_labels:event.target.checked}})});
+      await this.patchOverlay({show_labels:event.target.checked});
     };
     id('dotOverlayVectors').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{show_vectors:event.target.checked}})});
+      await this.patchOverlay({show_vectors:event.target.checked});
     };
     id('dotGroundGridHere').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{ground_grid_calibration:event.target.checked}})});
+      await this.patchOverlay({ground_grid_calibration:event.target.checked});
     };
     id('dotGroundGridGfx').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{ground_grid_gfx:event.target.checked}})});
+      await this.patchOverlay({ground_grid_gfx:event.target.checked});
     };
     id('dotGroundGridSpacing').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{grid_spacing_m:Number(event.target.value)}})});
+      await this.patchOverlay({grid_spacing_m:Number(event.target.value)});
     };
     id('dotGroundGridExtent').onchange=async event=>{
-      await api('/api/calibration-overlay',{method:'PATCH',body:JSON.stringify({values:{grid_extent_m:Number(event.target.value)}})});
+      await this.patchOverlay({grid_extent_m:Number(event.target.value)});
     };
     for(const field of ['dotTargetName','dotLockDistance','dotTargetWidth','dotTargetHeight','dotTargetBottomHeight'])id(field).addEventListener('change',()=>this.commitTargetFields());
     id('solveDotWorldReference').onclick=()=>this.solveWorldReference();
@@ -828,6 +834,7 @@ export class DotCalibrationUi {
 
   updateState(state,event){
     this.state=state;
+    this.overlayRevision=Math.max(this.overlayRevision,Number(state.calibration_overlay?.revision)||0);
     if(!this.controlsBound)this.bind();
     if(event?.type==='pose'){
       this.renderLive();
@@ -839,8 +846,6 @@ export class DotCalibrationUi {
       this.selectedObservationId=null;
       this.editingObservationId=null;
     }
-    const anchorId=this.anchorObservation()?.id??null;
-    if(!this.editor.editing&&anchorId!==this.lastOverlayAnchorId){this.lastOverlayAnchorId=anchorId;this.updateOverlay(false);}
     this.render();
   }
 }

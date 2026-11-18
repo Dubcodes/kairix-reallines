@@ -114,6 +114,34 @@ class TrackingStabilityRecorderCase(unittest.TestCase):
         self.assertFalse(self.recorder.status()["active"])
         self.assertIs(self.recorder.override_render_pose(source, 110.1), source)
 
+    def test_fixed_fov_keeps_pan_tilt_live_without_changing_source_pose(self):
+        self.recorder.start(10, mode="fixed_fov", fixed_pose={"fov": 26})
+        source = {"pan": 12, "tilt": -4, "fov": 31, "valid": True}
+        first = self.recorder.override_render_pose(source, 100.1)
+        moved = self.recorder.override_render_pose({**source, "pan": 15, "tilt": -2, "fov": 40}, 100.2)
+        self.assertEqual((first["pan"], first["tilt"], first["fov"]), (12, -4, 26))
+        self.assertEqual((moved["pan"], moved["tilt"], moved["fov"]), (15, -2, 26))
+        self.assertEqual(source["fov"], 31)
+        self.assertTrue(first["diagnostic_fixed_fov"])
+
+    def test_overlay_identity_change_with_constant_pose_is_classified_downstream(self):
+        pose = {"render_camera": {"pan": 1, "tilt": 2, "fov": 26, "valid": True},
+                "tracking": {"valid": True}}
+        transport = {"clients": 1}
+        self.recorder.record_publication(100.0, pose, transport, {
+            "overlay_revision": 1, "reference_observation_id": "O1",
+            "reference_points": {"M1": {"x": .1, "y": .2}},
+            "world_calibration_id": "W1", "world_valid": True,
+        })
+        self.recorder.record_publication(100.1, pose, transport, {
+            "overlay_revision": 2, "reference_observation_id": "O2",
+            "reference_points": {"M1": {"x": .8, "y": .7}},
+            "world_calibration_id": "W1", "world_valid": True,
+        })
+        status = self.recorder.status()
+        self.assertTrue(status["automatic"])
+        self.assertEqual(status["trigger_reason"], "calibration_overlay_state_changed_constant_pose")
+
     def test_capacity_is_bounded_and_reports_overwrites(self):
         recorder = TrackingStabilityRecorder(capacity=1_000, clock=self.clock)
         recorder.start(10)

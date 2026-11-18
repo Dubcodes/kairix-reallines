@@ -2,6 +2,8 @@ import {cameraRayForScreen} from './editor.js';
 import {projectPoint} from './render.js';
 
 export const withoutObservation=(observations,observationId)=>(observations||[]).filter(obs=>obs.id!==observationId);
+export const shouldApplyOverlayRevision=(current,incoming)=>(Number(incoming?.revision)||0)>=(Number(current?.revision)||0);
+export const pinnedObservation=(observations,selectedId)=>(observations||[]).find(obs=>obs.id===selectedId)||null;
 export const replaceObservation=(observations,updated)=>(observations||[]).map(obs=>
   obs.id===updated.id?{...obs,points:structuredClone(updated.points)}:obs
 );

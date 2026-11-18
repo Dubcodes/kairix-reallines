@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from typing import Any, Awaitable, Callable
 
@@ -8,10 +9,12 @@ from typing import Any, Awaitable, Callable
 class ClientOutput:
     """Bounded single-writer WebSocket output with latest-pose coalescing."""
 
-    def __init__(self, websocket: Any, on_error: Callable[[Exception], Awaitable[None]], critical_capacity: int = 8) -> None:
+    def __init__(self, websocket: Any, on_error: Callable[[Exception], Awaitable[None]],
+                 critical_capacity: int = 8, profiler: Any = None) -> None:
         self.websocket = websocket
         self.on_error = on_error
         self.critical_capacity = critical_capacity
+        self.profiler = profiler
         self.critical: deque[dict[str, Any]] = deque()
         self.latest_pose: dict[str, Any] | None = None
         self.latest_overlay: dict[str, Any] | None = None
@@ -50,15 +53,15 @@ class ClientOutput:
             while not self.closed:
                 await self.event.wait()
                 while self.critical and not self.closed:
-                    await self.websocket.send_json(self.critical.popleft())
+                    await self._send(self.critical.popleft())
                     self.sent_messages += 1
                 if self.latest_pose is not None and not self.closed:
                     pose, self.latest_pose = self.latest_pose, None
-                    await self.websocket.send_json(pose)
+                    await self._send(pose)
                     self.sent_messages += 1
                 if self.latest_overlay is not None and not self.closed:
                     overlay, self.latest_overlay = self.latest_overlay, None
-                    await self.websocket.send_json(overlay)
+                    await self._send(overlay)
                     self.sent_messages += 1
                 if not self.critical and self.latest_pose is None and self.latest_overlay is None:
                     self.event.clear()
@@ -67,6 +70,15 @@ class ClientOutput:
         except Exception as exc:
             self.closed = True
             await self.on_error(exc)
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        if self.profiler is None:
+            await self.websocket.send_json(message)
+            return
+        message_type = str(message.get("type") or "unknown")
+        with self.profiler.measure(f"websocket_{message_type}_serialization"):
+            payload = json.dumps(message, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        await self.websocket.send_text(payload)
 
     async def stop(self) -> None:
         self.closed = True
