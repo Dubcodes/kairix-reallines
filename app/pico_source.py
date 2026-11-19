@@ -144,6 +144,11 @@ class PicoUartWorker:
         import termios
         fd = os.open(self.device, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
         try:
+            import fcntl
+            # Both the legacy reader and the isolated owner take the same
+            # nonblocking advisory lock BEFORE configuring/reading UART.
+            # Prevent accidental simultaneous application readers.
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             attrs = termios.tcgetattr(fd)
             attrs[0] = 0  # Ignore all input translations, software flow control.
             attrs[1] = 0

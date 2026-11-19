@@ -56,3 +56,21 @@
 
 Repository `Dubcodes/kairix-reallines`, branch `wip/live-tuning-dot-lock`; working system rollback tag `checkpoint/pre-dedicated-pipeline-20261119` (`3a30fca`). New shadow baseline commit `e364284`. Preserve untracked `tools/`, any local patch scripts and user data. Prefer `git revert` for committed code; **never use `git reset --hard` indiscriminately**. Keep `kairix-reallines-native.service` disabled until explicitly accepted. To undo mirror test, first remove service environment override, restart and re-reference axes; the new shadow runner exits after its configured duration and does not own live UART.
 
+
+## V1.6B Stage 1: transport ownership isolation (20 November 2026)
+
+**Baseline:** `50cadd8`, branch `wip/live-tuning-dot-lock`.
+
+**Evidence leading here:**
+- Hot-path patch `fcde04c` and following publication optimisation did not visibly improve two-second stutter.
+- Original Uvicorn acquisition ~184/200 Hz; some 119–158 ms scheduling lateness, publication 168–188 ms, while ordinary calculations are below ~1 ms.
+- Synthetic standalone tracking (60 seconds): 199.95 Hz, 0 wake-up deadline misses, 3.69 ms maximum wake lateness, 15.474 ms maximum processing time. Simulated counts, not live UART.
+- Real-Pico 60-second shadow mirror: 199.614 Hz, 11,977 writes, 15 wake deadline misses, p99 lateness 1.625 ms, max 9.838 ms; 30,010 decoded packets, 0 gaps, 0 CRC errors; max sample age 63.63 ms because input still passed through Uvicorn. The live GFX stutter persisted, as expected because the live producer was unchanged.
+- The recurring ~2-second live acquisition interruptions were seen in exported recordings. WebSocket stack captures indicate scheduling interference but cannot establish sole cause.
+
+**This patch:** `PicoOwner` opt-in exclusive UART process and local command IPC; web's `PicoProxy` pulls snapshots into a background thread and passes operator reference/configuration commands to the owner. Both hardware readers now use an advisory exclusive file lock. Legacy remains the default.
+
+**Important limit:** This is **UART transport ownership only**. Pose mapping and WebSocket GFX publication still run in the web process. It does **not** by itself constitute the final independent 200 Hz tracking / 50 Hz graphics pipeline and should NOT be represented as fixing stutter. No latency improvement has been established for proxy mode; synchronous IPC polling has its own overhead. The IPC service does not currently transfer IMU state, world calibration, zoom mapping or full graphics state. Do not enable in broadcast production.
+
+**Next:** test owner/proxy health under controlled load; then migrate pose computation/renderer state ownership with explicit calibration command revisions, freshness watchdog, and fail-safe graphics suppression. Retain zero-intentional-delay, 500 Hz Pico, 200 Hz mapping, 50 Hz output. Record measured p95/p99/max, dropped deadlines, and visible GFX behavior in a new entry before calling any change successful.
+

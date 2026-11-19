@@ -54,7 +54,13 @@ imu_status_task: asyncio.Task | None = None
 watchdog_heartbeat_task: asyncio.Task | None = None
 stability_recorder = TrackingStabilityRecorder()
 runtime_profiler = RuntimeProfiler()
-source_manager = TrackingSourceManager(stability_recorder=stability_recorder)
+# Gated transport isolation. Legacy reader remains default.
+# Do not enable until the dedicated owner service is running.
+if os.getenv("KAIRIX_PICO_OWNER_SOCKET"):
+    from .pico_proxy import PicoProxy
+    source_manager = PicoProxy(os.environ["KAIRIX_PICO_OWNER_SOCKET"])
+else:
+    source_manager = TrackingSourceManager(stability_recorder=stability_recorder)
 store.pico_source_manager = source_manager
 store.stability_recorder = stability_recorder
 store.runtime_profiler = runtime_profiler
