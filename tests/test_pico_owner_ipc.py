@@ -48,7 +48,7 @@ if __name__ == '__main__':
 
 # Integration smoke test for the actual line-oriented IPC framing.
 class LocalSocketTests(unittest.TestCase):
-    @unittest.skipUnless(hasattr(__import__('socket'), 'AF_UNIX'), 'Unix sockets required')
+    @unittest.skipUnless(hasattr(__import__('socketserver'), 'UnixStreamServer'), 'Unix stream server required')
     def test_rpc_round_trip_and_command_rejection(self):
         import tempfile
         import threading

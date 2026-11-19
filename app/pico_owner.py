@@ -74,9 +74,16 @@ class Handler(socketserver.StreamRequestHandler):
             self.wfile.write(json.dumps(response, separators=(',', ':')).encode() + b'\n')
 
 
-class Server(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
-    allow_reuse_address = False
+# Unix-domain stream servers are unavailable on native Windows Python.
+# Keep import-time unit tests cross-platform without exposing a TCP fallback.
+if hasattr(socketserver, 'UnixStreamServer'):
+    class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+        allow_reuse_address = False
+else:
+    class Server:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError('Pico owner IPC requires a Unix-domain socket (Linux)')
 
 
 def main(argv=None):
