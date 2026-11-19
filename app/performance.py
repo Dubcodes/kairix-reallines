@@ -24,6 +24,10 @@ class RuntimeProfiler:
         self._loop_targets: dict[str, float] = {}
         self._missed_deadlines: dict[str, int] = defaultdict(int)
         self._gc_started: float | None = None
+        # Append-only bounded timeline. Never acquire the profiler's main lock
+        # inside a GC callback: callbacks can run while that lock is held.
+        self._gc_intervals: deque[tuple[float, float, float]] = deque(maxlen=256)
+        self._stall_events: deque[dict[str, Any]] = deque(maxlen=128)
         # gc.callbacks run synchronously at arbitrary Python allocation points,
         # including while this profiler's ordinary lock is owned.  Keep the
         # callback on a separate, preallocated lock-free path.  CPython holds
@@ -77,11 +81,42 @@ class RuntimeProfiler:
             return
         started, self._gc_started = self._gc_started, None
         if started is not None:
-            self._gc_pauses[self._gc_pause_index] = (time.perf_counter() - started) * 1000.0
+            finished = time.perf_counter()
+            duration_ms = (finished - started) * 1000.0
+            # perf_counter() and monotonic() share a clock on CPython; using
+            # monotonic timestamps lets scheduler events correlate with GC.
+            self._gc_intervals.append((started, finished, duration_ms))
+            self._gc_pauses[self._gc_pause_index] = duration_ms
             self._gc_pause_index = (self._gc_pause_index + 1) % self.capacity
             self._gc_pause_count = min(self.capacity, self._gc_pause_count + 1)
         self._gc_collections += 1
         self._gc_uncollectable += int(info.get("uncollectable", 0) or 0)
+
+    def record_stall(self, loop_name: str, actual_mono: float, lateness_ms: float) -> None:
+        """Record only exceptional scheduler lateness, with nearby GC evidence.
+
+        A matching GC interval indicates temporal overlap, not proven cause.
+        Called from the event loop, not from gc.callbacks.
+        """
+        if lateness_ms < 20.0:
+            return
+        # GC callbacks cannot hold our ordinary profiler lock. Snapshot the
+        # bounded deque without iterating it concurrently with mutation.
+        gc_intervals = tuple(self._gc_intervals)
+        start = actual_mono - lateness_ms / 1000.0
+        matching = [
+            (round((ended - begun) * 1000.0, 3), round(ended, 6))
+            for begun, ended, _duration in gc_intervals
+            if begun <= actual_mono and ended >= start
+        ]
+        self._stall_events.append({
+            "loop": str(loop_name),
+            "observed_mono": round(actual_mono, 6),
+            "late_ms": round(lateness_ms, 3),
+            "gc_overlapping": bool(matching),
+            "gc_overlap_durations_ms": [event[0] for event in matching[-8:]],
+            "gc_overlap_ends_mono": [event[1] for event in matching[-8:]],
+        })
 
     def install_gc_monitoring(self) -> None:
         if not self._gc_installed:
@@ -157,4 +192,5 @@ class RuntimeProfiler:
                 "monitoring": self._gc_installed,
             },
             "window_capacity": self.capacity,
+            "recent_scheduler_stalls": list(self._stall_events),
         }

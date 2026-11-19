@@ -53,6 +53,7 @@ async def tracking_loop(store: Any, source_manager: Any, frequency_hz: float = 2
         if profiler is not None:
             gap_ms = (actual - next_tick) * 1000.0
             profiler.observe("acquisition_loop_jitter_ms", gap_ms)
+            profiler.record_stall("acquisition", actual, gap_ms)
             profiler.observe_loop("acquisition", actual, active_rate, gap_ms)
             recorder = getattr(store, "stability_recorder", None)
             if recorder is not None:
@@ -74,6 +75,7 @@ async def pose_publication_loop(store: Any, frequency_hz: float = 50.0) -> None:
         if profiler is not None:
             gap_ms = (actual - next_tick) * 1000.0
             profiler.observe("publication_loop_jitter_ms", gap_ms)
+            profiler.record_stall("publication", actual, gap_ms)
             profiler.observe_loop("publication", actual, frequency_hz, gap_ms)
             recorder = getattr(store, "stability_recorder", None)
             if recorder is not None:

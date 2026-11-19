@@ -15,7 +15,9 @@ class EventLoopWatchdog:
 
     def __init__(self, directory: Path, *, stall_seconds: float = 5.0,
                  check_seconds: float = 1.0, cooldown_seconds: float = 30.0,
-                 max_bytes: int = 1_000_000, clock: Callable[[], float] = time.monotonic) -> None:
+                 max_bytes: int = 1_000_000, clock: Callable[[], float] = time.monotonic,
+                 short_stall_seconds: float | None = None,
+                 short_cooldown_seconds: float = 15.0) -> None:
         self.directory = Path(directory)
         self.stall_seconds = max(1.0, float(stall_seconds))
         self.check_seconds = max(0.1, float(check_seconds))
@@ -24,6 +26,11 @@ class EventLoopWatchdog:
         self.clock = clock
         self._heartbeat = clock()
         self._last_dump = float("-inf")
+        self.short_stall_seconds = (None if short_stall_seconds is None
+                                    else max(0.02, float(short_stall_seconds)))
+        self.short_cooldown_seconds = max(1.0, float(short_cooldown_seconds))
+        self._last_short_dump = float("-inf")
+        self.short_dump_count = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._handle: TextIO | None = None
@@ -69,13 +76,21 @@ class EventLoopWatchdog:
 
     def check_once(self, now: float | None = None) -> bool:
         current = self.clock() if now is None else float(now)
-        if current - self._heartbeat < self.stall_seconds:
-            return False
-        if current - self._last_dump < self.cooldown_seconds:
-            return False
-        self._last_dump = current
-        self._dump("event-loop heartbeat stalled; process still alive", current)
-        return True
+        heartbeat_age = current - self._heartbeat
+        if heartbeat_age >= self.stall_seconds:
+            if current - self._last_dump < self.cooldown_seconds:
+                return False
+            self._last_dump = current
+            self._dump("event-loop heartbeat stalled; process still alive", current)
+            return True
+        if (self.short_stall_seconds is not None
+                and heartbeat_age >= self.short_stall_seconds
+                and current - self._last_short_dump >= self.short_cooldown_seconds):
+            self._last_short_dump = current
+            self._dump(f"short event-loop stall age_ms={heartbeat_age * 1000.0:.1f}", current)
+            self.short_dump_count += 1
+            return True
+        return False
 
     def _run(self) -> None:
         while not self._stop.wait(self.check_seconds):
@@ -117,6 +132,8 @@ class EventLoopWatchdog:
             "heartbeat_age_seconds": round(max(0.0, self.clock() - self._heartbeat), 3),
             "stall_seconds": self.stall_seconds,
             "dump_count": self.dump_count,
+            "short_stall_seconds": self.short_stall_seconds,
+            "short_dump_count": self.short_dump_count,
             "diagnostic_path": str(self.path),
             "manual_signal": "SIGUSR2" if self._signal_registered else None,
         }

@@ -69,7 +69,11 @@ diagnostic_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, threa
 power_health = PowerHealthService()
 power_status_inflight: asyncio.Task | None = None
 vision_calibration = VisionCalibrationService(DATA_DIR)
-event_loop_watchdog = EventLoopWatchdog(debug.session_dir)
+# Short captures are rate-limited and kept in the existing bounded log.
+event_loop_watchdog = EventLoopWatchdog(
+    debug.session_dir, check_seconds=0.01,
+    short_stall_seconds=0.04, short_cooldown_seconds=15.0,
+)
 native_output = NativeOutputService()
 native_output_lock = asyncio.Lock()
 native_output_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="reallines-native-output")
@@ -257,7 +261,7 @@ async def start_acquisition():
     acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
     publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
     imu_status_task = asyncio.create_task(imu_status_publication_loop(store, imu_service), name="optional-imu-status")
-    watchdog_heartbeat_task = asyncio.create_task(event_loop_watchdog.heartbeat_loop(), name="event-loop-heartbeat")
+    watchdog_heartbeat_task = asyncio.create_task(event_loop_watchdog.heartbeat_loop(0.01), name="event-loop-heartbeat")
 
 
 @app.on_event("shutdown")

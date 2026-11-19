@@ -28,6 +28,18 @@ class RuntimeProfilerCase(unittest.TestCase):
         self.assertEqual(loop["actual_hz"], 200)
         self.assertEqual(loop["missed_deadlines_since_start"], 1)
 
+    def test_stall_gc_overlap_is_timestamped_and_bounded(self):
+        profiler = RuntimeProfiler(capacity=32)
+        profiler._gc_intervals.append((10.0, 10.05, 50.0))
+        profiler.record_stall("acquisition", 10.06, 70)
+        profiler.record_stall("publication", 12.0, 30)
+        profiler.record_stall("acquisition", 13.0, 2)
+        events = profiler.snapshot()["recent_scheduler_stalls"]
+        self.assertEqual(len(events), 2)
+        self.assertTrue(events[0]["gc_overlapping"])
+        self.assertEqual(events[0]["gc_overlap_durations_ms"], [50.0])
+        self.assertFalse(events[1]["gc_overlapping"])
+
     def test_non_finite_gauges_are_rejected(self):
         profiler = RuntimeProfiler()
         profiler.observe("bad", float("nan"))
