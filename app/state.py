@@ -1176,7 +1176,9 @@ class StateStore:
                 "overlay_revision": self.calibration_overlay.get("revision"),
                 "overlay_target_id": self.calibration_overlay.get("target_id"),
                 "reference_observation_id": self.calibration_overlay.get("reference_observation_id"),
-                "reference_points": deepcopy(self.calibration_overlay.get("reference_points") or {}),
+                # Keep the live publication path copy-free. The recorder snapshots
+                # this mutable context only if a capture is actually active.
+                "reference_points": self.calibration_overlay.get("reference_points") or {},
                 "selected_marker": self.calibration_overlay.get("selected_marker"),
                 "editing": bool(self.calibration_overlay.get("editing")),
             })

@@ -280,12 +280,15 @@ class TrackingStabilityRecorder:
     def record_publication(self, timestamp: float, pose: dict[str, Any],
                            transport: dict[str, Any], context: dict[str, Any] | None = None) -> None:
         render_pose = self._pose_fields(pose.get("render_camera", {}))
-        diagnostic = deepcopy(context or {})
+        # Normal 50 Hz publishing should not recursively copy calibration
+        # context. Take a lightweight immutable fingerprint for change detection;
+        # capture the full context only while a recording is active.
+        diagnostic = context or {}
         probe = {
             "render_pose": render_pose,
             "overlay_revision": diagnostic.get("overlay_revision"),
             "reference_observation_id": diagnostic.get("reference_observation_id"),
-            "reference_points": diagnostic.get("reference_points"),
+            "reference_points": repr(diagnostic.get("reference_points")),
             "world_calibration_id": diagnostic.get("world_calibration_id"),
             "world_valid": diagnostic.get("world_valid"),
         }
@@ -296,7 +299,8 @@ class TrackingStabilityRecorder:
             if previous is not None and not self._active:
                 pose_constant = previous["render_pose"] == probe["render_pose"]
                 overlay_changed = (
-                    previous["reference_observation_id"] != probe["reference_observation_id"]
+                    previous["overlay_revision"] != probe["overlay_revision"]
+                    or previous["reference_observation_id"] != probe["reference_observation_id"]
                     or previous["reference_points"] != probe["reference_points"]
                 )
                 world_changed = (
@@ -314,6 +318,9 @@ class TrackingStabilityRecorder:
                     self._trigger_locked(timestamp, "render_fov_changed_constant_pan_tilt")
             if not self._active:
                 return
+            # Copy only for a live/automatic recording; never on ordinary frames.
+            # A captured event must remain stable if the operator edits calibration.
+            diagnostic = deepcopy(diagnostic)
             self._publication_sequence += 1
             self._append_locked({
                 "stage": "publication", "mono": float(timestamp),
