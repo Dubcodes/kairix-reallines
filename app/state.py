@@ -1075,8 +1075,9 @@ class StateStore:
     def snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
         history_now = now
-        self._refresh_tracking_health(now)
-        self._refresh_camera_from_tracking(sample=False)
+        if not getattr(self, "external_pose_mode", False):
+            self._refresh_tracking_health(now)
+            self._refresh_camera_from_tracking(sample=False)
         tracking = deepcopy(self.tracking)
         camera = deepcopy(self.camera)
         render_camera, sync = self._render_pose_state(history_now)
@@ -1110,8 +1111,9 @@ class StateStore:
 
     def pose_snapshot(self) -> dict[str, Any]:
         now = time.monotonic()
-        self._refresh_tracking_health(now)
-        self._refresh_camera_from_tracking(sample=False)
+        if not getattr(self, "external_pose_mode", False):
+            self._refresh_tracking_health(now)
+            self._refresh_camera_from_tracking(sample=False)
         render_camera, sync = self._render_pose_state(now)
         compact_axes = {
             axis: {key: deepcopy(runtime.get(key)) for key in ("source", "raw", "raw_count", "filtered_count", "value", "unit", "valid", "health", "status", "age_seconds", "update_hz", "referenced", "reference_count", "reference_angle", "reference_id", "relative_angle", "relative_count", "driver_alive", "availability", "integrity", "integrity_reason", "integrity_policy", "calibration_confidence", "diagnostics") if key in runtime}
@@ -1152,6 +1154,11 @@ class StateStore:
             await output.stop()
 
     async def broadcast_state(self) -> None:
+        if getattr(self, "external_pose_mode", False):
+            from .tracking_proxy import configuration
+            # Low-frequency, acknowledged config sync, never in the 200 Hz producer.
+            config = configuration(self)
+            await asyncio.to_thread(self.pico_source_manager.sync_configuration, config)
         if self.runtime_profiler is None:
             snapshot = self.snapshot()
         else:

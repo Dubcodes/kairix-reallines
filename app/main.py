@@ -20,6 +20,8 @@ from .kinematics import RigGeometryError
 from .imu import ImuAssistanceService, ImuCalibrationError
 from .state import StateStore
 from .source_manager import TrackingSourceManager
+from .tracking_proxy import DedicatedTrackingProxy
+from .tracking_consumer import dedicated_pose_consumer_loop
 from .runtime import imu_status_publication_loop, pose_publication_loop, tracking_loop
 from .tracking import TrackingConfigError
 from .world_calibration import CalibrationError
@@ -54,11 +56,16 @@ imu_status_task: asyncio.Task | None = None
 watchdog_heartbeat_task: asyncio.Task | None = None
 stability_recorder = TrackingStabilityRecorder()
 runtime_profiler = RuntimeProfiler()
-# Gated transport isolation. Legacy reader remains default.
-# Do not enable until the dedicated owner service is running.
-if os.getenv("KAIRIX_PICO_OWNER_SOCKET"):
+# Gated dedicated mapping; existing transport-only and legacy modes remain available.
+dedicated_mmap = os.getenv("KAIRIX_TRACKING_MMAP_PATH", "").strip()
+owner_socket = os.getenv("KAIRIX_PICO_OWNER_SOCKET", "").strip()
+if dedicated_mmap:
+    if not owner_socket:
+        raise RuntimeError("Dedicated tracking requires KAIRIX_PICO_OWNER_SOCKET")
+    source_manager = DedicatedTrackingProxy(owner_socket, dedicated_mmap, store)
+elif owner_socket:
     from .pico_proxy import PicoProxy
-    source_manager = PicoProxy(os.environ["KAIRIX_PICO_OWNER_SOCKET"])
+    source_manager = PicoProxy(owner_socket)
 else:
     source_manager = TrackingSourceManager(stability_recorder=stability_recorder)
 store.pico_source_manager = source_manager
@@ -87,6 +94,7 @@ native_status_inflight: asyncio.Task | None = None
 native_pose_default = "/dev/shm/kairix-reallines-pose-v1" if os.name == "posix" else str(DATA_DIR / "native_pose.bin")
 native_pose_writer = LatestPoseWriter(Path(os.getenv("KAIRIX_NATIVE_POSE_PATH", native_pose_default)))
 store.native_pose_writer = native_pose_writer
+store.external_pose_mode = bool(dedicated_mmap)
 
 
 class CameraUpdate(BaseModel):
@@ -263,8 +271,12 @@ async def start_acquisition():
     imu_service.start()
     runtime_profiler.install_gc_monitoring()
     event_loop_watchdog.start()
-    native_pose_writer.open()
-    acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
+    if store.external_pose_mode:
+        acquisition_task = asyncio.create_task(dedicated_pose_consumer_loop(store, source_manager),
+                                               name="dedicated-tracking-consumer-50hz")
+    else:
+        native_pose_writer.open()
+        acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
     publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
     imu_status_task = asyncio.create_task(imu_status_publication_loop(store, imu_service), name="optional-imu-status")
     watchdog_heartbeat_task = asyncio.create_task(event_loop_watchdog.heartbeat_loop(0.01), name="event-loop-heartbeat")
@@ -791,8 +803,9 @@ async def set_encoder_reference(axis: str, body: EncoderReference):
         source_manager.set_reference(axis, body.angle)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    async with store.lock:
-        store.sample_tick(source_manager.snapshots())
+    if not store.external_pose_mode:
+        async with store.lock:
+            store.sample_tick(source_manager.snapshots())
     await store.broadcast_state()
     return store.tracking["axes"][axis]
 
@@ -803,8 +816,9 @@ async def clear_encoder_reference(axis: str):
         source_manager.clear_reference(axis)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    async with store.lock:
-        store.sample_tick(source_manager.snapshots())
+    if not store.external_pose_mode:
+        async with store.lock:
+            store.sample_tick(source_manager.snapshots())
     await store.broadcast_state()
     return {"ok": True}
 

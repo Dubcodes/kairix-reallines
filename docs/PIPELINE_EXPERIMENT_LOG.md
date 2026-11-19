@@ -74,3 +74,11 @@ Repository `Dubcodes/kairix-reallines`, branch `wip/live-tuning-dot-lock`; worki
 
 **Next:** test owner/proxy health under controlled load; then migrate pose computation/renderer state ownership with explicit calibration command revisions, freshness watchdog, and fail-safe graphics suppression. Retain zero-intentional-delay, 500 Hz Pico, 200 Hz mapping, 50 Hz output. Record measured p95/p99/max, dropped deadlines, and visible GFX behavior in a new entry before calling any change successful.
 
+### V1.6C — Dedicated mapping and authoritative shared-memory pose (20 November 2026)
+
+**Base**: `98dbf7f`. **State**: implementation pending unit tests, Pi bench and physical acceptance; *not* evidence of a stutter fix.
+
+- V1.6B dedicated Pico UART ownership: 501.2 Hz, 0 missed UART packets/CRC errors, Engineering reference success. Legacy Uvicorn mapping still ~188.3 Hz and publication ~48.6 Hz. The high-frequency socket proxy repeatedly expired its 50 ms cache while individual RPCs could take 150 ms, producing spurious integrity invalidations and 21 history resets in the recorded session. **Decision**: retire high-frequency RPC polling.
+- V1.6C opt-in process: Pico owner maps camera at 200 Hz with canonical StateStore, writes native binary pose ring and latest rich tracking snapshot to RAM; web uses a 50 Hz latest-only shared-memory reader; Unix IPC only for acknowledged operator/reference/config updates.
+- Explicit safety boundaries: Linux-only IPC; same-owner reference semantics; calibration configuration fingerprint required; reject mismatched/stale/torn poses, avoid preserving a falsely valid camera; never two UART owners; legacy remains default; no smoothing or buffering.
+- **Outstanding**: validate dynamic world-calibration and zoom changes, role transition, Pico session resets, process failure handling, fast camera motion, 200 Hz timing under load, native HDMI field timing; browser WebSocket sending is *still* Uvicorn-owned and can stutter even with independently produced camera poses. Do not declare broadcast-grade output until measured on physical output.
