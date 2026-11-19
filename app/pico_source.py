@@ -65,6 +65,10 @@ class PicoUartWorker:
         self._buffer_clears = 0
         self._link_timeouts = 0
         self._stability_recorder = stability_recorder
+        # Optional one-way, best-effort mirror for an independent real-UART
+        # shadow benchmark. Disabled by default; NEVER opens UART twice.
+        self._mirror_sent = 0
+        self._mirror_dropped = 0
 
     def _clear_processing_queue_locked(self, *, stale: bool = False) -> int:
         discarded = len(self._queue)
@@ -157,6 +161,12 @@ class PicoUartWorker:
             raise
 
     def _run(self) -> None:
+        mirror_target = os.getenv("KAIRIX_PICO_MIRROR_SOCKET", "").strip()
+        mirror = None
+        if mirror_target:
+            import socket
+            mirror = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            mirror.setblocking(False)
         while not self._stop.is_set():
             fd = None
             try:
@@ -170,6 +180,12 @@ class PicoUartWorker:
                         data = os.read(fd, 4096)
                         if data:
                             self.feed(data)
+                            if mirror is not None:
+                                try:
+                                    mirror.sendto(data, mirror_target)
+                                    self._mirror_sent += 1
+                                except (OSError, BlockingIOError):
+                                    self._mirror_dropped += 1
                         else:
                             raise OSError("UART returned EOF")
             except Exception as exc:
@@ -181,6 +197,8 @@ class PicoUartWorker:
                 if fd is not None:
                     os.close(fd)
             self._stop.wait(0.5)
+        if mirror is not None:
+            mirror.close()
 
     def feed(self, data: bytes, now: float | None = None) -> None:
         """Accept bytes from UART, or inject fixture data in tests."""
@@ -353,6 +371,9 @@ class PicoUartWorker:
             percentile = lambda values: round(values[min(len(values) - 1, int((len(values) - 1) * .95))], 3) if values else None
             return {
                 "device": self.device,
+                "shadow_mirror_enabled": bool(os.getenv("KAIRIX_PICO_MIRROR_SOCKET", "").strip()),
+                "shadow_mirror_datagrams_sent": self._mirror_sent,
+                "shadow_mirror_datagrams_dropped": self._mirror_dropped,
                 "baud": BAUD,
                 "connected": self._fresh(now),
                 "port_open": self._connected,

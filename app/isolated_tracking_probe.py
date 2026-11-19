@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import math
 import os
 import shutil
@@ -213,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     path = validate_pose_path(args.pose_file)
     lock_path = path.with_name(path.name + '.lock')
+    import fcntl  # Linux only: keep offline unit tests importable on Windows
     # Lock before creating/truncating the shared memory file.
     with lock_path.open('a+b') as lock_file:
         try:
