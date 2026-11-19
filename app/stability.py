@@ -133,8 +133,12 @@ class TrackingStabilityRecorder:
         if self._active:
             return
         self._events.clear()
-        for event in self._pre_events:
-            self._append_locked(deepcopy(event))
+        # Each pre-event is an immutable-by-convention, freshly built
+        # snapshot. Neither producer nor consumer mutates it after append.
+        # Copying the entire 2-second history recursively in the 200 Hz
+        # acquisition task caused measurable event-loop stalls. A deque
+        # transfer retains the same evidence without recursive copying.
+        self._events.extend(self._pre_events)
         self._active = True
         self._automatic = True
         self._trigger_reason = str(reason)[:120]

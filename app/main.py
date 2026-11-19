@@ -523,8 +523,11 @@ async def performance_status():
         power_status_inflight = asyncio.ensure_future(
             loop.run_in_executor(diagnostic_executor, power_health.status)
         )
-    result = runtime_profiler.snapshot()
-    result["pico"] = source_manager.pico_status()
+    # Statistical percentile calculation and Pico status sorting must not
+    # occupy Uvicorn's event loop while tracking/pose tasks are due.
+    # This is temporary GIL-sharing mitigation, not process isolation.
+    result = await asyncio.to_thread(runtime_profiler.snapshot)
+    result["pico"] = await asyncio.to_thread(source_manager.pico_status)
     result["event_loop_watchdog"] = event_loop_watchdog.status()
     result["power"] = await asyncio.shield(power_status_inflight)
     if power_status_inflight.done():
@@ -534,7 +537,9 @@ async def performance_status():
 
 @app.get("/api/tracking-stability")
 async def tracking_stability_status():
-    return stability_recorder.status()
+    # Computing summaries from active diagnostic capture is not
+    # permitted to block acquisition/publication scheduling.
+    return await asyncio.to_thread(stability_recorder.status)
 
 
 @app.post("/api/tracking-stability/start")
