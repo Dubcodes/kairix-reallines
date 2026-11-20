@@ -1,0 +1,26 @@
+[Unit]
+Description=Kairix RealLines dedicated 200Hz Pico tracking owner
+After=local-fs.target
+# Keep the web application present while this service is healthy; after an owner
+# crash/restart, start the web process again so it re-sends its full configuration.
+Upholds=kairix-reallines-dev.service
+
+[Service]
+Type=exec
+User=reallines
+Group=reallines
+SupplementaryGroups=dialout gpio input
+WorkingDirectory=/home/reallines/kairix-reallines
+Environment=KAIRIX_DATA_DIR=/home/reallines/kairix-reallines/data
+RuntimeDirectory=kairix-reallines
+RuntimeDirectoryMode=0750
+ExecStart=/home/reallines/kairix-reallines/.venv/bin/python -m app.tracking_owner --socket /run/kairix-reallines/owner.sock --data-dir /home/reallines/kairix-reallines/data --tracking-mmap /dev/shm/kairix-reallines-tracking-v1 --native-pose /dev/shm/kairix-reallines-pose-v1
+ExecStartPost=/home/reallines/kairix-reallines/.venv/bin/python -m app.tracking_service_check --socket /run/kairix-reallines/owner.sock --wait 15
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=30
+TimeoutStopSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
