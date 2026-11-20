@@ -49,17 +49,29 @@ class TrackingOwner(Owner):
         self._lateness_ms = deque(maxlen=12000)
         self._processing_ms = deque(maxlen=12000)
         self._cached_status = {"connected": False}
+        # Exactly one rich-state pending slot: old snapshots are discarded, not queued.
+        # Encoding JSON and reading diagnostics must not execute in the 5-ms tick.
+        self._rich_cv = threading.Condition()
+        self._rich_pending = None
+        self._rich_worker = None
+        self._rich_drops = 0
 
     def start(self):
         self.tracking_writer.open()
         self.native_writer.open()
+        self._rich_worker = threading.Thread(target=self._rich_loop, name='reallines-rich-state-50hz', daemon=True)
+        self._rich_worker.start()
         self._worker = threading.Thread(target=self._loop, name='reallines-dedicated-tracking', daemon=True)
         self._worker.start()
 
     def close(self):
         self._stop.set()
+        with self._rich_cv:
+            self._rich_cv.notify_all()
         if self._worker is not None:
             self._worker.join(timeout=2)
+        if self._rich_worker is not None:
+            self._rich_worker.join(timeout=2)
         self.manager.stop()
         self.native_writer.close()
         self.tracking_writer.close()
@@ -100,19 +112,25 @@ class TrackingOwner(Owner):
     def execute(self, request):
         action = request.get('action')
         if action == 'health':
+            # Sorting up to 12,000 samples while holding the real-time owner lock
+            # caused health polling to compete with the 5-ms producer deadline.
             with self._lock:
                 elapsed = max(0.001, time.monotonic() - (self._started_at or time.monotonic()))
-                return {'configured': self.configured,
-                        'pose_ticks': self._ticks,
-                        'observed_pose_hz': round(self._ticks / elapsed, 3),
-                        'missed_wakeup_deadlines': self._deadline_misses,
-                        'processing_overruns': self._processing_overruns,
-                        'wake_lateness': self._stats(self._lateness_ms),
-                        'pose_processing_time': self._stats(self._processing_ms),
-                        'last_error': self._last_error,
-                        'config_token': self._config_token,
-                        'native_generation': self.native_writer.generation,
-                        'web_generation': self.tracking_writer.generation}
+                result = {'configured': self.configured,
+                          'pose_ticks': self._ticks,
+                          'observed_pose_hz': round(self._ticks / elapsed, 3),
+                          'missed_wakeup_deadlines': self._deadline_misses,
+                          'processing_overruns': self._processing_overruns,
+                          'last_error': self._last_error,
+                          'config_token': self._config_token,
+                          'native_generation': self.native_writer.generation,
+                          'web_generation': self.tracking_writer.generation,
+                          'rich_snapshot_drops': self._rich_drops}
+                lateness = tuple(self._lateness_ms)
+                processing = tuple(self._processing_ms)
+            result['wake_lateness'] = self._stats(lateness)
+            result['pose_processing_time'] = self._stats(processing)
+            return result
         if action == 'sync':
             with self._lock:
                 if not self.configured:
@@ -136,6 +154,31 @@ class TrackingOwner(Owner):
                     raise
                 return result
         return super().execute(request)
+
+    def _rich_loop(self):
+        # Never publish a queue of obsolete camera states. A slow JSON encode
+        # can drop intermediate rich snapshots; the 200-Hz native pose continues.
+        last_status = 0.0
+        while True:
+            with self._rich_cv:
+                self._rich_cv.wait_for(lambda: self._rich_pending is not None or self._stop.is_set())
+                if self._stop.is_set():
+                    return
+                snapshot = self._rich_pending
+                self._rich_pending = None
+            try:
+                if time.monotonic() - last_status >= .1:
+                    self._cached_status = self.manager.pico_status()
+                    last_status = time.monotonic()
+                snapshot['status'] = self._cached_status
+                self.tracking_writer.write(snapshot)
+            except Exception as exc:
+                # A failed rich-state writer is not permitted to silently leave
+                # the owner claiming valid fresh tracking indefinitely.
+                with self._lock:
+                    self._last_error = 'rich-state publication: ' + repr(exc)[:240]
+                    self.configured = False
+                return
 
     def _loop(self):
         period = .005
@@ -162,19 +205,21 @@ class TrackingOwner(Owner):
                     self.store.sample_tick(samples, now)
                     self.native_writer.publish_store(self.store, samples, now)
                     self._ticks += 1
-                    # Keep rich web state at 50 Hz; the compact native pose is
-                    # published at full 200 Hz and stays off the JSON path.
-                    if self._ticks % 20 == 1:
-                        self._cached_status = self.manager.pico_status()
+                    # Only capture an immutable latest snapshot inside the
+                    # 5-ms lock. JSON/CRC/mmap writing occurs on another thread.
                     if self._ticks % 4 == 1:
-                        self.tracking_writer.write({
+                        rich = {
                             'config_token': self._config_token,
-                            'samples': samples,
-                            'tracking': self.store.tracking,
-                            'camera': self.store.camera,
-                            'zoom_fov': self.store.zoom_fov_mapping,
-                            'status': self._cached_status,
-                        })
+                            'samples': deepcopy(samples),
+                            'tracking': deepcopy(self.store.tracking),
+                            'camera': deepcopy(self.store.camera),
+                            'zoom_fov': deepcopy(self.store.zoom_fov_mapping),
+                        }
+                        with self._rich_cv:
+                            if self._rich_pending is not None:
+                                self._rich_drops += 1
+                            self._rich_pending = rich
+                            self._rich_cv.notify()
                     processing_ms = (time.perf_counter() - begin) * 1000
                     self._processing_ms.append(processing_ms)
                     if processing_ms >= period * 1000:

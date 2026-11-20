@@ -277,7 +277,10 @@ async def start_acquisition():
     else:
         native_pose_writer.open()
         acquisition_task = asyncio.create_task(tracking_loop(store, source_manager), name="tracking-acquisition-200hz")
-    publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
+    # Dedicated mode publishes immediately after its 50-Hz shared-memory adoption.
+    # Legacy mode retains the separate 50-Hz publication loop.
+    if not store.external_pose_mode:
+        publication_task = asyncio.create_task(pose_publication_loop(store), name="pose-publication-50hz")
     imu_status_task = asyncio.create_task(imu_status_publication_loop(store, imu_service), name="optional-imu-status")
     watchdog_heartbeat_task = asyncio.create_task(event_loop_watchdog.heartbeat_loop(0.01), name="event-loop-heartbeat")
 

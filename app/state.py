@@ -1157,8 +1157,14 @@ class StateStore:
         if getattr(self, "external_pose_mode", False):
             from .tracking_proxy import configuration
             # Low-frequency, acknowledged config sync, never in the 200 Hz producer.
-            config = configuration(self)
-            await asyncio.to_thread(self.pico_source_manager.sync_configuration, config)
+            # Protect a pending operator Zoom edit from an older owner snapshot
+            # while its new configuration token is being acknowledged.
+            self._dedicated_config_syncing = getattr(self, "_dedicated_config_syncing", 0) + 1
+            try:
+                config = configuration(self)
+                await asyncio.to_thread(self.pico_source_manager.sync_configuration, config)
+            finally:
+                self._dedicated_config_syncing -= 1
         if self.runtime_profiler is None:
             snapshot = self.snapshot()
         else:

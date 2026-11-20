@@ -10,6 +10,7 @@ import time
 from copy import deepcopy
 
 from .tracking_mmap import TrackingMmapError
+from .runtime import publish_pose_once
 
 
 def mark_unavailable(store):
@@ -39,7 +40,11 @@ def adopt(store, state, last_identity):
         store._pose_reference_key = None
     store.tracking = deepcopy(state['tracking'])
     store.camera = deepcopy(state['camera'])
-    store.zoom_fov_mapping = deepcopy(state['zoom_fov'])
+    # A local operator Zoom endpoint edit can be awaiting owner ACK. While
+    # that transaction is in flight, do not overwrite its pending calibration
+    # with an older owner snapshot (the owner token is still the old token).
+    if not getattr(store, '_dedicated_config_syncing', False):
+        store.zoom_fov_mapping = deepcopy(state['zoom_fov'])
     store._refresh_pose_reference_and_sample()
     return identity
 
@@ -65,6 +70,9 @@ async def dedicated_pose_consumer_loop(store, proxy, rate_hz=50):
             async with store.lock:
                 last_identity = adopt(store, value, last_identity)
                 unavailable = False
+        # In dedicated mode adoption and publishing share the same 50-Hz
+        # deadline. Never run two free-running web timers for these stages.
+        await publish_pose_once(store)
         next_tick += period
         if next_tick < time.monotonic() - period:
             next_tick = time.monotonic()
