@@ -28,6 +28,11 @@ class TrackingStabilityRecorder:
         self._lock = threading.Lock()
         self._events: deque[dict[str, Any]] = deque(maxlen=self.capacity)
         self._pre_events: deque[dict[str, Any]] = deque(maxlen=1_000)
+        # Always-on, bounded, compact pose/transport evidence for an OBS clip.
+        # This is diagnostics-only, never input buffering, and never writes to SD.
+        # ~50 Hz * 600 seconds plus low-rate browser/exception events.
+        self._recent: deque[dict[str, Any]] = deque(maxlen=31_000)
+        self._recent_seconds = 600.0
         self._active = False
         self._started_mono: float | None = None
         self._ends_mono: float | None = None
@@ -129,6 +134,12 @@ class TrackingStabilityRecorder:
             self._dropped_by_capacity += 1
         self._events.append(event)
 
+    def _append_recent_locked(self, event: dict[str, Any]) -> None:
+        self._recent.append(event)
+        cutoff = event["mono"] - self._recent_seconds
+        while self._recent and self._recent[0]["mono"] < cutoff:
+            self._recent.popleft()
+
     def _trigger_locked(self, now: float, reason: str) -> None:
         if self._active:
             return
@@ -194,6 +205,8 @@ class TrackingStabilityRecorder:
         if gap_ms < 40.0:
             return
         with self._lock:
+            self._append_recent_locked({"stage": "scheduling_gap", "mono": float(timestamp),
+                                 "utc_s": time.time(), "loop": stage, "gap_ms": round(float(gap_ms), 3)})
             if not self._active:
                 self._trigger_locked(timestamp, f"{stage}_scheduling_gap_{gap_ms:.1f}ms")
             self._append_locked({"stage": "scheduling_gap", "mono": float(timestamp),
@@ -201,6 +214,10 @@ class TrackingStabilityRecorder:
 
     def record_blocking_operation(self, name: str, elapsed_ms: float, timestamp: float) -> None:
         with self._lock:
+            if elapsed_ms >= 40.0:
+                self._append_recent_locked({"stage": "blocking_operation", "mono": float(timestamp),
+                                     "utc_s": time.time(), "operation": str(name),
+                                     "elapsed_ms": round(float(elapsed_ms), 3)})
             if elapsed_ms >= 40.0 and not self._active:
                 self._trigger_locked(timestamp, f"blocking_{name}_{elapsed_ms:.1f}ms")
             if self._active:
@@ -208,10 +225,24 @@ class TrackingStabilityRecorder:
                                      "operation": str(name), "elapsed_ms": round(float(elapsed_ms), 3)})
 
     def record_browser_metrics(self, report: dict[str, Any], timestamp: float) -> None:
-        if not self._active:
-            return
         metrics = report.get("metrics") or {}
         with self._lock:
+            self._append_recent_locked({
+                "stage": "browser_metrics", "mono": float(timestamp), "utc_s": time.time(),
+                "page": report.get("page"), "label": report.get("label"),
+                "client_id": report.get("client_id"),
+                "incoming_pose_hz_5s": metrics.get("incoming_pose_hz_5s"),
+                "animation_frame_hz_5s": metrics.get("animation_frame_hz_5s"),
+                "pose_interarrival_p95_ms_5s": metrics.get("pose_interarrival_p95_ms_5s"),
+                "server_pose_gap_max_ms_5s": metrics.get("server_pose_gap_max_ms_5s"),
+                "browser_pose_gap_max_ms_5s": metrics.get("browser_pose_gap_max_ms_5s"),
+                "frame_interval_p95_ms_5s": metrics.get("frame_interval_p95_ms_5s"),
+                "missed_frame_deadlines_5s": metrics.get("missed_frame_deadlines_5s"),
+                "duplicate_pose_messages": metrics.get("duplicate_pose_messages"),
+                "held_poses": metrics.get("held_poses"),
+                "stale_poses": metrics.get("stale_poses"),
+                "transport_mode": metrics.get("transport_mode"),
+            })
             if self._active:
                 self._append_locked({
                     "stage": "browser_metrics", "mono": float(timestamp),
@@ -284,6 +315,23 @@ class TrackingStabilityRecorder:
         # context. Take a lightweight immutable fingerprint for change detection;
         # capture the full context only while a recording is active.
         diagnostic = context or {}
+        # Capture only a compact immutable diagnostic sample at 50 Hz.
+        # Never deepcopy calibration context or encode JSON on this hot path.
+        axes = pose.get("tracking", {}).get("axes", {})
+        recent = {
+            "stage": "publication", "mono": float(timestamp), "utc_s": time.time(),
+            "pose_sequence": pose.get("pose_sequence"),
+            "server_timestamp": pose.get("server_mono"),
+            "camera": self._pose_fields(pose.get("camera", {})),
+            "render_pose": render_pose,
+            "tracking_valid": bool(pose.get("tracking", {}).get("valid")),
+            "tracking_integrity": pose.get("tracking", {}).get("integrity"),
+            "axes": {axis: {key: axes.get(axis, {}).get(key) for key in
+                ("raw_count", "filtered_count", "value", "reference_id", "valid", "age_seconds")}
+                for axis in AXES},
+            "transport": {key: transport.get(key) for key in
+                ("clients", "queued_messages", "coalesced_poses", "critical_overflows")},
+        }
         probe = {
             "render_pose": render_pose,
             "overlay_revision": diagnostic.get("overlay_revision"),
@@ -294,6 +342,7 @@ class TrackingStabilityRecorder:
         }
         with self._lock:
             self._expire_locked(timestamp)
+            self._append_recent_locked(recent)
             previous = self._previous_publication_probe
             self._previous_publication_probe = probe
             if previous is not None and not self._active:
@@ -368,6 +417,9 @@ class TrackingStabilityRecorder:
         with self._lock:
             self._expire_locked(now)
             events = list(self._events)
+            recent_count = len(self._recent)
+            recent_first = self._recent[0]["mono"] if self._recent else None
+            recent_last = self._recent[-1]["mono"] if self._recent else None
             active = self._active
             started = self._started_mono
             ends = self._ends_mono
@@ -378,6 +430,11 @@ class TrackingStabilityRecorder:
                 "remaining_seconds": round(max(0.0, ends - now), 3) if active and ends is not None else 0.0,
                 "event_count": len(events), "capacity": self.capacity,
                 "dropped_by_capacity": self._dropped_by_capacity, "stop_reason": self._stop_reason,
+                "recent": {"window_seconds": self._recent_seconds, "event_count": recent_count,
+                           "coverage_seconds": round(max(0.0, recent_last - recent_first), 3)
+                           if recent_first is not None else 0.0,
+                           "latest_sample_age_seconds": round(max(0.0, now - recent_last), 3)
+                           if recent_last is not None else None},
             }
         result["summary"] = self._summary(events)
         return result
@@ -420,14 +477,31 @@ class TrackingStabilityRecorder:
             "render_angle_excursion_deg": {axis: span(values) for axis, values in render_values.items()},
         }
 
-    def export_jsonl(self) -> str:
+    def _export_events(self, scope: str) -> list[dict[str, Any]]:
+        if scope not in {"recent", "capture"}:
+            raise ValueError("Export scope must be recent or capture")
         with self._lock:
-            events = list(self._events)
+            events = list(self._recent if scope == "recent" else self._events)
+            now = self.clock()
+        if scope == "capture":
+            return events  # Preserve the existing detailed export format.
+        events = [event for event in events if 0 <= now - event["mono"] <= self._recent_seconds]
+        info = {"stage": "export_metadata", "scope": "recent",
+                "rolling_window_seconds": self._recent_seconds,
+                "export_utc_s": time.time(), "events": len(events),
+                "first_mono": events[0]["mono"] if events else None,
+                "last_mono": events[-1]["mono"] if events else None,
+                "coverage_seconds": round(events[-1]["mono"] - events[0]["mono"], 3)
+                if events else 0.0,
+                "note": "UTC timestamps are Pi wall-clock estimates; sync with OBS independently."}
+        return [info, *events]
+
+    def export_jsonl(self, scope: str = "capture") -> str:
+        events = self._export_events(scope)
         return "".join(json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n" for event in events)
 
-    def export_csv(self) -> str:
-        with self._lock:
-            events = list(self._events)
+    def export_csv(self, scope: str = "capture") -> str:
+        events = self._export_events(scope)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(("stage", "mono", "pico_session", "packet_sequence", "pico_timestamp_us",

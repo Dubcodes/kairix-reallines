@@ -191,6 +191,7 @@ export class DotCalibrationUi {
     id('stopVisionCalibration').onclick=()=>this.visionAction('/api/vision-calibration/stop');
     id('saveVisionObs').onclick=()=>this.saveVisionObs();
     id('captureVisionObs').onclick=()=>this.captureVisionObs();
+    id('captureVisionMotion').onclick=()=>this.captureVisionMotion();
     id('teachVisionTarget').onclick=()=>this.teachVisionTarget();
     id('analyseVisionStill').onclick=()=>this.analyseVisionStill();
     id('useVisionCandidate').onclick=()=>this.useVisionCandidate();
@@ -699,6 +700,34 @@ export class DotCalibrationUi {
   async captureVisionObs(){
     try{this.visionStatus('Capturing two camera-only OBS frames and checking settling…');this.showVisionResult(await api('/api/vision-calibration/capture-obs',{method:'POST'}));}
     catch(error){this.visionStatus(String(error),'form-error');}
+  }
+
+  async captureVisionMotion(){
+    const button=this.byId('captureVisionMotion');
+    button.disabled=true;
+    this.visionStatus('Capturing camera-only start frame; move one axis now (3 s)…');
+    try{
+      const result=await api('/api/vision-calibration/capture-motion',{method:'POST'});
+      const fields=[
+        ['Camera-only image',`${result.source_width}×${result.source_height}`],
+        ['Tracked static features',`${result.inlier_features} / ${result.tracked_features} · ${fmt(100*result.inlier_fraction,1)}% agree`],
+        ['Observed background movement',`X ${fmt(result.motion_px.x,2)} px · Y ${fmt(result.motion_px.y,2)} px`],
+        ['Encoder count change',`Pan ${result.count_delta.pan}, Tilt ${result.count_delta.tilt}, Zoom ${result.count_delta.zoom}`],
+        ['Pan theoretical resolution',`${fmt(result.axis_precision.pan.degrees_per_count,5)}°/count · ${fmt(result.axis_precision.pan.centre_pixels_per_count,2)} px/count`],
+        ['Tilt theoretical resolution',`${fmt(result.axis_precision.tilt.degrees_per_count,5)}°/count · ${fmt(result.axis_precision.tilt.centre_pixels_per_count,2)} px/count`],
+        ['Dominant test axis',result.dominant_axis||'None — repeat with one axis'],
+        ['Observed/predicted displacement',result.observed_to_expected_ratio==null?'Not reliable for mixed movement':`${fmt(result.observed_to_expected_ratio,3)}× (not an automatic gear correction)`],
+        ['Feature-motion consistency',`${fmt(result.residual_p95_px,2)} px p95 residual`],
+        ['Warnings',(result.warnings||[]).join(' · ')||'No additional warnings'],
+        ['Calibration effect','NONE — review-only; values not applied'],
+      ];
+      this.byId('visionMotionResult').replaceChildren(...fields.flatMap(([label,value])=>{
+        const left=document.createElement('div'),right=document.createElement('div');
+        left.textContent=label;right.textContent=String(value);return [left,right];
+      }));
+      this.visionStatus('Motion measured · review-only · capture again to compare');
+    }catch(error){this.visionStatus(`Motion test rejected: ${error}`,'form-error');}
+    finally{button.disabled=false;}
   }
 
   showVisionResult(result){

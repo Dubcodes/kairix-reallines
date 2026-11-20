@@ -610,14 +610,19 @@ async def stop_tracking_stability():
 
 
 @app.get("/api/tracking-stability/export")
-async def export_tracking_stability(format: str = "jsonl"):
-    if format == "jsonl":
-        return Response(stability_recorder.export_jsonl(), media_type="application/x-ndjson",
-                        headers={"Content-Disposition": "attachment; filename=tracking-stability.jsonl"})
-    if format == "csv":
-        return Response(stability_recorder.export_csv(), media_type="text/csv",
-                        headers={"Content-Disposition": "attachment; filename=tracking-stability.csv"})
-    raise HTTPException(400, "Tracking stability export format must be jsonl or csv")
+async def export_tracking_stability(format: str = "jsonl", scope: str = "capture"):
+    if scope not in {"capture", "recent"}:
+        raise HTTPException(400, "Tracking stability scope must be capture or recent")
+    if format not in {"jsonl", "csv"}:
+        raise HTTPException(400, "Tracking stability export format must be jsonl or csv")
+    # Exporting up to 10 minutes of diagnostics can be expensive. Never encode
+    # CSV/JSON on Uvicorn's pose publication event loop.
+    exporter = stability_recorder.export_jsonl if format == "jsonl" else stability_recorder.export_csv
+    payload = await asyncio.to_thread(lambda: exporter(scope).encode("utf-8"))
+    media_type = "application/x-ndjson" if format == "jsonl" else "text/csv"
+    suffix = "rolling-10m" if scope == "recent" else "capture"
+    return Response(payload, media_type=media_type,
+                    headers={"Content-Disposition": f"attachment; filename=tracking-stability-{suffix}.{format}"})
 
 
 @app.get("/api/sync")
@@ -927,6 +932,8 @@ def _vision_capture_context() -> dict:
             for axis in ("pan", "tilt", "zoom")
         },
         "camera": snapshot.get("render_camera") or {},
+        "mapping": {axis: dict(((store.profile.get("axes") or {}).get(axis) or {}).get("mapping") or {})
+                    for axis in ("pan", "tilt")},
     }
 
 
@@ -985,6 +992,16 @@ async def analyse_vision_still(file: UploadFile = File(...)):
 async def capture_vision_from_obs():
     try:
         return await vision_calibration.capture_obs_pair(_vision_capture_context)
+    except (VisionCalibrationError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/vision-calibration/capture-motion")
+async def capture_vision_motion():
+    # An explicitly requested camera-only optical-flow test. Does not modify
+    # accepted world calibration, reference identities or gearing.
+    try:
+        return await vision_calibration.capture_obs_motion(_vision_capture_context)
     except (VisionCalibrationError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1254,7 +1271,8 @@ async def debug_toggle(enabled: bool):
 @app.get("/api/diagnostics/bundle")
 async def diagnostic_bundle():
     files = [DATA_DIR / "scene.json", DATA_DIR / "calibration.json", DATA_DIR / "engineering.json", DATA_DIR / "pico_processing.json", DATA_DIR / "measured_targets.json", DATA_DIR / "zoom_lens_profiles.json", DATA_DIR / "sync.json", DATA_DIR / "imu.json", DATA_DIR / "layouts", DATA_DIR / "profiles", DATA_DIR / "world_calibrations"]
-    bundle = debug.create_bundle(files)
+    # Zip compression and SD-card I/O must not stop WebSocket pose publication.
+    bundle = await asyncio.to_thread(debug.create_bundle, files)
     return FileResponse(bundle, filename=bundle.name, media_type="application/zip")
 
 

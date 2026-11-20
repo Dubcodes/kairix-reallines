@@ -13,11 +13,21 @@ export function poseIdentity(state){
   return Number.isFinite(timestamp)?`${timestamp}:${state?.render_camera?.interpolation_status||''}:${state?.render_camera?.valid===true?'valid':'invalid'}`:null;
 }
 
-export function createBrowserMetrics(){return{started:null,lastPose:null,lastFrame:null,lastPoseKey:null,lastIncomingPoseKey:null,poseCount:0,frameCount:0,heldPoses:0,missingPoses:0,stalePoses:0,invalidTrackingFrames:0,duplicatePoseMessages:0,poseIntervals:[],frameIntervals:[],renderDurations:[],poseTimes:[],frameTimes:[],timedPoseIntervals:[],timedFrameIntervals:[],timedRenderDurations:[],canvasWidth:0,canvasHeight:0,dpr:1,lastPublish:0,lastRemotePublish:0,transportMode:'connecting',outputQueueQueued:0,outputQueueCoalesced:0,outputQueueOverflows:0};}
+export function createBrowserMetrics(){return{started:null,lastPose:null,lastFrame:null,lastPoseKey:null,lastIncomingPoseKey:null,poseCount:0,frameCount:0,heldPoses:0,missingPoses:0,stalePoses:0,invalidTrackingFrames:0,duplicatePoseMessages:0,poseIntervals:[],frameIntervals:[],renderDurations:[],poseTimes:[],frameTimes:[],timedPoseIntervals:[],timedFrameIntervals:[],timedRenderDurations:[],canvasWidth:0,canvasHeight:0,dpr:1,lastPublish:0,lastRemotePublish:0,lastServerMono:null,timedServerPoseGaps:[],transportMode:'connecting',outputQueueQueued:0,outputQueueCoalesced:0,outputQueueOverflows:0};}
 const tracker=page=>{if(!trackers.has(page))trackers.set(page,createBrowserMetrics());return trackers.get(page);};
 
-export function noteIncomingPose(metrics,now,poseKey=null,transport=null){
+export function noteIncomingPose(metrics,now,poseKey=null,transport=null,serverMono=null){
   if(metrics.started===null)metrics.started=now;
+  // Compare *intervals* in server monotonic time with intervals observed in
+  // the browser: absolute clocks aren't synchronized and must not be subtracted.
+  const stamp=Number(serverMono);
+  if(serverMono!==null&&Number.isFinite(stamp)){
+    if(metrics.lastServerMono!==null&&stamp>metrics.lastServerMono){
+      const gap=(stamp-metrics.lastServerMono)*1000;
+      timed(metrics.timedServerPoseGaps,now,gap);
+    }
+    if(metrics.lastServerMono===null||stamp>metrics.lastServerMono)metrics.lastServerMono=stamp;
+  }
   if(metrics.lastPose!==null){const interval=now-metrics.lastPose;limited(metrics.poseIntervals,interval);timed(metrics.timedPoseIntervals,now,interval);}
   if(poseKey!==null&&poseKey===metrics.lastIncomingPoseKey)metrics.duplicatePoseMessages+=1;
   metrics.lastIncomingPoseKey=poseKey;metrics.lastPose=now;metrics.poseCount+=1;metrics.poseTimes.push(now);while(metrics.poseTimes.length&&now-metrics.poseTimes[0]>30000)metrics.poseTimes.shift();
@@ -39,7 +49,7 @@ export function noteRenderedFrame(metrics,{now,renderDurationMs,poseKey=null,pos
 export function browserMetricsSummary(metrics,now=metrics.lastFrame??metrics.lastPose??0){
   const elapsed=Math.max(.001,(now-(metrics.started??now))/1000);
   const mean=values=>values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;
-  const frame5=windowValues(metrics.timedFrameIntervals,now,5000),frame30=windowValues(metrics.timedFrameIntervals,now,30000),pose5=windowValues(metrics.timedPoseIntervals,now,5000),render5=windowValues(metrics.timedRenderDurations,now,5000),targetInterval=20;
+  const frame5=windowValues(metrics.timedFrameIntervals,now,5000),frame30=windowValues(metrics.timedFrameIntervals,now,30000),pose5=windowValues(metrics.timedPoseIntervals,now,5000),render5=windowValues(metrics.timedRenderDurations,now,5000),serverPose5=windowValues(metrics.timedServerPoseGaps,now,5000),targetInterval=20;
   return{
     incoming_pose_hz:metrics.poseCount/elapsed,
     incoming_pose_hz_5s:rollingRate(metrics.poseTimes,now,5000),incoming_pose_hz_30s:rollingRate(metrics.poseTimes,now,30000),
@@ -49,6 +59,9 @@ export function browserMetricsSummary(metrics,now=metrics.lastFrame??metrics.las
     frame_interval_mean_ms_5s:mean(frame5),frame_interval_p50_ms_5s:percentile(frame5,.5),frame_interval_p95_ms_5s:percentile(frame5),frame_interval_p99_ms_5s:percentile(frame5,.99),
     missed_frame_deadlines_5s:frame5.reduce((sum,value)=>sum+Math.max(0,Math.floor(value/targetInterval)-1),0),missed_frame_deadlines_30s:frame30.reduce((sum,value)=>sum+Math.max(0,Math.floor(value/targetInterval)-1),0),
     pose_interarrival_p95_ms_5s:percentile(pose5),
+    server_pose_gap_p95_ms_5s:percentile(serverPose5),server_pose_gap_p99_ms_5s:percentile(serverPose5,.99),
+    server_pose_gap_max_ms_5s:serverPose5.length?Math.max(...serverPose5):null,
+    browser_pose_gap_max_ms_5s:pose5.length?Math.max(...pose5):null,
     render_mean_ms:mean(metrics.renderDurations),render_p95_ms:percentile(metrics.renderDurations),
     render_mean_ms_5s:mean(render5),render_p95_ms_5s:percentile(render5),
     held_poses:metrics.heldPoses,missing_poses:metrics.missingPoses,stale_poses:metrics.stalePoses,
@@ -62,9 +75,9 @@ export function browserMetricsSummary(metrics,now=metrics.lastFrame??metrics.las
   };
 }
 
-export function recordIncomingPose(page,poseKey=null,now=performance.now(),transport=null){
+export function recordIncomingPose(page,poseKey=null,now=performance.now(),transport=null,serverMono=null){
   if(!SUPPORTED_DIAGNOSTIC_PAGES.has(page))return;
-  const metrics=tracker(page);noteIncomingPose(metrics,now,poseKey,transport);publish(page,metrics,now);
+  const metrics=tracker(page);noteIncomingPose(metrics,now,poseKey,transport,serverMono);publish(page,metrics,now);
 }
 
 export function recordRenderedFrame(page,values){

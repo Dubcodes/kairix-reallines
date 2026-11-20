@@ -31,7 +31,7 @@ export function connectState(onState, page='unknown', onStatus=()=>{}) {
   };
   const deliver = (data, type='state') => {
     currentState = data;
-    if(type!=='calibration_overlay')recordIncomingPose(page,poseIdentity(data),performance.now(),data?.transport||null);
+    if(type!=='calibration_overlay')recordIncomingPose(page,poseIdentity(data),performance.now(),data?.transport||null,type==='pose'?data?.server_mono:null);
     try {
       onState(data, {type});
       return true;

@@ -261,6 +261,59 @@ class VisionCalibrationService:
         self.completed.appendleft(deepcopy(detection))
         return detection
 
+    async def capture_obs_motion(self, context_provider, *, interval_seconds: float = 3.0) -> dict[str, Any]:
+        """Measure actual camera-only optical flow against two encoder samples.
+
+        For the operator: point at stationary distant landmarks, start the test,
+        then turn only Pan OR Tilt during the next three seconds. OBS screenshots
+        must contain *camera video only* rather than the composite output.
+        All results are review-only and never change a live calibration.
+        """
+        from .vision_motion import VisionMotionAnalyzer, VisionMotionError
+        if not self.active:
+            raise VisionCalibrationError('Start Vision Calibration before measuring motion')
+        if self._gate.locked():
+            raise VisionCalibrationError('Vision worker is busy')
+        config = self._read_json(self.secret_path, {})
+        if not config.get('source') or not config.get('host'):
+            raise VisionCalibrationError('Configure the camera-only OBS screenshot source first')
+        if not .01 <= float(interval_seconds) <= 10:
+            raise VisionCalibrationError('Invalid movement capture interval')
+        async with self._gate:
+            self.processing = True
+            try:
+                before_image = await self.obs_client.screenshot(
+                    config['host'], int(config.get('port', 4455)),
+                    config.get('password', ''), config['source'])
+                before_context = deepcopy(context_provider())
+                await asyncio.sleep(float(interval_seconds))
+                after_image = await self.obs_client.screenshot(
+                    config['host'], int(config.get('port', 4455)),
+                    config.get('password', ''), config['source'])
+                after_context = deepcopy(context_provider())
+                if not self.active:
+                    raise VisionCalibrationError('Motion test was stopped during capture')
+                try:
+                    result = await asyncio.to_thread(
+                        VisionMotionAnalyzer().analyse, before_image, after_image,
+                        before_context, after_context)
+                except VisionMotionError as exc:
+                    raise VisionCalibrationError(str(exc)) from exc
+                result.update({'capture_interval_seconds': float(interval_seconds),
+                               'captured_mono_start': before_context.get('captured_mono'),
+                               'captured_mono_end': after_context.get('captured_mono'),
+                               'source': 'obs_camera_only', 'id': str(uuid.uuid4())})
+                # Only compact interpretation is retained; screenshot bytes and
+                # OBS password are not included in results or persisted to disk.
+                self.completed.appendleft({'id': result['id'], 'source': 'obs_motion',
+                                           'review_only': True,
+                                           'dominant_axis': result['dominant_axis'],
+                                           'count_delta': result['count_delta'],
+                                           'motion_px': result['motion_px']})
+                return result
+            finally:
+                self.processing = False
+
     async def capture_obs_pair(self, context_provider) -> dict[str, Any]:
         if not self.active:
             raise VisionCalibrationError("Start Vision Calibration before capturing")

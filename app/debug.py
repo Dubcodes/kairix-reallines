@@ -174,7 +174,7 @@ class DebugRecorder:
 
     def create_bundle(self, extra_files: list[Path]) -> Path:
         self.flush()
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         bundle = self.data_dir / f"Kairix-RealLines-Diagnostics-{stamp}.zip"
         with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
             if self.session_dir.exists():

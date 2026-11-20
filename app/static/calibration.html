@@ -75,6 +75,11 @@
     <label>OBS WebSocket password<input id="visionObsPassword" type="password" autocomplete="new-password"></label>
   </div>
   <div class="row"><button id="saveVisionObs" type="button">Save OBS connection</button><button id="captureVisionObs" type="button">Capture stable OBS pair</button></div>
+  <div class="dot-quality"><h3>Measure encoder resolution against camera image</h3>
+    <p class="small">Off-air test only: select a <strong>live camera-only OBS source</strong> (not an old race recording, GFX composite, or program output), aim at stationary distant detail, reference all three encoders, then press Measure. Move <strong>only Pan or Tilt</strong> during the following 3 seconds; leave Zoom fixed. The result compares subpixel image motion with the current encoder/count/FOV model and never applies a correction.</p>
+    <div class="row"><button id="captureVisionMotion" type="button">Measure Pan/Tilt movement (3 seconds)</button></div>
+    <div id="visionMotionResult" class="kv" aria-live="polite"></div>
+  </div>
   <label>Offline/manual camera still<input id="visionStillFile" type="file" accept="image/png,image/jpeg"></label>
   <div class="row"><button id="teachVisionTarget" type="button">Teach from current gold markers</button><button id="analyseVisionStill" type="button">Detect in imported still</button><button id="useVisionCandidate" type="button" disabled>Review detected markers</button></div>
   <div id="visionDetectionResult" class="kv"></div>
